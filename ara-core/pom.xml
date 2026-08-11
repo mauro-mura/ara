@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <parent>
+        <groupId>io.github.xmor</groupId>
+        <artifactId>ara</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>ara-core</artifactId>
+    <name>ARA Core</name>
+    <!-- Declared explicitly rather than inherited: Maven would otherwise append the
+         artifactId to the parent url. See the note on <url> in the root pom. -->
+    <url>https://github.com/xmor/ara</url>
+    <description>
+        Interface-first contracts of the ARA framework: agents, tasks and responses, tool
+        and LLM abstractions, memory and knowledge-base contracts, the message bus, and the
+        deterministic I/O records they exchange. Depends on nothing but Jackson, and carries
+        no runtime implementation — implement against this module to stay decoupled from
+        ara-runtime and from any specific LLM provider.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Automatic-Module-Name>io.ara.core</Automatic-Module-Name>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

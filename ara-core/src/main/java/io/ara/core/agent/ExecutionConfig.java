@@ -1,0 +1,103 @@
+package io.ara.core.agent;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * Execution sub-record of {@link AgentConfig}: how the agent executes a task.
+ *
+ * <p>I/O contracts ({@code InputProcessor}/{@code OutputProcessor} chains) are
+ * orthogonal to this configuration — pass an explicit {@link AgentContract} to
+ * {@code AgentFactory.create(config, contract)} instead of describing them here.
+ */
+public record ExecutionConfig(
+        String                    plannerStrategy,
+        StrategyConfig            strategyConfig,
+        List<String>              enabledTools,
+        List<String>              mcpServerIds,
+        int                       maxIterations,
+        Duration                  executionTimeout,
+        int                       maxTokensPerStep,
+        boolean                   humanApprovalRequired,
+        String                    knowledgeBaseId,
+        SessionBusyPolicy         sessionBusyPolicy,
+        String                    retrieverId,
+        DelegateStateAccess       delegateStateAccess,
+        Duration                  sessionTtl
+) {
+    /** Idle time after which an unused session is reclaimed, when none is configured. */
+    public static final Duration DEFAULT_SESSION_TTL = Duration.ofMinutes(30);
+
+    public ExecutionConfig {
+        plannerStrategy  = Objects.requireNonNullElse(plannerStrategy, "react");
+        enabledTools     = List.copyOf(Objects.requireNonNullElse(enabledTools,     List.of()));
+        mcpServerIds     = List.copyOf(Objects.requireNonNullElse(mcpServerIds,     List.of()));
+        sessionBusyPolicy = Objects.requireNonNullElse(sessionBusyPolicy, SessionBusyPolicy.REJECT);
+        delegateStateAccess = Objects.requireNonNullElse(delegateStateAccess, DelegateStateAccess.OVERLAY);
+        sessionTtl       = Objects.requireNonNullElse(sessionTtl, DEFAULT_SESSION_TTL);
+        Objects.requireNonNull(executionTimeout, "executionTimeout must not be null");
+        if (maxIterations < 1)   throw new IllegalArgumentException("maxIterations must be >= 1");
+        if (maxTokensPerStep < 1) throw new IllegalArgumentException("maxTokensPerStep must be >= 1");
+        if (executionTimeout.isNegative() || executionTimeout.isZero())
+            throw new IllegalArgumentException("executionTimeout must be positive");
+        if (sessionTtl.isNegative() || sessionTtl.isZero())
+            throw new IllegalArgumentException("sessionTtl must be positive");
+        if (retrieverId != null && !retrieverId.isBlank() && !plannerStrategy.startsWith("rag+")) {
+            throw new IllegalArgumentException(
+                    "retrieverId('" + retrieverId + "') is set but plannerStrategy('" + plannerStrategy
+                    + "') is not a RAG-augmented strategy (expected a name starting with 'rag+', "
+                    + "e.g. 'rag+react'). Either clear retrieverId or select a rag+... strategy.");
+        }
+    }
+
+    /** Backward-compatible constructor — {@code sessionBusyPolicy} defaults to {@link SessionBusyPolicy#REJECT}. */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                SessionBusyPolicy.REJECT, null, DelegateStateAccess.OVERLAY, DEFAULT_SESSION_TTL);
+    }
+
+    /** Backward-compatible constructor — {@code retrieverId} defaults to {@code null} (no RAG retriever selected). */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId,
+            SessionBusyPolicy sessionBusyPolicy) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                sessionBusyPolicy, null, DelegateStateAccess.OVERLAY, DEFAULT_SESSION_TTL);
+    }
+
+    /** Backward-compatible constructor — {@code delegateStateAccess} defaults to {@link DelegateStateAccess#OVERLAY}. */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId,
+            SessionBusyPolicy sessionBusyPolicy, String retrieverId) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                sessionBusyPolicy, retrieverId, DelegateStateAccess.OVERLAY, DEFAULT_SESSION_TTL);
+    }
+
+    /** Backward-compatible constructor — {@code sessionTtl} defaults to {@link #DEFAULT_SESSION_TTL}. */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId,
+            SessionBusyPolicy sessionBusyPolicy, String retrieverId,
+            DelegateStateAccess delegateStateAccess) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                sessionBusyPolicy, retrieverId, delegateStateAccess, DEFAULT_SESSION_TTL);
+    }
+
+    public static ExecutionConfig defaults() {
+        return new ExecutionConfig("react", null, List.of(), List.of(),
+                10, Duration.ofMinutes(5), 4096, false, null, SessionBusyPolicy.REJECT, null,
+                DelegateStateAccess.OVERLAY, DEFAULT_SESSION_TTL);
+    }
+}

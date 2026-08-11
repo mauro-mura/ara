@@ -1,0 +1,204 @@
+package io.ara.runtime.bus;
+
+import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.SessionId;
+import io.ara.core.bus.AgentMessage;
+import io.ara.core.bus.MessageBus;
+import io.ara.core.common.AgentId;
+import io.ara.core.telemetry.AraTelemetry;
+import io.ara.runtime.agent.AgentRegistry;
+import io.ara.runtime.agent.SessionScoped;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * In-process {@link MessageBus} implementation for single-node deployments.
+ *
+ * <h3>Routing</h3>
+ * <p>All routing goes through {@link AgentRegistry}. A message to agent {@code B}
+ * results in a direct call to {@code B.execute(AgentTask)} — no serialisation,
+ * no network hop. The {@code correlationId} carried by the {@link AgentMessage}
+ * is forwarded into the {@link AgentTask} so the full delegation chain is visible
+ * in logs.
+ *
+ * <h3>Threading</h3>
+ * <ul>
+ *   <li>{@link #send} dispatches the execution on a new virtual thread and
+ *       returns immediately to the caller.</li>
+ *   <li>{@link #request} runs the execution on a virtual thread via
+ *       {@link CompletableFuture} and blocks the calling thread until the reply
+ *       arrives or the timeout expires. Because the calling thread is itself
+ *       a virtual thread (inside a ReAct tool call), this blocking is cheap.</li>
+ * </ul>
+ *
+ * <p>Both dispatch points wrap the spawned work with {@link AraTelemetry#propagate}
+ * so a delegated agent's spans still nest under the caller's — tracing context is
+ * thread-local and does not otherwise survive the hop onto the new virtual thread.
+ *
+ * <h3>Cycles</h3>
+ * <p>Cyclic delegations (A → B → A) will deadlock if agent A is still in
+ * {@code EXECUTING} state when the cycle closes, because {@code execute()} throws
+ * {@code IllegalStateException} on a non-IDLE agent.  The deadlock is therefore
+ * surfaced immediately as an error rather than silently hanging.
+ */
+public final class LocalMessageBus implements MessageBus {
+
+    private static final Logger log = LoggerFactory.getLogger(LocalMessageBus.class);
+
+    private final AgentRegistry registry;
+    private final AraTelemetry  telemetry;
+
+    public LocalMessageBus(AgentRegistry registry) {
+        this(registry, AraTelemetry.noop());
+    }
+
+    public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry) {
+        this.registry  = Objects.requireNonNull(registry,  "registry must not be null");
+        this.telemetry = Objects.requireNonNull(telemetry, "telemetry must not be null");
+    }
+
+    // ── MessageBus ────────────────────────────────────────────────────────────
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Delivery failures (recipient not found, recipient busy) are logged at
+     * WARN level and do not propagate to the caller.
+     */
+    @Override
+    public void send(AgentMessage message) {
+        Objects.requireNonNull(message, "message must not be null");
+        Thread.ofVirtual().start(telemetry.propagate(() -> {
+            try {
+                deliverAndDiscard(message);
+            } catch (Exception e) {
+                log.warn("[Bus] Fire-and-forget delivery failed: msg={} to={} reason={}",
+                        message.messageId(), message.recipientId(), e.getMessage());
+            }
+        }));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Executes on a virtual thread and parks the caller until the reply
+     * is ready or the timeout expires.
+     */
+    @Override
+    public AgentMessage request(AgentMessage message, Duration timeout) {
+        Objects.requireNonNull(message, "message must not be null");
+        Objects.requireNonNull(timeout, "timeout must not be null");
+
+        AraAgent recipient = resolve(message.recipientId());
+
+        log.debug("[Bus] Request from={} to={} correlation={}",
+                message.senderId(), message.recipientId(), message.correlationId());
+
+        // A request() caller may give up on this call (timeout or its own interruption)
+        // before the recipient finishes — see the catch blocks below, which need a
+        // SessionId to actually stop it. message.sessionId() is only set when the
+        // delegating caller itself runs inside a real session; fall back to a fresh
+        // ephemeral one here so cancellation always has a target, not just delegations
+        // that happen to carry a named session.
+        SessionId sessionId = message.sessionId() != null ? message.sessionId() : SessionId.ephemeral();
+        AgentTask task = toTask(message, sessionId);
+
+        CompletableFuture<AgentResponse> future = CompletableFuture.supplyAsync(
+                () -> recipient.execute(task),
+                r -> Thread.ofVirtual().start(telemetry.propagate(r))
+        );
+
+        AgentResponse response;
+        try {
+            response = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            // future.cancel(true) alone does nothing here: CompletableFuture.cancel()'s
+            // mayInterruptIfRunning has no effect for a task submitted via supplyAsync —
+            // the JDK does not use interrupts to control it (this is documented behavior,
+            // not an oversight). Without an explicit terminate() call the recipient kept
+            // running to completion (or its own executionTimeout, up to several more
+            // minutes) with nobody left waiting on the result — spending tokens and
+            // holding its session for a caller that already gave up.
+            future.cancel(true);
+            terminateIfScoped(recipient, sessionId);
+            throw new RuntimeException(
+                    "Request to agent [%s] timed out after %s (correlation=%s)"
+                            .formatted(message.recipientId(), timeout, message.correlationId()), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            // Same reasoning as the timeout branch: whatever interrupted us — e.g. our own
+            // caller's session being terminated — should cascade to the delegate instead
+            // of leaving it running unobserved.
+            future.cancel(true);
+            terminateIfScoped(recipient, sessionId);
+            throw new RuntimeException("Request interrupted", e);
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            throw new RuntimeException(
+                    "Request to agent [%s] failed: %s".formatted(message.recipientId(), cause.getMessage()),
+                    cause);
+        }
+
+        log.debug("[Bus] Reply from={} correlation={} success={}",
+                message.recipientId(), message.correlationId(), response.isSuccess());
+
+        return AgentMessage.reply(message, message.recipientId(), response.content());
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    private void deliverAndDiscard(AgentMessage message) {
+        AraAgent recipient = resolve(message.recipientId());
+        // Fire-and-forget: nobody waits on this call, so there is nothing to cancel and
+        // no need to force a SessionId — message.sessionId() (possibly null) is enough.
+        AgentTask task = toTask(message, message.sessionId());
+        AgentResponse response = recipient.execute(task);
+        log.debug("[Bus] Fire-and-forget delivered: to={} success={}",
+                message.recipientId(), response.isSuccess());
+    }
+
+    /**
+     * @param sessionId the session the recipient runs under — pass {@code
+     *                   message.sessionId()} directly when there is nothing to cancel
+     *                   ({@link #deliverAndDiscard}), or a guaranteed non-null id when the
+     *                   caller needs to be able to target this execution later ({@link
+     *                   #request}).
+     */
+    private static AgentTask toTask(AgentMessage message, SessionId sessionId) {
+        // Seed the recipient's task with the caller's RunContext by reference (ADR-041
+        // rev. 2) — not rebuilt from copied maps — so a delegated sub-task runs with the
+        // same flow state and authorization as its caller instead of starting empty.
+        return AgentTask.of(message.content(), java.util.Map.of(), message.correlationId(), message.senderId())
+                .withRunContext(message.runContext())
+                .withSessionId(sessionId);
+    }
+
+    /**
+     * Cancels {@code sessionId} on {@code recipient} if it manages per-session lifecycle
+     * at all — a recipient with no session concept (e.g. {@code GraphAgent}) simply
+     * doesn't implement {@link SessionScoped}, and there is nothing to cancel on it.
+     */
+    private static void terminateIfScoped(AraAgent recipient, SessionId sessionId) {
+        if (recipient instanceof SessionScoped scoped) {
+            scoped.terminate(sessionId);
+        }
+    }
+
+    private AraAgent resolve(String recipientId) {
+        Optional<AraAgent> found = registry.findById(AgentId.of(recipientId));
+        if (found.isEmpty()) {
+            throw new NoSuchElementException("Agent [" + recipientId + "] is not registered on this node");
+        }
+        return found.get();
+    }
+}

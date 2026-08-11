@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.xmor</groupId>
+    <artifactId>ara</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>ara-adapters</artifactId>
+  <name>ARA Adapters</name>
+  <description>LangChain4j LlmClient adapters, MCP client adapter, and OTel telemetry for ARA</description>
+  <!-- Declared explicitly rather than inherited: Maven would otherwise append the
+       artifactId to the parent url. See the note on <url> in the root pom. -->
+  <url>https://github.com/xmor/ara</url>
+
+  <properties>
+    <mcp.sdk.version>1.0.0</mcp.sdk.version>
+    <!-- OTel — optional; pull in only when telemetry is needed -->
+    <opentelemetry.version>1.51.0</opentelemetry.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>dev.langchain4j</groupId>
+        <artifactId>langchain4j-bom</artifactId>
+        <version>1.17.0</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+
+    <!-- ARA Core — LlmClient contract -->
+    <dependency>
+      <groupId>io.github.xmor</groupId>
+      <artifactId>ara-core</artifactId>
+    </dependency>
+
+    <!-- Used directly by ToolConversionUtils and the MCP adapters -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <!-- LangChain4j core -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-core</artifactId>
+    </dependency>
+
+    <!-- Provider: OpenAI -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-open-ai</artifactId>
+    </dependency>
+
+    <!-- Provider: Anthropic -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-anthropic</artifactId>
+    </dependency>
+
+    <!-- Provider: Ollama -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-ollama</artifactId>
+    </dependency>
+
+    <!-- MCP SDK
+         Older Jackson transitives excluded so LangChain4j's versions win:
+           - jackson-annotations:2.20 from mcp-core (vs 2.21 from LC4j)
+           - jackson-core:2.18.3 via json-schema-validator → jackson-dataformat-yaml (vs 2.21.3) -->
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp</artifactId>
+      <version>${mcp.sdk.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>io.modelcontextprotocol.sdk</groupId>
+          <artifactId>mcp-json-jackson3</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-annotations</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson2</artifactId>
+      <version>${mcp.sdk.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>com.fasterxml.jackson.dataformat</groupId>
+          <artifactId>jackson-dataformat-yaml</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-core</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- OpenTelemetry API + SDK (optional — bring your own when activating tracing) -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-api</artifactId>
+      <version>${opentelemetry.version}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk</artifactId>
+      <version>${opentelemetry.version}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-exporter-otlp</artifactId>
+      <version>${opentelemetry.version}</version>
+      <optional>true</optional>
+    </dependency>
+
+    <!-- OTel in-memory exporter — test-only, lets tests assert on real SDK-exported
+         spans (attributes, status, parent/child linkage) instead of a hand-rolled fake -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk-testing</artifactId>
+      <version>${opentelemetry.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.ara.adapters</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

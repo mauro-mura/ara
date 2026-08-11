@@ -1,0 +1,233 @@
+package io.ara.core.agent;
+
+import io.ara.core.llm.LlmExecutionHints;
+
+import java.time.Instant;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Consumer;
+
+/**
+ * Represents a task submitted to an {@link AraAgent} for execution.
+ *
+ * <p>A task carries the user's input and an optional {@code correlationId} that links
+ * this task to a broader workflow or multi-agent chain. Flow state — prompt variables
+ * and opaque objects such as a {@code SecurityContext} — lives in {@link #runContext}
+ * (ADR-041 rev. 2), a single value shared by reference across a delegation chain
+ * instead of being copied at every hop.
+ *
+ * <p>For streaming executions (when {@link AgentConfig#streamingEnabled()} is
+ * {@code true}), a {@link #tokenCallback} can be attached to receive each token
+ * as the LLM emits it. The gateway uses this to push SSE events to the client.
+ * {@code null} means no streaming callback is registered.
+ *
+ * <p>{@link #toolCallCallback}, when set, is invoked with the tool id each time
+ * a tool is about to be dispatched. The gateway emits this as a {@code tool_call}
+ * SSE event so the UI can highlight the active tool edge in real time.
+ *
+ * <p>{@link #speakCallback}, when set, is invoked with the message text each time
+ * {@code ReSpActStrategy} emits a {@link StepType#SPEAK} step — a conversational
+ * utterance directed at the user that does not end the task the way a final answer
+ * does. The gateway can emit this as a {@code speak} SSE event, distinct from both
+ * the token stream (partial text of the eventual answer) and the tool-call event
+ * (an environment action, not a user-facing utterance).
+ *
+ * @param taskId           unique identifier for this task; normally assigned by {@link #of},
+ *                         but callers that must correlate the task with externally-keyed
+ *                         state can override it via {@link #withTaskId}
+ * @param input            the raw natural-language or structured input from the caller
+ * @param runContext       flow state of the current request — prompt variables and
+ *                         opaque objects, shared by reference across delegation (ADR-041)
+ * @param correlationId    optional identifier linking this task to a larger workflow
+ * @param requestedBy      identity of the caller (operator id, upstream agent id, etc.)
+ * @param createdAt        wall-clock timestamp of task creation
+ * @param tokenCallback    optional callback invoked with each streamed token; {@code null}
+ *                         when streaming is not requested
+ * @param toolCallCallback optional callback invoked with the tool id just before dispatch
+ * @param hints            optional per-call LLM execution hints (ADR-017)
+ * @param sessionId        optional session identifier; {@code null} means ephemeral
+ * @param userId           optional user identifier (ADR-043 rev. 3); {@code null} means
+ *                         no cross-session memory for this task — see {@link
+ *                         RunContext#userMemory()}
+ * @param speakCallback    optional callback invoked with each ReSpAct "speak" message;
+ *                         {@code null} when the caller does not want real-time delivery
+ *                         of speak steps (they remain visible in {@code
+ *                         AgentResponse.steps()} regardless)
+ */
+public record AgentTask(
+        String taskId,
+        String input,
+        RunContext runContext,
+        String correlationId,
+        String requestedBy,
+        Instant createdAt,
+        Consumer<String> tokenCallback,
+        Consumer<String> toolCallCallback,
+        LlmExecutionHints hints,
+        SessionId sessionId,
+        UserId userId,
+        Consumer<String> speakCallback
+) {
+
+    public AgentTask {
+        Objects.requireNonNull(taskId, "taskId must not be null");
+        Objects.requireNonNull(input, "input must not be null");
+        if (input.isBlank()) {
+            throw new IllegalArgumentException("AgentTask input must not be blank");
+        }
+        Objects.requireNonNull(createdAt, "createdAt must not be null");
+        runContext = Objects.requireNonNullElseGet(runContext, RunContext::empty);
+    }
+
+    public static AgentTask of(String input) {
+        return new AgentTask(
+                UUID.randomUUID().toString(),
+                input,
+                RunContext.empty(),
+                null,
+                "system",
+                Instant.now(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    /** Creates a task whose {@link RunContext} carries {@code promptVars} and no opaque values. */
+    public static AgentTask of(String input, Map<String, String> promptVars) {
+        return new AgentTask(
+                UUID.randomUUID().toString(),
+                input,
+                new RunContext(promptVars, Map.of(), RunState.noop()),
+                null,
+                "system",
+                Instant.now(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    /** Creates a task whose {@link RunContext} carries {@code promptVars} and no opaque values. */
+    public static AgentTask of(String input, Map<String, String> promptVars,
+                               String correlationId, String requestedBy) {
+        return new AgentTask(
+                UUID.randomUUID().toString(),
+                input,
+                new RunContext(promptVars, Map.of(), RunState.noop()),
+                correlationId,
+                requestedBy,
+                Instant.now(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    public static AgentTask ofStreaming(String input, Consumer<String> tokenCallback) {
+        Objects.requireNonNull(tokenCallback, "tokenCallback must not be null");
+        return new AgentTask(
+                UUID.randomUUID().toString(),
+                input,
+                RunContext.empty(),
+                null,
+                "system",
+                Instant.now(),
+                tokenCallback,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    /** Returns a copy of this task with the given {@link RunContext}. */
+    public AgentTask withRunContext(RunContext newRunContext) {
+        return new AgentTask(taskId, input, newRunContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+    }
+
+    /** Returns a copy of this task with an additional prompt variable merged into its {@link RunContext}. */
+    public AgentTask withContextEntry(String key, String value) {
+        return withRunContext(runContext.withPromptVar(key, value));
+    }
+
+    /** Returns a copy of this task with {@code input} replaced by {@code newInput}. */
+    public AgentTask withInput(String newInput) {
+        Objects.requireNonNull(newInput, "newInput must not be null");
+        return new AgentTask(taskId, newInput, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+    }
+
+    /** Returns a copy with the given execution hints. */
+    public AgentTask withHints(LlmExecutionHints h) {
+        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, h, sessionId, userId, speakCallback);
+    }
+
+    /** Returns a copy with an output schema hint (convenience for schema-only hints). */
+    public AgentTask withOutputSchema(String schema, boolean strict) {
+        LlmExecutionHints base = hints != null ? hints : LlmExecutionHints.empty();
+        return withHints(base.withOutputSchema(schema, null, strict));
+    }
+
+    /**
+     * Returns a copy of this task with {@code taskId} replaced by {@code newTaskId} — the
+     * only {@code with*} that overrides an identifier normally assigned once by {@link #of}
+     * and never touched again. Needed when a caller must correlate this task with external
+     * state keyed by an id it chooses itself (e.g. an eval harness arming a per-task
+     * transcript capture before the task exists), rather than the random id {@link #of}
+     * would otherwise generate.
+     */
+    public AgentTask withTaskId(String newTaskId) {
+        Objects.requireNonNull(newTaskId, "newTaskId must not be null");
+        return new AgentTask(newTaskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+    }
+
+    /** Returns a copy with the given session identifier. */
+    public AgentTask withSessionId(SessionId sid) {
+        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sid, userId, speakCallback);
+    }
+
+    /** Returns a copy with the given user identifier (ADR-043 rev. 3). */
+    public AgentTask withUserId(UserId uid) {
+        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, uid, speakCallback);
+    }
+
+    /** Returns a copy with the given tool-call callback. */
+    public AgentTask withToolCallCallback(Consumer<String> callback) {
+        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, callback, hints, sessionId, userId, speakCallback);
+    }
+
+    /** Returns a copy with the given ReSpAct speak callback (see {@link #speakCallback}). */
+    public AgentTask withSpeakCallback(Consumer<String> callback) {
+        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, callback);
+    }
+
+    /**
+     * Returns a copy of this task with an opaque value added or replaced under {@code key}
+     * in its {@link RunContext}. {@code value == null} removes the key instead of
+     * inserting a null value (ADR-037/ADR-041).
+     */
+    public AgentTask withAttachment(String key, Object value) {
+        return withRunContext(runContext.withOpaque(key, value));
+    }
+
+    /** Notifies the tool-call callback, if set. No-op when null. */
+    public void notifyToolCall(String toolId) {
+        if (toolCallCallback != null) toolCallCallback.accept(toolId);
+    }
+
+    /** Notifies the ReSpAct speak callback, if set. No-op when null. */
+    public void notifySpeak(String message) {
+        if (speakCallback != null) speakCallback.accept(message);
+    }
+}

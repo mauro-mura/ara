@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.xmor</groupId>
+    <artifactId>ara</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>ara-runtime</artifactId>
+  <name>ARA Runtime</name>
+  <!-- Declared explicitly rather than inherited: Maven would otherwise append the
+       artifactId to the parent url. See the note on <url> in the root pom. -->
+  <url>https://github.com/xmor/ara</url>
+  <description>
+      Reference implementation of the ara-core contracts: the AraRuntime entry point, agent
+      factory and registry, reasoning strategies (ReAct, ReflAct, ReSpAct, retrieval-augmented),
+      sliding-window memory, the in-process message bus with agent delegation, and the
+      scheduler. Runs fully offline with a scripted LLM client; add ara-adapters to reach a
+      real provider.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.xmor</groupId>
+      <artifactId>ara-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.ara.runtime</Automatic-Module-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+
+    </plugins>
+  </build>
+
+</project>

@@ -1,0 +1,81 @@
+package io.ara.adapters.llm;
+
+import io.ara.adapters.llm.anthropic.AnthropicLlmClient;
+import io.ara.adapters.llm.ollama.OllamaLlmClient;
+import io.ara.adapters.llm.openai.OpenAiLlmClient;
+import io.ara.core.llm.LlmClient;
+
+/**
+ * Factory that provides builder access for all ARA-supported LLM adapters.
+ *
+ * <p>Each method returns the adapter's fluent {@link io.ara.core.llm.LlmClient.Builder}
+ * so that clients can be configured and built in a single expression and wired directly into
+ * {@link io.ara.runtime.AraRuntime}:
+ *
+ * <pre>{@code
+ * LlmClient gpt4o = AraLlmClientFactory.openAi()
+ *     .apiKey(System.getenv("OPENAI_API_KEY"))
+ *     .model(OpenAiLlmClient.Models.GPT_4O)
+ *     .build();
+ *
+ * LlmClient claude = AraLlmClientFactory.anthropic()
+ *     .apiKey(System.getenv("ANTHROPIC_API_KEY"))
+ *     .model(AnthropicLlmClient.Models.CLAUDE_SONNET_4_6)
+ *     .build();
+ *
+ * LlmClient llama = AraLlmClientFactory.ollama()
+ *     .model(OllamaLlmClient.Models.LLAMA_3_2)
+ *     .build();
+ *
+ * AraRuntime runtime = AraRuntime.builder()
+ *     .llmClient("gpt-4o",  gpt4o)
+ *     .llmClient("claude",  claude)
+ *     .llmClient("local",   llama)
+ *     .build();
+ * }</pre>
+ *
+ * <p>For OpenAI-compatible endpoints (Azure OpenAI, Groq, LM Studio, Together AI, …)
+ * use {@link #openAi()} and call {@code .baseUrl(String)} on the returned builder.
+ *
+ * @see OpenAiLlmClient
+ * @see AnthropicLlmClient
+ * @see OllamaLlmClient
+ * @see LlmClient
+ */
+public final class AraLlmClientFactory {
+
+    private AraLlmClientFactory() {}
+
+    /**
+     * Returns a builder for an OpenAI (or OpenAI-compatible) {@link LlmClient}.
+     *
+     * @return {@link OpenAiLlmClient.Builder}
+     * @see OpenAiLlmClient.Models
+     */
+    public static OpenAiLlmClient.Builder openAi() {
+        return OpenAiLlmClient.builder();
+    }
+
+    /**
+     * Returns a builder for an Anthropic Claude {@link LlmClient}.
+     *
+     * @return {@link AnthropicLlmClient.Builder}
+     * @see AnthropicLlmClient.Models
+     */
+    public static AnthropicLlmClient.Builder anthropic() {
+        return AnthropicLlmClient.builder();
+    }
+
+    /**
+     * Returns a builder for a local Ollama {@link LlmClient}.
+     *
+     * <p>Defaults to {@code http://localhost:11434} — override with
+     * {@link OllamaLlmClient.Builder#baseUrl(String)} for remote instances.
+     *
+     * @return {@link OllamaLlmClient.Builder}
+     * @see OllamaLlmClient.Models
+     */
+    public static OllamaLlmClient.Builder ollama() {
+        return OllamaLlmClient.builder();
+    }
+}
