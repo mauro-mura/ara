@@ -28,8 +28,7 @@ no framework lock-in.
 - [Tool calling](#tool-calling)
 - [AgentContract — deterministic I/O](#agentcontract--deterministic-io)
 - [PromptShaper — dynamic system prompt](#promptshaper--dynamic-system-prompt)
-- [Multi-agent pipeline](#multi-agent-pipeline)
-<!-- - [Agent graph](#agent-graph--parallel-branches-and-feedback-loops) -->
+- [Multi-agent pipeline](#multi-agent-pipeline) <!-- - [Agent graph](#agent-graph--parallel-branches-and-feedback-loops) -->
 - [Execution strategies](#execution-strategies)
 - [AgentConfig — configurable agent values](#agentconfig--configurable-agent-values)
 - [Sessions & concurrency](#sessions--concurrency)
