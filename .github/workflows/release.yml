@@ -1,0 +1,77 @@
+name: Release to Maven Central
+
+# Fires on an annotated release tag (v1.0.0), or manually from the Actions tab when a
+# tag already exists and a previous run needs repeating.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build, sign and upload
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up JDK 21 and Maven credentials
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          # Writes a settings.xml whose <server id="central"> reads these env vars —
+          # the id must match <publishingServerId> in the root pom.
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      # Maven Central rejects a version that is already published, and the rejection
+      # arrives only after the whole build and upload. Catching a tag/pom mismatch here
+      # costs seconds instead of a failed release.
+      - name: Verify the tag matches the project version
+        run: |
+          POM_VERSION="$(mvn -B -q help:evaluate -Dexpression=project.version -DforceStdout)"
+          TAG_NAME="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG_VERSION="${TAG_NAME#v}"
+          echo "pom version: $POM_VERSION"
+          echo "tag version: $TAG_VERSION"
+          if [ "$POM_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $TAG_NAME implies version $TAG_VERSION but the pom declares $POM_VERSION."
+            exit 1
+          fi
+          case "$POM_VERSION" in
+            *-SNAPSHOT) echo "::error::Refusing to release a SNAPSHOT version."; exit 1 ;;
+          esac
+
+      # Runs the full test suite before anything is uploaded: a release to Central is
+      # permanent, so a red build must stop it rather than be discovered afterwards.
+      - name: Build and test
+        run: mvn -B verify
+
+      - name: Publish to Maven Central
+        run: mvn -B -Prelease -DskipTests deploy
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+
+      - name: Where to go next
+        run: |
+          echo "Bundle uploaded. autoPublish is false in the root pom, so the deployment"
+          echo "is waiting as a draft at https://central.sonatype.com/publishing/deployments"
+          echo "Review it there and press Publish to make the release permanent."
