@@ -719,40 +719,7 @@ Elapsed        : 1417ms
 
 ---
 
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  ara-core — Interfaces & Domain Model                      │
-│                                                            │
-│  AraAgent · AgentConfig · AgentContract · AgentTask        │
-│  LlmClient · LlmException · LlmCallContext · LlmCompletion │
-│  MemoryManager · ToolRegistry · AraTool · ToolResult       │
-│  ExecutionStrategy · AgentLifecycleManager                 │
-│  InputProcessor · OutputProcessor · PromptShaper           │
-└────────────────────────────────────────────────────────────┘
-     ▲                ▲                ▲               ▲
-     │                │                │               │
-┌────────────────┐ ┌──────────────┐ ┌─────────────┐ ┌──────────────────────┐
-│  ara-runtime   │ │  ara-tools   │ │  ara-graph  │ │  ara-adapters        │
-│                │ │              │ │             │ │                      │
-│  AraRuntime    │ │  ToolFactory │ │  AgentGraph │ │  AraLlmClientFactory │
-│  ReactStrategy │ │  File tools  │ │  GraphNode  │ │  OpenAiLlmClient     │
-│  PlanExecute   │ │  Code tools  │ │  GraphEdge  │ │  AnthropicLlmClient  │
-│  Reflexion     │ │  Git tools   │ │  Executor   │ │  OllamaLlmClient     │
-│  Failover      │ │  Shell tools │ │  GraphAgent │ │  (LangChain4j 1.17)  │
-│  Contract      │ │              │ │             │ │                      │
-│  AgentPipeline │ └──────────────┘ └─────────────┘ │  ToolConversionUtils │
-│  ScriptedStub  │                                  └──────────────────────┘
-│  Processors    │
-└────────────────┘
-```
-
----
-
-## How ARA compares
-
-### Why ARA
+## Why ARA
 - **Plain Java, no magic.** Pure interfaces — zero annotations, zero reflection, no Kotlin
   runtime, no Spring. The call stack you debug is the call stack you wrote. True of
   `ara-core`, `ara-runtime` and `ara-adapters`; the optional `ara-gateway` module (Javalin,
