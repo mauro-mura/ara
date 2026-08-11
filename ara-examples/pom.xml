@@ -33,14 +33,6 @@
       <artifactId>ara-adapters</artifactId>
     </dependency>
     <dependency>
-      <groupId>io.github.xmor</groupId>
-      <artifactId>ara-tools</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.github.xmor</groupId>
-      <artifactId>ara-gateway</artifactId>
-    </dependency>
-    <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
