@@ -19,7 +19,7 @@ import java.util.Objects;
  * {@code shortest_path}, {@code list_prs}, {@code get_pr_impact}, and {@code triage_prs}.
  *
  * <p>For one-off/scripted use, {@link #tools()} gives an immediate {@code List<AraTool>}
- * snapshot. To wire graphify into {@link io.ara.runtime.AraRuntime} with ADR-039's lazy,
+ * snapshot. To wire graphify into {@code io.ara.runtime.AraRuntime} with ADR-039's lazy,
  * shared/ref-counted MCP connection lifecycle instead (recommended for long-lived agents),
  * skip this class and register {@link McpClientFactory#fromStreamableHttp} directly via
  * {@code AraRuntime.Builder.mcpServer(id, connector, toolsAdapter)} — see

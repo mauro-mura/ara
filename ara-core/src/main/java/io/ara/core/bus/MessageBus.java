@@ -24,7 +24,7 @@ import java.time.Duration;
  *       needed to continue reasoning.</dd>
  * </dl>
  *
- * <h3>Error semantics</h3>
+ * <h2>Error semantics</h2>
  * <ul>
  *   <li>If the recipient is not registered, both methods throw
  *       {@link java.util.NoSuchElementException}.</li>

@@ -7,7 +7,7 @@ import java.util.Objects;
  *
  * <p>Provider adapters populate this when the LLM returns several tool
  * invocations in one response (e.g. OpenAI parallel function-calling,
- * Anthropic tool_use blocks).  The {@link ReactStrategy} dispatches all
+ * Anthropic tool_use blocks).  The {@code ReactStrategy} dispatches all
  * entries in parallel via virtual threads.
  *
  * @param toolCallId   provider-specific call id (e.g. OpenAI {@code tool_call_id}); may be null

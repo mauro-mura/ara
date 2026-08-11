@@ -12,7 +12,7 @@ import java.util.Objects;
  * tags, requiresApproval) should be added only when a concrete persistence
  * requirement demands them.
  *
- * <h3>Persistence contract</h3>
+ * <h2>Persistence contract</h2>
  * <p>A {@code ToolConfig} is the unit stored and loaded by a {@code ToolRepository}.
  * Reconstructing a live {@link AraTool} from a persisted config is the
  * responsibility of a {@code ToolFactory} that maps {@code toolId} to the

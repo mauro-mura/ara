@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  *
  * <p>Supports all current Claude 3 and Claude 4 model families. Create an instance via the
  * static {@link #builder()} and wire it into an {@link io.ara.core.agent.AgentConfig}
- * or {@link io.ara.runtime.AraRuntime}:
+ * or {@code io.ara.runtime.AraRuntime}:
  *
  * <pre>{@code
  * LlmClient claude = AnthropicLlmClient.builder()

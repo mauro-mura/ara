@@ -32,7 +32,7 @@ import java.util.Objects;
  * <p>The {@link Builder}'s {@code baseUrl}/{@code apiKey}/{@code modelName} setters are
  * kept as convenience sugar over an inline, content-addressed {@link LlmTransport}
  * (ADR-039 §3: "l'inline-override non sparisce... diventa zucchero") — they do not
- * restore three flat fields on this record; {@link #build()} assembles them into
+ * restore three flat fields on this record; {@link Builder#build()} assembles them into
  * {@link #inlineTransport()} internally.
  */
 public record LlmProfile(

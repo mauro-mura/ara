@@ -25,7 +25,7 @@ import java.util.Objects;
  *   <li>InputProcessor chain — transforms / validates task input</li>
  *   <li>PromptShaper chain — modifies the system prompt (ADR-014)</li>
  *   <li>outputSchema enforcement — appends JSON format instructions (ADR-014)</li>
- *   <li>{@code inner.execute()} — via {@link PromptOverridable} if shaping occurred</li>
+ *   <li>{@code inner.execute()} — via {@code PromptOverridable} if shaping occurred</li>
  *   <li>OutputProcessor chain — transforms / validates the response</li>
  * </ol>
  *

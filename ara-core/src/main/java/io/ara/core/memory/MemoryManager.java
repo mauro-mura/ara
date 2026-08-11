@@ -7,7 +7,7 @@ import java.util.List;
  *
  * <p>Working memory is the conversation context sent to the LLM on each call.
  * Implementations may evict old entries when a token budget is exceeded
- * ({@link io.ara.runtime.memory.SlidingWindowMemoryManager}).
+ * ({@code io.ara.runtime.memory.SlidingWindowMemoryManager}).
  *
  * <p>Semantic and episodic tiers are intentionally absent: they require a
  * vector store and a persistence backend. Introduce them as separate interfaces

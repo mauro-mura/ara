@@ -43,7 +43,7 @@ import java.util.stream.Collectors;
  *
  * <h2>Function calling</h2>
  * <p>Most Ollama models do <em>not</em> support native function calling.
- * {@link LlmCallContext#hasTools()} is therefore ignored. Use prompt-based tool routing
+ * {@link LlmCallContext#hasResolvedTools()} is therefore ignored. Use prompt-based tool routing
  * ({@link io.ara.core.llm.LlmSelectionPolicy}) when tools are required.
  *
  * @see LlmClient

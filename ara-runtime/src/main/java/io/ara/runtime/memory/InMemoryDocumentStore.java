@@ -17,7 +17,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * bases (up to ~10 k chunks). For production use {@link DocumentStore} (Qdrant).
  *
  * <p>All state is lost when the JVM stops — documents are re-indexed from H2
- * on startup via {@link KnowledgeBaseService#init()}.
+ * on startup via {@code KnowledgeBaseService#init()}.
  */
 public final class InMemoryDocumentStore implements KbStore {
 

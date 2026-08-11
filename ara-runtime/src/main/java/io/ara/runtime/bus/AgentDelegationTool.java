@@ -28,13 +28,13 @@ import java.util.Objects;
  *   <li>Return the answer as an {@code Observation} to the LLM.</li>
  * </ol>
  *
- * <h3>Usage in a system prompt</h3>
+ * <h2>Usage in a system prompt</h2>
  * <pre>
  *   To delegate work to another agent call:
  *   {"tool_id":"delegate_task","arguments":{"agent_id":"writer-0","task":"Summarise: ..."}}
  * </pre>
  *
- * <h3>Error handling</h3>
+ * <h2>Error handling</h2>
  * <ul>
  *   <li>Agent not found → {@link ToolResult#failure} with a descriptive message.</li>
  *   <li>Agent busy (not IDLE) → {@link ToolResult#failure}.</li>
@@ -43,9 +43,9 @@ import java.util.Objects;
  *       so the LLM can reason about it.</li>
  * </ul>
  *
- * <h3>Adding to an agent</h3>
+ * <h2>Adding to an agent</h2>
  * <p>Include {@code "delegate_task"} in the agent's {@code enabledTools} list and
- * ensure the {@link ToolRegistry} in use contains this tool.  The simplest way is
+ * ensure the {@link io.ara.core.tool.ToolRegistry} in use contains this tool.  The simplest way is
  * to wrap an existing registry with {@link DelegatingToolRegistry}:
  * <pre>{@code
  * ToolRegistry registry = new DelegatingToolRegistry(baseRegistry, messageBus, selfAgentId);

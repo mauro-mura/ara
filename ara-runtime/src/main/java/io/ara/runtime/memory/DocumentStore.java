@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * memory) and uses a separate collection to avoid mixing agent memories with
  * indexed knowledge-base documents.
  *
- * <h3>Qdrant REST endpoints used</h3>
+ * <h2>Qdrant REST endpoints used</h2>
  * <ul>
  *   <li>{@code PUT  /collections/{name}}                 — create (idempotent)</li>
  *   <li>{@code PUT  /collections/{name}/points}          — bulk upsert chunks</li>
@@ -38,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>{@code POST /collections/{name}/points/search}   — nearest-neighbour search</li>
  * </ul>
  *
- * <h3>Chunk payload schema</h3>
+ * <h2>Chunk payload schema</h2>
  * <pre>
  *   { "doc_id": "doc-001", "title": "...", "content": "...",
  *     "chunk_index": 0, "indexed_at": "2025-..." }

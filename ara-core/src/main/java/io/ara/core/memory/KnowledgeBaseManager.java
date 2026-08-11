@@ -11,7 +11,7 @@ import java.util.Optional;
  * implementation class. The concrete implementation is
  * {@code io.ara.runtime.memory.KnowledgeBaseService}.
  *
- * <p>Implementations delegate CRUD persistence to a {@link KnowledgeBaseRepository} and
+ * <p>Implementations delegate CRUD persistence to a {@code KnowledgeBaseRepository} and
  * vector indexing to a {@link SemanticStore} (via an {@link EmbeddingClient} for chunk
  * embedding). Neither dependency is visible through this interface.
  */

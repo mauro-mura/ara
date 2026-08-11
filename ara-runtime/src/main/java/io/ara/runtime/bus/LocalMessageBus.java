@@ -24,14 +24,14 @@ import java.util.concurrent.TimeoutException;
 /**
  * In-process {@link MessageBus} implementation for single-node deployments.
  *
- * <h3>Routing</h3>
+ * <h2>Routing</h2>
  * <p>All routing goes through {@link AgentRegistry}. A message to agent {@code B}
  * results in a direct call to {@code B.execute(AgentTask)} — no serialisation,
  * no network hop. The {@code correlationId} carried by the {@link AgentMessage}
  * is forwarded into the {@link AgentTask} so the full delegation chain is visible
  * in logs.
  *
- * <h3>Threading</h3>
+ * <h2>Threading</h2>
  * <ul>
  *   <li>{@link #send} dispatches the execution on a new virtual thread and
  *       returns immediately to the caller.</li>
@@ -45,7 +45,7 @@ import java.util.concurrent.TimeoutException;
  * so a delegated agent's spans still nest under the caller's — tracing context is
  * thread-local and does not otherwise survive the hop onto the new virtual thread.
  *
- * <h3>Cycles</h3>
+ * <h2>Cycles</h2>
  * <p>Cyclic delegations (A → B → A) will deadlock if agent A is still in
  * {@code EXECUTING} state when the cycle closes, because {@code execute()} throws
  * {@code IllegalStateException} on a non-IDLE agent.  The deadlock is therefore

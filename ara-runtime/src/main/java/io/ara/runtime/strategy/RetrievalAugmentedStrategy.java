@@ -50,11 +50,11 @@ import java.util.concurrent.Flow;
  * Retriever)} — it is wrapped in a trivial router that ignores {@code retrieverId} and always
  * returns that one instance, preserving the pre-multi-retriever call sites.
  *
- * <h3>Strategy name</h3>
+ * <h2>Strategy name</h2>
  * The name is {@code "rag+" + delegate.strategyName()}, e.g. {@code "rag+react"}.
  * Register both the plain strategy and its augmented variant in {@link ExecutionPlanner}.
  *
- * <h3>Context injection</h3>
+ * <h2>Context injection</h2>
  * Retrieved passages are appended to the first {@code system} message found in the
  * outgoing message list. If no system message exists, a new one is prepended.
  * All subsequent LLM calls within the same strategy pass (e.g. multiple ReAct iterations)
