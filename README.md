@@ -7,6 +7,7 @@
 [![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/Website-ara.open--solutions.it-2b2d42.svg)](http://ara.open-solutions.it)
 
 <!-- *[README in italiano](README.it.md)* -->
 
