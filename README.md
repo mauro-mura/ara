@@ -47,8 +47,6 @@ no framework lock-in.
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ara-core`      | Pure interfaces and domain model: `AraAgent`, `LlmClient`, `LlmException`, `MemoryManager`, `ToolRegistry`, `AgentContract`, `ExecutionStrategy`, …                     |
 | `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
-| `ara-tools`     | Built-in `AraTool` implementations (file, code, git, shell, project, search) and `ToolFactory` to instantiate them                                                       |
-<!-- | `ara-graph`     | Agent graph model (`AgentGraph`, `AgentGraphNode`, `AgentGraphEdge`) and execution (`GraphExecutor`, `GraphAgent`)                                                       | -->
 | `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic and Ollama. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                            |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
 | `ara-bom`       | Bill of Materials — import to pin all ARA module versions in one declaration                                                                                              |
