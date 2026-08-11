@@ -1,13 +1,10 @@
 package io.ara.examples.basics;
 
-import io.ara.adapters.llm.AraLlmClientFactory;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
 import io.ara.core.agent.*;
 import io.ara.core.llm.LlmClient;
-import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmProfile;
 import io.ara.runtime.AraRuntime;
-import io.ara.runtime.config.AraRuntimeConfig;
 
 import java.util.List;
 
@@ -49,49 +46,50 @@ public class AraSimpleExampleLive {
                 .build();
 
         // Create runtime
-        AraRuntime runtime = AraRuntime.builder()
+        try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("local", local)
                 .toolRegistry(new AraSimpleExample.StubToolRegistry())
                 .interceptors(List.of(new AraSimpleExample.LoggingInterceptor()))
-                .build();
+                .build()) {
 
-        runtime.start();
+            runtime.start();
 
-        // Create agent config
-        AgentConfig config = AgentConfig.defaults()
-                .agentType("demo-agent")
-                .systemPrompt("You are a helpful demo agent.")
-                .primaryLlm(LlmProfile.of("local"))
-                .plannerStrategy("react")
-                .enabledTools(List.of("echo"))
-                .maxIterations(5)
-                .build();
+            // Create agent config
+            AgentConfig config = AgentConfig.defaults()
+                    .agentType("demo-agent")
+                    .systemPrompt("You are a helpful demo agent.")
+                    .primaryLlm(LlmProfile.of("local"))
+                    .plannerStrategy("react")
+                    .enabledTools(List.of("echo"))
+                    .maxIterations(5)
+                    .build();
 
-        // Create agent
-        AraAgent agent = runtime.createAgent(config);
-        System.out.printf("Agent created  : %s%n", agent.agentId().value());
-        System.out.printf("Initial state  : %s%n%n", agent.currentState());
+            // Create agent
+            AraAgent agent = runtime.createAgent(config);
+            System.out.printf("Agent created  : %s%n", agent.agentId().value());
+            System.out.printf("Initial state  : %s%n%n", agent.currentState());
 
-        // Create task
-        AgentTask task = AgentTask.of("What does the echo tool say about 'Hello ARA'?");
-        System.out.printf("Submitting task: %s%n%n", task.input());
+            // Create task
+            AgentTask task = AgentTask.of("What does the echo tool say about 'Hello ARA'?");
+            System.out.printf("Submitting task: %s%n%n", task.input());
 
-        // Execute task
-        AgentResponse response = agent.execute(task);
+            // Execute task
+            AgentResponse response = agent.execute(task);
 
-        // Print results
-        System.out.println("\n=== Result ===");
-        System.out.printf("Success        : %s%n", response.isSuccess());
-        System.out.printf("Final state    : %s%n", response.finalState());
-        System.out.printf("Content        : %s%n", response.content());
-        System.out.printf("Iterations     : %d%n", response.iterationsUsed());
-        System.out.printf("Tokens         : %d%n", response.totalTokens());
-        System.out.printf("Estimated cost : %.6f%n", response.estimatedCostUsd());
-        System.out.printf("Elapsed        : %dms%n", response.elapsedTime().toMillis());
-        System.out.printf("Agent state    : %s (back to IDLE, ready for reuse)%n", agent.currentState());
+            // Print results
+            System.out.println("\n=== Result ===");
+            System.out.printf("Success        : %s%n", response.isSuccess());
+            System.out.printf("Final state    : %s%n", response.finalState());
+            System.out.printf("Content        : %s%n", response.content());
+            System.out.printf("Iterations     : %d%n", response.iterationsUsed());
+            System.out.printf("Tokens         : %d%n", response.totalTokens());
+            System.out.printf("Estimated cost : %.6f%n", response.estimatedCostUsd());
+            System.out.printf("Elapsed        : %dms%n", response.elapsedTime().toMillis());
+            System.out.printf("Agent state    : %s (back to IDLE, ready for reuse)%n", agent.currentState());
 
-        // Cleanup
-        runtime.destroyAgent(agent);
-        System.out.printf("%nRegistry count after destroy: %d%n", runtime.registry().count());
+            // Cleanup
+            runtime.destroyAgent(agent);
+            System.out.printf("%nRegistry count after destroy: %d%n", runtime.registry().count());
+        }
     }
 }
