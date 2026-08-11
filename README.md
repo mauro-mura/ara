@@ -8,7 +8,7 @@
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-*[README in italiano](README.it.md)*
+<!-- *[README in italiano](README.it.md)* -->
 
 ARA is a JVM framework for building autonomous agents and multi-agent systems on Java 21.
 It combines LLM integration, tool calling, deterministic I/O contracts, and multi-agent
@@ -29,7 +29,7 @@ no framework lock-in.
 - [AgentContract — deterministic I/O](#agentcontract--deterministic-io)
 - [PromptShaper — dynamic system prompt](#promptshaper--dynamic-system-prompt)
 - [Multi-agent pipeline](#multi-agent-pipeline)
-- [Agent graph](#agent-graph--parallel-branches-and-feedback-loops)
+<!-- - [Agent graph](#agent-graph--parallel-branches-and-feedback-loops) -->
 - [Execution strategies](#execution-strategies)
 - [AgentConfig — configurable agent values](#agentconfig--configurable-agent-values)
 - [Sessions & concurrency](#sessions--concurrency)
@@ -49,7 +49,7 @@ no framework lock-in.
 | `ara-core`      | Pure interfaces and domain model: `AraAgent`, `LlmClient`, `LlmException`, `MemoryManager`, `ToolRegistry`, `AgentContract`, `ExecutionStrategy`, …                     |
 | `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
 | `ara-tools`     | Built-in `AraTool` implementations (file, code, git, shell, project, search) and `ToolFactory` to instantiate them                                                       |
-| `ara-graph`     | Agent graph model (`AgentGraph`, `AgentGraphNode`, `AgentGraphEdge`) and execution (`GraphExecutor`, `GraphAgent`)                                                       |
+<!-- | `ara-graph`     | Agent graph model (`AgentGraph`, `AgentGraphNode`, `AgentGraphEdge`) and execution (`GraphExecutor`, `GraphAgent`)                                                       | -->
 | `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic and Ollama. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                            |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
 | `ara-bom`       | Bill of Materials — import to pin all ARA module versions in one declaration                                                                                              |
@@ -61,7 +61,7 @@ no framework lock-in.
 - Single agents with any LLM (OpenAI, Anthropic, Ollama, LM Studio, Groq, …)
 - Deterministic I/O contracts: sanitize input, validate output, strip markdown fences — zero tokens consumed
 - Multi-agent pipelines with conditional routing and FSM-style state machines
-- Agent graphs with parallel branches and feedback loops
+<!-- - Agent graphs with parallel branches and feedback loops -->
 - Tool calling from LLM responses, including parallel dispatch on virtual threads (Java 21)
 - Conversational agents that ask clarifying questions mid-task (`"respact"`) and self-correcting ones that recover from failed tool calls without restarting (`"reflact"`)
 - RAG as a strategy decorator — retrieval before every LLM call, no tool configuration needed
@@ -416,6 +416,7 @@ AgentPipeline pipeline = AgentPipeline.fsmBuilder()
 
 ---
 
+<!--
 ## Agent graph — parallel branches and feedback loops
 
 The graph model and executor live in the `ara-graph` module
@@ -448,6 +449,7 @@ executor, runtime.executor())` wraps a whole graph as a regular `AraAgent`, so g
 can be registered, delegated to, or nested as nodes inside other graphs.
 
 ---
+-->
 
 ## Execution strategies
 
@@ -731,7 +733,7 @@ Elapsed        : 1417ms
 - **Java 21 by design.** Virtual threads are the concurrency model, not an option: when the
   LLM asks for several tools at once they are dispatched in parallel automatically, with no
   executor to wire up or thread pool to tune.
-- **A runtime, not a toolkit.** Execution strategies, FSM pipelines, agent graphs, session
+- **A runtime, not a toolkit.** Execution strategies, FSM pipelines,<!-- agent graphs, --> session
   isolation, human-in-the-loop and cost budgets come in the box rather than assembled from
   parts.
 - **Built on LangChain4j, not against it.** Provider integration is inherited through
