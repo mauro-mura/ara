@@ -1,0 +1,6 @@
+# Fallback: everything not matched below
+* @xmor
+
+/ara-core/      @xmor
+/ara-runtime/   @xmor
+/ara-adapters/  @xmor
