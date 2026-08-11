@@ -10,13 +10,13 @@ import java.util.Optional;
  * interface so that the underlying storage can be swapped without touching the
  * tools or the agent runtime.
  *
- * <h3>Implementations</h3>
+ * <h2>Implementations</h2>
  * <ul>
  *   <li>{@code InMemoryAgentFileSystem} — zero-syscall in-process storage,
  *       suitable for safe demos and unit tests (in {@code ara-runtime}).</li>
  * </ul>
  *
- * <h3>Filename constraints</h3>
+ * <h2>Filename constraints</h2>
  * All implementations MUST validate filenames before any operation:
  * <ul>
  *   <li>Non-null, non-blank.</li>

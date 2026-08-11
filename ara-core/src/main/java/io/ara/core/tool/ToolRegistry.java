@@ -66,7 +66,7 @@ public interface ToolRegistry {
     /**
      * Executes the tool identified by {@code toolId} with the given JSON arguments,
      * forwarding the current {@link AgentTask} so the tool can read its
-     * {@link AgentTask#attachments()} (ADR-037).
+     * {@link AgentTask#runContext()} opaque values (ADR-037, ADR-041 rev. 2).
      *
      * <p>Default: DEGRADES to the 2-argument {@link #execute(String, String)},
      * silently dropping the task. A registry that wants to forward the task to its

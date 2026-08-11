@@ -603,7 +603,7 @@ public final class AraRuntime implements AutoCloseable {
 
     /**
      * Returns the shared virtual-thread executor for async agent execution.
-     * Pass this to {@link io.ara.core.agent.AraAgent#executeAsync} for fan-out
+     * Pass this to {@link io.ara.core.agent.AraAgents#executeAsync} for fan-out
      * and pipeline chains. The executor is initialised on {@link #start()} and
      * replaced with a fresh one on every restart.
      *

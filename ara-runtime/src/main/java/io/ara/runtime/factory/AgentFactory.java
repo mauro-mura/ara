@@ -145,7 +145,7 @@ public final class AgentFactory implements AgentLifecycleManager {
      * immediately registers it in the {@link AgentRegistry}.
      *
      * <p>Each agent receives its own private {@link MemoryManager} (created via
-     * the memory manager factory) and its own {@link AgentStateMachine}. All other
+     * the memory manager factory) and its own {@link io.ara.runtime.lifecycle.AgentStateMachine}. All other
      * collaborators ({@code LlmClient}, {@code ToolRegistry})
      * are shared among all instances because they are stateless and thread-safe.
      *

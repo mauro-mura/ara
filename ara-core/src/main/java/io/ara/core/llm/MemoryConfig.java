@@ -3,7 +3,8 @@ package io.ara.core.llm;
 import java.util.Objects;
 
 /**
- * Memory sub-record of {@link AgentConfig}: working memory and conversation settings.
+ * Memory sub-record of {@link io.ara.core.agent.AgentConfig}: working memory and
+ * conversation settings.
  */
 public record MemoryConfig(
         int    workingMemoryTokenBudget,

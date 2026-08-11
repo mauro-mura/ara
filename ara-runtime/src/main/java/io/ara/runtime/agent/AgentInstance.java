@@ -59,7 +59,7 @@ import java.util.function.Supplier;
  * entire lifetime — a task already in flight always finishes with the config it started
  * with; only sessions created after a {@code reconfigure} observe the new one.
  *
- * <p>Instances are created exclusively by {@link AgentFactory} and are stateless
+ * <p>Instances are created exclusively by {@link io.ara.runtime.factory.AgentFactory} and are stateless
  * with respect to execution. All fields are final or thread-safe.
  *
  * <p><strong>No annotations are used.</strong> All dependencies are injected
@@ -92,7 +92,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
      *             predate ADR-039's per-session wiring/lease model. Every session built
      *             through this constructor shares the same {@code llmClient}/{@code
      *             toolRegistry} with no lease, no registry, no dedup — equivalent to the
-     *             pre-ADR-039 behavior. {@link AgentFactory} uses the {@link
+     *             pre-ADR-039 behavior. {@link io.ara.runtime.factory.AgentFactory} uses the {@link
      *             WiringFactory}-based constructor instead.
      */
     @Deprecated(forRemoval = false)
@@ -109,7 +109,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     }
 
     /**
-     * Constructor used by {@link AgentFactory} when a {@link LlmRouter} is available.
+     * Constructor used by {@link io.ara.runtime.factory.AgentFactory} when a {@link LlmRouter} is available.
      * @deprecated see {@link #AgentInstance(AgentConfig, LlmClient, Function, ToolRegistry, ExecutionPlanner, AgentInterceptorChain)}.
      */
     @Deprecated(forRemoval = false)
@@ -127,7 +127,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     }
 
     /**
-     * Constructor used by {@link AgentFactory} with an explicit {@link AraTelemetry}.
+     * Constructor used by {@link io.ara.runtime.factory.AgentFactory} with an explicit {@link AraTelemetry}.
      * @deprecated see {@link #AgentInstance(AgentConfig, LlmClient, Function, ToolRegistry, ExecutionPlanner, AgentInterceptorChain)}.
      */
     @Deprecated(forRemoval = false)

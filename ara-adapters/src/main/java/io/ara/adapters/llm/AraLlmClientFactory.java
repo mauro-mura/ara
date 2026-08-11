@@ -8,9 +8,9 @@ import io.ara.core.llm.LlmClient;
 /**
  * Factory that provides builder access for all ARA-supported LLM adapters.
  *
- * <p>Each method returns the adapter's fluent {@link io.ara.core.llm.LlmClient.Builder}
+ * <p>Each method returns the adapter's fluent {@code LlmClient.Builder}
  * so that clients can be configured and built in a single expression and wired directly into
- * {@link io.ara.runtime.AraRuntime}:
+ * {@code io.ara.runtime.AraRuntime}:
  *
  * <pre>{@code
  * LlmClient gpt4o = AraLlmClientFactory.openAi()
@@ -50,7 +50,6 @@ public final class AraLlmClientFactory {
      * Returns a builder for an OpenAI (or OpenAI-compatible) {@link LlmClient}.
      *
      * @return {@link OpenAiLlmClient.Builder}
-     * @see OpenAiLlmClient.Models
      */
     public static OpenAiLlmClient.Builder openAi() {
         return OpenAiLlmClient.builder();

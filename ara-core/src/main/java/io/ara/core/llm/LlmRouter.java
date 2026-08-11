@@ -4,7 +4,7 @@ import io.ara.core.llm.LlmConfig;
 
 /**
  * Selects the appropriate {@link LlmClient} for a given agent LLM configuration
- * and call context, applying the configured {@link io.ara.core.agent.LlmSelectionPolicy}.
+ * and call context, applying the configured {@link io.ara.core.llm.LlmSelectionPolicy}.
  *
  * <p>Replaces the direct {@code LlmClient} injection in {@code AgentFactory} /
  * {@code AgentInstance} (ADR-030). The default implementation in {@code ara-runtime}

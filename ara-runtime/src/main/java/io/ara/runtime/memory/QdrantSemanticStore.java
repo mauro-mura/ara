@@ -29,14 +29,14 @@ import java.util.UUID;
  * applies a {@code must-match} filter on that field, so agents only see their
  * own memories.
  *
- * <h3>Qdrant REST endpoints used</h3>
+ * <h2>Qdrant REST endpoints used</h2>
  * <ul>
  *   <li>{@code PUT  /collections/{name}}                       — create (idempotent)</li>
  *   <li>{@code PUT  /collections/{name}/points}                — upsert a point</li>
  *   <li>{@code POST /collections/{name}/points/search}         — vector search</li>
  * </ul>
  *
- * <h3>Point payload schema</h3>
+ * <h2>Point payload schema</h2>
  * <pre>
  *   {
  *     "agent_id"  : "agent-0",

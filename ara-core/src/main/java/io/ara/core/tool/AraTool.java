@@ -46,7 +46,7 @@ public interface AraTool {
 
     /**
      * Executes the tool with access to the current {@link AgentTask}, including its
-     * opaque {@link AgentTask#attachments()} (ADR-037).
+     * opaque values in {@link AgentTask#runContext()} (ADR-037, ADR-041 rev. 2).
      *
      * <p>Default: ignores the task and delegates to {@link #execute(String)}. Tools
      * that depend on an attachment for their correctness or safety (e.g. a

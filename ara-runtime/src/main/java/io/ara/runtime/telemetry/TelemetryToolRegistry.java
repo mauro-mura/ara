@@ -41,7 +41,7 @@ import java.util.function.Supplier;
 public final class TelemetryToolRegistry implements ToolRegistry {
 
     /**
-     * {@link AgentTask#attachment(String, Class)} key a dispatching strategy can set (via
+     * {@link AgentTask#runContext()} opaque key a dispatching strategy can set (via
      * {@link AgentTask#withAttachment(String, Object)}, on a per-call derived task — see
      * {@code ReactStrategy}) to have the provider-native tool-call id show up as {@code
      * tool.call_id} on the {@code tool.execute} span. Purely a telemetry-internal wiring

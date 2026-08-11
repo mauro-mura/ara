@@ -6,7 +6,7 @@ package io.ara.core.agent;
  * <p>Extracting these two operations into an interface allows callers to depend on
  * this abstraction rather than on the concrete {@code AgentFactory}.
  *
- * <h3>Semantic distinction: destroy vs terminate</h3>
+ * <h2>Semantic distinction: destroy vs terminate</h2>
  * <ul>
  *   <li>{@link #destroyPermanently} — a <em>permanent</em> user action: terminates the agent,
  *       cleans up its checkpoint, and deregisters it.</li>

@@ -21,7 +21,7 @@ import java.util.function.Predicate;
  * by this ARA platform node.
  *
  * <p>The registry is the authoritative source of truth for which agents are alive.
- * {@link AgentFactory} registers newly created agents here automatically.
+ * {@link io.ara.runtime.factory.AgentFactory} registers newly created agents here automatically.
  * The Meta-Agent and the Orchestration layer query the registry to discover agents,
  * route messages, and monitor lifecycle state.
  *
@@ -43,7 +43,7 @@ public final class AgentRegistry {
     /**
      * Registers a newly created agent.
      *
-     * <p>Called by {@link AgentFactory} immediately after construction.
+     * <p>Called by {@link io.ara.runtime.factory.AgentFactory} immediately after construction.
      * Duplicate registrations (same id) are rejected.
      *
      * @param agent the agent to register; must not be {@code null}
@@ -167,7 +167,7 @@ public final class AgentRegistry {
      * catalog this class's own Javadoc refers to ("query the registry to discover
      * agents"). Each card is built fresh via {@link AraAgents#agentCard(AraAgent)} at
      * call time, so it reflects the agent's live {@link io.ara.core.agent.AgentConfig}
-     * (including any {@link AraAgent#reconfigure} since the agent was registered), not a
+     * (including any {@code reconfigure} since the agent was registered), not a
      * snapshot cached at registration.
      *
      * @return an immutable list of cards, one per registered agent, in no particular
