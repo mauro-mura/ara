@@ -49,7 +49,6 @@ no framework lock-in.
 | `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
 | `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic and Ollama. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                            |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
-| `ara-bom`       | Bill of Materials — import to pin all ARA module versions in one declaration                                                                                              |
 
 ---
 
