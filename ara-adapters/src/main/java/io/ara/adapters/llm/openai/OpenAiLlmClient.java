@@ -1,20 +1,24 @@
 package io.ara.adapters.llm.openai;
 
-import io.ara.adapters.llm.ToolConversionUtils;
-import io.ara.core.llm.*;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Flow;
+
 import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.*;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
-
-import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Flow;
-import java.util.stream.Collectors;
+import io.ara.adapters.llm.ToolConversionUtils;
+import io.ara.core.llm.LlmCallContext;
+import io.ara.core.llm.LlmClient;
+import io.ara.core.llm.LlmCompletion;
+import io.ara.core.llm.LlmException;
+import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.ToolCallEntry;
 
 /**
  * {@link LlmClient} adapter for the <a href="https://platform.openai.com/">OpenAI</a> API,

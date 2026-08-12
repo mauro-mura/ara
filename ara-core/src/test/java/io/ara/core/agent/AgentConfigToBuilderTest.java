@@ -12,7 +12,7 @@ class AgentConfigToBuilderTest {
         AgentConfig original = AgentConfig.defaults()
                 .agentType("researcher")
                 .systemPrompt("You are a researcher.")
-                .primaryLlm(LlmProfile.builder().modelId("gpt-4o").temperature(0.3).build())
+                .primaryLlm(LlmProfile.builder().transportId("gpt-4o").temperature(0.3).build())
                 .maxIterations(7)
                 .build();
 
@@ -25,7 +25,7 @@ class AgentConfigToBuilderTest {
     void toBuilder_thenOverrideOneField_changesOnlyThatField() {
         AgentConfig original = AgentConfig.defaults()
                 .agentType("researcher")
-                .primaryLlm(LlmProfile.builder().modelId("gpt-4o").temperature(0.3).build())
+                .primaryLlm(LlmProfile.builder().transportId("gpt-4o").temperature(0.3).build())
                 .maxIterations(5)
                 .build();
 

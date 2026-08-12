@@ -1,16 +1,15 @@
 package io.ara.runtime.telemetry;
 
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanBuilder;
 import io.ara.core.telemetry.SpanScope;
 import io.ara.core.telemetry.SpanStatus;
-
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Test double that records every span emitted — name, attributes, status, and whether an

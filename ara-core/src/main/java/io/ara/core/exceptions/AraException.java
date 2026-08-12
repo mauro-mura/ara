@@ -5,7 +5,9 @@ package io.ara.core.exceptions;
  */
 public class AraException extends RuntimeException {
     
-    public AraException(String message) {
+    private static final long serialVersionUID = 3178851156633560286L;
+
+	public AraException(String message) {
         super(message);
     }
     

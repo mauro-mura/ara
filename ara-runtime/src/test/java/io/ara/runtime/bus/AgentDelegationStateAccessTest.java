@@ -1,5 +1,17 @@
 package io.ara.runtime.bus;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.junit.jupiter.api.Test;
+
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.RunContext;
@@ -8,14 +20,6 @@ import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.bus.AgentMessage;
 import io.ara.core.bus.MessageBus;
-import io.ara.core.tool.ToolResult;
-import org.junit.jupiter.api.Test;
-
-import java.time.Duration;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Verifies {@link AgentDelegationTool} enforces {@link DelegateStateAccess} on the

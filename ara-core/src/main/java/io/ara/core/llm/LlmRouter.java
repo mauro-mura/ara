@@ -1,7 +1,5 @@
 package io.ara.core.llm;
 
-import io.ara.core.llm.LlmConfig;
-
 /**
  * Selects the appropriate {@link LlmClient} for a given agent LLM configuration
  * and call context, applying the configured {@link io.ara.core.llm.LlmSelectionPolicy}.

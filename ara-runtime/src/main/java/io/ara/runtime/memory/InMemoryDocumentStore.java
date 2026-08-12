@@ -2,7 +2,6 @@ package io.ara.runtime.memory;
 
 import io.ara.core.memory.EmbeddingClient;
 import io.ara.core.retriever.RetrievedChunk;
-import io.ara.core.retriever.Retriever;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

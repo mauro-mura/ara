@@ -12,7 +12,8 @@ import java.time.Instant;
  */
 public class ApprovalTimeoutException extends AraException {
 
-    private final String requestId;
+    private static final long serialVersionUID = 2028079525569400657L;
+	private final String requestId;
     private final Instant expiresAt;
 
     public ApprovalTimeoutException(String requestId, Instant expiresAt) {

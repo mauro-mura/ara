@@ -25,7 +25,7 @@ class LlmCallContextTest {
 
     @Test
     void temperature_isNull_whenNeverSetAnywhere() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o"));
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o"));
         assertNull(config.temperature(), "AgentConfig.temperature() must be null, not a fabricated default");
 
         LlmCallContext ctx = LlmCallContext.of(config, AgentTask.of("hi"));
@@ -35,7 +35,7 @@ class LlmCallContextTest {
 
     @Test
     void topP_isNull_whenNeverSetAnywhere() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o"));
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o"));
         assertNull(config.topP());
 
         LlmCallContext ctx = LlmCallContext.of(config, AgentTask.of("hi"));
@@ -44,7 +44,7 @@ class LlmCallContextTest {
 
     @Test
     void temperature_flowsThrough_whenSetOnLlmProfile() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o").temperature(0.9));
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o").temperature(0.9));
 
         LlmCallContext ctx = LlmCallContext.of(config, AgentTask.of("hi"));
         assertEquals(0.9, ctx.temperature());
@@ -53,7 +53,7 @@ class LlmCallContextTest {
 
     @Test
     void topP_flowsThrough_whenSetOnLlmProfile() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o").topP(0.5));
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o").topP(0.5));
 
         LlmCallContext ctx = LlmCallContext.of(config, AgentTask.of("hi"));
         assertEquals(0.5, ctx.topP());
@@ -61,7 +61,7 @@ class LlmCallContextTest {
 
     @Test
     void perCallTemperatureOverride_winsOverAgentConfigValue() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o").temperature(0.9));
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o").temperature(0.9));
         AgentTask task = AgentTask.of("hi")
                 .withHints(LlmExecutionHints.forTemperature(0.1));
 
@@ -72,7 +72,7 @@ class LlmCallContextTest {
 
     @Test
     void perCallTemperatureOverride_appliesEvenWhenAgentConfigHasNone() {
-        AgentConfig config = configWith(LlmProfile.builder().modelId("gpt-4o"));   // no temperature set
+        AgentConfig config = configWith(LlmProfile.builder().transportId("gpt-4o"));   // no temperature set
         AgentTask task = AgentTask.of("hi")
                 .withHints(LlmExecutionHints.forTemperature(0.2));
 
@@ -83,8 +83,8 @@ class LlmCallContextTest {
 
     @Test
     void llmProfile_rejectsOutOfRangeTemperature_butAllowsNull() {
-        assertDoesNotThrow(() -> LlmProfile.builder().modelId("m").build());   // temperature left null
+        assertDoesNotThrow(() -> LlmProfile.builder().transportId("m").build());   // temperature left null
         assertThrows(IllegalArgumentException.class,
-                () -> LlmProfile.builder().modelId("m").temperature(3.0).build());
+                () -> LlmProfile.builder().transportId("m").temperature(3.0).build());
     }
 }

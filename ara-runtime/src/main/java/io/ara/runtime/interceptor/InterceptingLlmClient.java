@@ -51,7 +51,6 @@ public final class InterceptingLlmClient implements LlmClient {
     }
 
     @Override
-    @SuppressWarnings("deprecation")
     public LlmCompletion complete(List<LlmMessage> messages, AgentConfig config) {
         return complete(messages, LlmCallContext.from(config));
     }

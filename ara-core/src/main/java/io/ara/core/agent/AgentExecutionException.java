@@ -14,7 +14,8 @@ import io.ara.core.common.AgentId;
  */
 public final class AgentExecutionException extends RuntimeException {
 
-    private final AgentId agentId;
+    private static final long serialVersionUID = 5448922555227435142L;
+	private final AgentId agentId;
 
     public AgentExecutionException(AgentId agentId, String message, Throwable cause) {
         super(message, cause);

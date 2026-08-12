@@ -8,7 +8,8 @@ package io.ara.core.llm;
  */
 public class LlmException extends RuntimeException {
 
-    public enum ErrorType {
+    private static final long serialVersionUID = 8321796692081462011L;
+	public enum ErrorType {
         INVALID_REQUEST,
         AUTHENTICATION,
         RATE_LIMIT,

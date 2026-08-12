@@ -74,7 +74,9 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     }
 
     private static final class ResourceCloseException extends RuntimeException {
-        ResourceCloseException(Throwable cause) { super(cause); }
+        private static final long serialVersionUID = 5868881508654425403L;
+
+		ResourceCloseException(Throwable cause) { super(cause); }
     }
 
     @Override

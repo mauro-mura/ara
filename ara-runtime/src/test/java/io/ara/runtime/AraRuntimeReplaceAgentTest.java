@@ -1,5 +1,16 @@
 package io.ara.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.Map;
+
+import org.junit.jupiter.api.Test;
+
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
@@ -8,12 +19,6 @@ import io.ara.core.common.AgentId;
 import io.ara.core.llm.LlmProfile;
 import io.ara.runtime.agent.InstanceContextStore;
 import io.ara.runtime.stubs.ScriptedLlmClient;
-import org.junit.jupiter.api.Test;
-
-import java.util.List;
-import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Verifies {@code AraRuntime.replaceAgent(...)} / {@code AgentFactory.replace(...)} —

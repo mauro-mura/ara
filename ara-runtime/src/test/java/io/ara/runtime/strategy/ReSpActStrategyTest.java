@@ -1,5 +1,18 @@
 package io.ara.runtime.strategy;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.Flow;
+
+import org.junit.jupiter.api.Test;
+
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
@@ -10,22 +23,11 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
-import io.ara.core.memory.MemoryManager;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
 import io.ara.runtime.stubs.InMemoryMemoryManager;
 import io.ara.runtime.stubs.ScriptedLlmClient;
-import org.junit.jupiter.api.Test;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.Flow;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Covers {@link ReSpActStrategy}'s one behavioural divergence from {@link

@@ -1,15 +1,16 @@
 package io.ara.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.junit.jupiter.api.Test;
+
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
-import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmProfile;
 import io.ara.runtime.stubs.ScriptedLlmClient;
-import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Confirms {@code "reflact"} is wired into {@code AraRuntime}'s default {@code
