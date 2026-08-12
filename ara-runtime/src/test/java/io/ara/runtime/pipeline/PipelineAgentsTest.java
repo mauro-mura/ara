@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.ara.runtime.pipeline.PipelineTestAgents.CapturingAgent;
 import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
 import static io.ara.runtime.pipeline.PipelineTestAgents.failingAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.tokenAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -45,6 +46,22 @@ class PipelineAgentsTest {
         assertEquals("after-second", response.content());
         assertEquals(task.taskId(), response.taskId(),
                 "the outer task's taskId must be preserved end-to-end");
+    }
+
+    @Test
+    void tokensAggregateAcrossSteps_onTheOuterAgentResponse_notJustTheLastStep() {
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("first",  tokenAgent("first",  "A", 100, 50, 0.02))
+                .step("second", tokenAgent("second", "B", 200, 75, 0.03))
+                .build();
+
+        AraAgent agent = PipelineAgents.of(pipeline);
+        AgentResponse response = agent.execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess());
+        assertEquals(300, response.inputTokens(),
+                "the outer pipeline agent's own response must sum every step's tokens");
+        assertEquals(125, response.outputTokens());
     }
 
     @Test

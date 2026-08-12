@@ -12,7 +12,7 @@ host pipelines inside a real `AgentInstance`, makes that unit of work a first-cl
 | `AgentPipeline` | The orchestrator: declares named steps, wires optional routers between them, runs the sequence. Not an `AraAgent` itself — no identity, no config, no lifecycle. |
 | `PipelineStep` | Package-private record: one named step's agent, optional input shaper, optional router — the single source of truth per step (see "Per-step input shaping" below). |
 | `PipelineExecution` | Immutable snapshot of the run-so-far, passed to routers *and* input shapers: the original `AgentTask`, `List<StepResult>` history, step count. Exposes `state()` (the run's shared `RunState`) and `resultOf(stepName)` alongside `lastOutput()`. |
-| `PipelineResult` | The outcome of a full `AgentPipeline.run(...)` call: success/failure, final output, the *last* step's full `AgentResponse`, executed step names, elapsed time. |
+| `PipelineResult` | The outcome of a full `AgentPipeline.run(...)` call: success/failure, final output, the *last* step's full `AgentResponse`, the full `stepHistory` (every step's own `AgentResponse`), executed step names, `total*` token/cost aggregates, elapsed time. |
 | `PipelineStrategy` | Package-private `ExecutionStrategy` that adapts an `AgentPipeline` to run inside an `AgentInstance`. |
 | `PipelineAgents` | Public factory: `PipelineAgents.of(pipeline)` → an `AraAgent` backed by a real `AgentInstance` hosting a `PipelineStrategy`. The only class most callers ever touch directly besides `AgentPipeline` itself. |
 | `ParallelAgent` | Public `AraAgent` that fans a task out to N member agents concurrently and merges their responses — see "Fan-out within a step" below. |
@@ -129,13 +129,14 @@ by construction is the correct default, not a simplification pending a future po
   searched from the end of history — so inside a retry loop, `resultOf("loop")` always
   gives you the latest attempt, not the first one. The primitive both routers and input
   shapers use to look further back than just the immediately preceding step.
-- `PipelineResult.lastResponse()` is the **full** `AgentResponse` from only the *last*
-  executed step — tokens, cost, and the execution-step trace for every *other* step in
-  the run are not retained anywhere (`PipelineExecution.StepResult` only carries
-  `stepName`, `output`, and `elapsed` — no tokens/cost per step). Anything downstream that
-  reports "how many tokens did this pipeline use" is really reporting "how many tokens
-  did the *last* step use" — a known, accepted fidelity gap, not a bug to chase down
-  without first widening `StepResult`.
+- `PipelineResult.lastResponse()` is still the **full** `AgentResponse` from only the
+  *last* executed step, kept for callers that only ever cared about that. For anything
+  spanning the whole run, `PipelineExecution.StepResult` now carries the full
+  `AgentResponse` for *its* step too, and `PipelineResult.stepHistory()` retains every
+  step's `StepResult` (including a step that ultimately failed) — so
+  `PipelineResult.totalInputTokens()` / `totalOutputTokens()` / `totalTokens()` /
+  `totalCostUsd()` sum across every step, not just the last one. `stepsExecuted()` is
+  simply `stepHistory().stream().map(StepResult::stepName).toList()`.
 
 ## `PipelineAgents` / `PipelineStrategy` — pipeline as a real agent
 
@@ -168,9 +169,9 @@ span, the interceptor chain — none of it is re-implemented here.
 
 Package-private; the only thing `PipelineAgents` builds it for. `execute(task, llm,
 memory, tools, config)` calls `pipeline.run(task)` and translates `PipelineResult` into
-`ExecutionResult`, reusing the last step's `AgentResponse` for token/iteration counts and
-the step trace (see the fidelity gap above — this is exactly as accurate as
-`PipelineResult` itself allows, no more, no less).
+`ExecutionResult`, using `PipelineResult.totalInputTokens()`/`totalOutputTokens()` for
+token counts (summed across every step, see above) and concatenating every step's own
+execution-step trace, in execution order.
 
 `llm`, `memory`, and `tools` are received (the `ExecutionStrategy` contract requires
 them) but never touched — a pipeline's actual work happens inside its step agents, each
@@ -394,10 +395,12 @@ return result.finalOutput();
   sequence a few steps. Identity/lifecycle is `PipelineAgents`'s job, added by
   composition — the same split ARA already uses for `ExecutionStrategy` (pure algorithm)
   vs. `AgentInstance` (identity + lifecycle).
-- **Token/cost reporting on a pipeline agent reflects only the last step**, not the sum
-  across all steps — see the `PipelineResult.lastResponse()` note above. Don't rely on
-  `AgentResponse.totalTokens()` from a pipeline agent for cost accounting across the
-  whole run.
+- **Token/cost reporting on a pipeline agent is summed across every step**, via
+  `PipelineResult.totalInputTokens()`/`totalOutputTokens()`/`totalCostUsd()` — see the
+  `PipelineResult.lastResponse()` note above. `AgentResponse.totalTokens()` on the
+  *outer* pipeline agent's own response (e.g. via `PipelineAgents.of(...)`) reflects
+  this same sum, not just the last step, since `PipelineStrategy` feeds it from these
+  aggregates.
 - **Every step shares the outer task's `taskId()` and `sessionId()`** — by design, for log
   correlation and session continuity. If two *different* pipeline runs need to be
   distinguishable in a single step agent's own logs, give them distinct `sessionId()`s

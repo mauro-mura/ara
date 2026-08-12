@@ -1,5 +1,6 @@
 package io.ara.runtime.pipeline;
 
+import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.RunState;
 
@@ -71,12 +72,18 @@ public record PipelineExecution(
      * @param stepName name of the step as declared in the pipeline builder
      * @param output   the post-processed output string returned by the agent
      * @param elapsed  wall-clock duration of that step execution
+     * @param response the full {@link AgentResponse} the step's agent produced — carries
+     *                 that step's own token usage, cost, and execution-step trace, so a
+     *                 caller can aggregate them across every step instead of only the
+     *                 pipeline's last one (see {@link PipelineResult#totalInputTokens()}
+     *                 and friends).
      */
-    public record StepResult(String stepName, String output, Duration elapsed) {
+    public record StepResult(String stepName, String output, Duration elapsed, AgentResponse response) {
         public StepResult {
             Objects.requireNonNull(stepName, "stepName must not be null");
             Objects.requireNonNull(output,   "output must not be null");
             Objects.requireNonNull(elapsed,  "elapsed must not be null");
+            Objects.requireNonNull(response, "response must not be null");
         }
     }
 }

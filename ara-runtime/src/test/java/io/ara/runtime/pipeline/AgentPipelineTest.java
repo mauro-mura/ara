@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.ara.runtime.pipeline.PipelineTestAgents.CapturingAgent;
 import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
 import static io.ara.runtime.pipeline.PipelineTestAgents.failingAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.tokenAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AgentPipelineTest {
@@ -45,6 +46,25 @@ class AgentPipelineTest {
         assertTrue(r.success());
         assertEquals("after-second", r.finalOutput());
         assertEquals(List.of("first", "second"), r.stepsExecuted());
+    }
+
+    @Test
+    void tokensAndCost_areAggregatedAcrossAllSteps_notJustTheLast() {
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("first",  tokenAgent("first",  "A", 100, 50, 0.02))
+                .step("second", tokenAgent("second", "B", 200, 75, 0.03))
+                .build();
+
+        PipelineResult r = pipeline.run("start");
+
+        assertTrue(r.success());
+        assertEquals(300, r.totalInputTokens());
+        assertEquals(125, r.totalOutputTokens());
+        assertEquals(425, r.totalTokens());
+        assertEquals(0.05, r.totalCostUsd(), 1e-9);
+        // lastResponse() is unchanged: still only the last step's own response.
+        assertEquals(200, r.lastResponse().inputTokens());
+        assertEquals(75,  r.lastResponse().outputTokens());
     }
 
     @Test

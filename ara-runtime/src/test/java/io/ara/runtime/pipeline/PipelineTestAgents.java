@@ -28,6 +28,21 @@ final class PipelineTestAgents {
         };
     }
 
+    /** Like {@link #echoAgent}, but with caller-chosen token/cost figures on its response. */
+    static AraAgent tokenAgent(String id, String output, int inputTokens, int outputTokens, double costUsd) {
+        AgentId agentId = AgentId.of(id);
+        return new AraAgent() {
+            @Override public AgentId agentId() { return agentId; }
+            @Override public AgentConfig config() { return null; }
+            @Override public AgentState currentState() { return AgentState.IDLE; }
+            @Override public AgentResponse execute(AgentTask task) {
+                return AgentResponse.success(task.taskId(), agentId, output, 1,
+                        inputTokens, outputTokens, costUsd, Duration.ofMillis(1), List.of());
+            }
+            @Override public void terminate() {}
+        };
+    }
+
     static AraAgent failingAgent(String id, String reason) {
         AgentId agentId = AgentId.of(id);
         return new AraAgent() {
