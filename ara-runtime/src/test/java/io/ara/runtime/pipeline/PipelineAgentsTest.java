@@ -8,6 +8,7 @@ import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionBusyPolicy;
 import io.ara.core.agent.SessionId;
 import io.ara.core.common.AgentId;
+import io.ara.core.llm.LlmCallContext;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -210,6 +211,40 @@ class PipelineAgentsTest {
 
         assertTrue(response.isSuccess(), "must resolve regardless of the config's plannerStrategy value");
         assertEquals("ok", response.content());
+    }
+
+    // ── Composability ────────────────────────────────────────────────────────
+
+    @Test
+    void pipelineInPipeline_innerPipelineAgentComposesAsAnOrdinaryStep() {
+        AgentPipeline inner = AgentPipeline.builder()
+                .step("innerFirst",  echoAgent("innerFirst",  "inner-A"))
+                .step("innerSecond", echoAgent("innerSecond", "inner-B"))
+                .build();
+        AraAgent innerAgent = PipelineAgents.of(inner);
+
+        AgentPipeline outer = AgentPipeline.builder()
+                .step("enrich", echoAgent("enrich", "enriched"))
+                .step("nested", innerAgent)
+                .step("format", echoAgent("format", "formatted"))
+                .build();
+
+        PipelineResult r = outer.run("start");
+
+        assertTrue(r.success());
+        assertEquals("formatted", r.finalOutput());
+        assertEquals(List.of("enrich", "nested", "format"), r.stepsExecuted());
+    }
+
+    // ── NoopLlmClient ────────────────────────────────────────────────────────
+
+    @Test
+    void noopLlmClient_complete_throwsIfEverCalled() {
+        // Unreachable through the public pipeline API (PipelineStrategy never calls it) —
+        // this exists purely so that guarantee stays true if something changes later.
+        PipelineAgents.NoopLlmClient client = new PipelineAgents.NoopLlmClient();
+        assertThrows(UnsupportedOperationException.class,
+                () -> client.complete(List.of(), (LlmCallContext) null));
     }
 
     // ── Stubs ─────────────────────────────────────────────────────────────────

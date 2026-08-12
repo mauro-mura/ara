@@ -113,6 +113,49 @@ class ParallelAgentTest {
     }
 
     @Test
+    void requireAll_succeedsOnlyWhenEveryMemberSucceeds() {
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("a", "A"), echoAgent("b", "B")),
+                executor, AgentChain.MergeStrategy.joining(","), AgentChain.FailurePolicy.REQUIRE_ALL);
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess());
+        assertEquals("A,B", response.content());
+    }
+
+    @Test
+    void requireAll_failsOnAnySingleFailure_withAnAggregatedCountUnlikeFailFast() {
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("ok1", "A"), failingAgent("bad", "boom"), echoAgent("ok2", "B")),
+                executor, AgentChain.MergeStrategy.joining(","), AgentChain.FailurePolicy.REQUIRE_ALL);
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+
+        assertFalse(response.isSuccess());
+        // Unlike FAIL_FAST (which surfaces the failing member's own response verbatim),
+        // REQUIRE_ALL synthesizes an aggregated "<failed>/<total> ... failed" message.
+        assertTrue(response.failureReason().contains("1/3"));
+        assertTrue(response.failureReason().contains("boom"));
+    }
+
+    @Test
+    void nestedParallelAgent_composesAsAnOrdinaryMember() {
+        ParallelAgent inner = new ParallelAgent(AgentId.of("inner"),
+                List.of(echoAgent("x", "X"), echoAgent("y", "Y")),
+                executor, AgentChain.MergeStrategy.joining("+"));
+
+        ParallelAgent outer = new ParallelAgent(AgentId.of("outer"),
+                List.of(inner, echoAgent("z", "Z")),
+                executor, AgentChain.MergeStrategy.joining(","));
+
+        AgentResponse response = outer.execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess());
+        assertEquals("X+Y,Z", response.content());
+    }
+
+    @Test
     void terminate_isBestEffort_oneMemberThrowingDoesNotStopTheRest() {
         AtomicBoolean secondTerminated = new AtomicBoolean(false);
         AraAgent throwsOnTerminate = new AraAgent() {

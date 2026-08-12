@@ -122,8 +122,13 @@ public final class PipelineAgents {
      * it — {@code complete} throws rather than silently returning a bogus completion,
      * so a future change that accidentally wires an LLM call into the pipeline path
      * fails loudly instead of producing a confusing empty answer.
+     *
+     * <p>Package-private (rather than {@code private}) purely so a test in this package
+     * can instantiate it directly and assert {@link #complete} actually throws — that
+     * behavior is otherwise unreachable through the public pipeline API, since nothing
+     * in {@link PipelineStrategy} ever calls it.
      */
-    private static final class NoopLlmClient implements LlmClient {
+    static final class NoopLlmClient implements LlmClient {
         @Override
         public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext ctx) throws LlmException {
             throw new UnsupportedOperationException(
