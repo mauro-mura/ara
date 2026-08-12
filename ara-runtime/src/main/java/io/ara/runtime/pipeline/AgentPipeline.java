@@ -116,7 +116,8 @@ public final class AgentPipeline {
             PipelineStep step = steps.get(currentStep);
             if (step == null) {
                 return PipelineResult.failure(
-                        "Unknown step: '" + currentStep + "'",
+                        "Unknown step: '" + currentStep + "' — declared steps: "
+                                + String.join(", ", stepOrder),
                         lastResponse, executed, elapsed(start));
             }
 

@@ -189,6 +189,25 @@ class AgentPipelineTest {
     }
 
     @Test
+    void router_returningUndeclaredStepAtRuntime_failsGracefully() {
+        // Unlike route(stepName, ...), which validates stepName at build time, a router's
+        // *return value* is only known at runtime — a typo here must not crash run().
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("a", echoAgent("a", "out-a"))
+                .step("b", echoAgent("b", "out-b"))
+                .route("a", execution -> "nonexistent")
+                .build();
+
+        PipelineResult r = pipeline.run("start");
+
+        assertFalse(r.success());
+        assertTrue(r.failureReason().contains("nonexistent"));
+        assertTrue(r.failureReason().contains("declared steps"));
+        assertTrue(r.failureReason().contains("a"));
+        assertTrue(r.failureReason().contains("b"));
+    }
+
+    @Test
     void state_writtenByOneStep_isVisibleToALaterStepsInputShaper() {
         AraAgent writer = new AraAgent() {
             final AgentId id = AgentId.of("writer");
