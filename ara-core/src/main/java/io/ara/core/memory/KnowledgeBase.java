@@ -38,11 +38,17 @@ public record KnowledgeBase(
         Objects.requireNonNull(embeddingConfig, "embeddingConfig must not be null");
         Objects.requireNonNull(qdrantCollection,"qdrantCollection must not be null");
         Objects.requireNonNull(createdAt,       "createdAt must not be null");
-        if (storeType == null || storeType.isBlank()) storeType = STORE_QDRANT;
         if (kbId.isBlank())  throw new IllegalArgumentException("kbId must not be blank");
         if (name.isBlank())  throw new IllegalArgumentException("name must not be blank");
-        if (defaultMaxResults < 1) defaultMaxResults = DEFAULT_MAX_RESULTS;
-        if (scoreThreshold < 0f || scoreThreshold > 1f) scoreThreshold = DEFAULT_SCORE_THRESHOLD;
+        // storeType is an open registry key — which stores actually exist is decided by
+        // whoever resolves one at wiring time (as ExecutionPlanner does for
+        // plannerStrategy, and RetrieverRouter for retrieverId), not by ara-core. Only
+        // "unspecified" is handled here.
+        if (storeType == null || storeType.isBlank()) storeType = STORE_QDRANT;
+        if (defaultMaxResults < 1 || defaultMaxResults > 20)
+            throw new IllegalArgumentException("defaultMaxResults must be between 1 and 20");
+        if (scoreThreshold < 0f || scoreThreshold > 1f)
+            throw new IllegalArgumentException("scoreThreshold must be in [0.0, 1.0]");
     }
 
     /** Convenience constructor — defaults to Qdrant store, 3 results, no score filter. */
