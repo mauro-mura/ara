@@ -24,48 +24,18 @@ import java.util.Objects;
  *
  * <p>The returned agent is a real {@code AgentInstance} hosting a {@link
  * PipelineStrategy} — not a hand-rolled {@code AraAgent} implementation — so it gets
- * {@code AgentInstance}'s full lifecycle for free: per-session isolation and busy
- * policy (ADR-016), cooperative cancellation, the {@code agent.execute} telemetry
- * span, and interceptors. A pipeline agent built here can be:
- * <ul>
- *   <li>registered in {@code AgentRegistry} and discovered like any other agent</li>
- *   <li>used as a node inside an {@code AgentGraph} (requires {@code ara-graph})</li>
- *   <li>delegated to via {@code AgentDelegationTool} by a supervisor LLM</li>
- *   <li>nested inside another pipeline as a step</li>
- *   <li>protected by ADR-033 scope-based authorization</li>
- * </ul>
+ * {@code AgentInstance}'s full lifecycle for free (per-session isolation, busy policy,
+ * cancellation, telemetry, interceptors) instead of re-deriving it, and inherits {@link
+ * AgentPipeline#run(AgentTask)}'s own task-propagation guarantees (attachments/context/
+ * sessionId/hints reach every step). See the package README, "Why this isn't a
+ * hand-rolled AraAgent", for the full rationale — including what a pipeline agent built
+ * here composes with — and its "Usage" section for FSM-based and pipeline-in-pipeline
+ * examples.
  *
- * <p>Because pipeline execution goes through {@link AgentPipeline#run(AgentTask)},
- * every step task is derived from the incoming task via {@code withInput(...)} —
- * {@code attachments()}, {@code context()}, {@code sessionId()}, and {@code hints()}
- * survive into every step, not just the initial input string.
- *
- * <p>Usage:
+ * <p>Minimal usage:
  * <pre>{@code
- * AgentPipeline pipeline = AgentPipeline.fsmBuilder()
- *     .state("draft",  draftAgent)
- *     .state("review", reviewAgent)
- *     .state("done",   doneAgent)
- *     .initial("draft")
- *     .terminal("done")
- *     .transition("draft",  "review")
- *     .transition("review", exec ->
- *         exec.lastOutput().contains("APPROVED") ? "done" : "draft")
- *     .build();
- *
  * AraAgent pipelineAgent = PipelineAgents.of(pipeline);
  * AgentResponse response = pipelineAgent.execute(AgentTask.of("Write a report on AI trends"));
- * }</pre>
- *
- * <p>As a step inside another pipeline:
- * <pre>{@code
- * AraAgent inner = PipelineAgents.of(innerPipeline);
- *
- * AgentPipeline outer = AgentPipeline.builder()
- *     .step("enrich", enrichAgent)
- *     .step("process", inner)      // pipeline-in-pipeline
- *     .step("format",  formatAgent)
- *     .build();
  * }</pre>
  */
 public final class PipelineAgents {
