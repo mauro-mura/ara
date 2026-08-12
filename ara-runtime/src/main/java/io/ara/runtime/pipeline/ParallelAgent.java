@@ -38,12 +38,11 @@ import java.util.concurrent.Executor;
  *
  * <p>{@link #currentState()} always reports {@link AgentState#IDLE}: this agent owns no
  * session-scoped lifecycle of its own, and does not gate concurrent {@link #execute} calls
- * behind a single shared state field. An earlier, hand-rolled pipeline-as-agent adapter in
- * this codebase did exactly that with one {@code volatile AgentState} field and threw {@code
- * IllegalStateException("not IDLE")} on any second concurrent call — including one for a
- * completely different session — which is precisely the bug this class avoids by not tracking
- * state at all. Each member agent's own lifecycle (e.g. a real {@code AgentInstance}'s
- * per-session state machine) is what actually matters here.
+ * behind a single shared state field — deliberately, to avoid a concurrency bug an earlier
+ * hand-rolled pipeline-as-agent adapter in this codebase had (see the package README,
+ * "Why this isn't a hand-rolled AraAgent", for the full history). Each member agent's own
+ * lifecycle (e.g. a real {@code AgentInstance}'s per-session state machine) is what
+ * actually matters here.
  */
 public final class ParallelAgent implements AraAgent {
 
