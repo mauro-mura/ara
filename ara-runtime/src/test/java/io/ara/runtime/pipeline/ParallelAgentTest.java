@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.failingAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ParallelAgentTest {
@@ -111,6 +113,49 @@ class ParallelAgentTest {
     }
 
     @Test
+    void requireAll_succeedsOnlyWhenEveryMemberSucceeds() {
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("a", "A"), echoAgent("b", "B")),
+                executor, AgentChain.MergeStrategy.joining(","), AgentChain.FailurePolicy.REQUIRE_ALL);
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess());
+        assertEquals("A,B", response.content());
+    }
+
+    @Test
+    void requireAll_failsOnAnySingleFailure_withAnAggregatedCountUnlikeFailFast() {
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("ok1", "A"), failingAgent("bad", "boom"), echoAgent("ok2", "B")),
+                executor, AgentChain.MergeStrategy.joining(","), AgentChain.FailurePolicy.REQUIRE_ALL);
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+
+        assertFalse(response.isSuccess());
+        // Unlike FAIL_FAST (which surfaces the failing member's own response verbatim),
+        // REQUIRE_ALL synthesizes an aggregated "<failed>/<total> ... failed" message.
+        assertTrue(response.failureReason().contains("1/3"));
+        assertTrue(response.failureReason().contains("boom"));
+    }
+
+    @Test
+    void nestedParallelAgent_composesAsAnOrdinaryMember() {
+        ParallelAgent inner = new ParallelAgent(AgentId.of("inner"),
+                List.of(echoAgent("x", "X"), echoAgent("y", "Y")),
+                executor, AgentChain.MergeStrategy.joining("+"));
+
+        ParallelAgent outer = new ParallelAgent(AgentId.of("outer"),
+                List.of(inner, echoAgent("z", "Z")),
+                executor, AgentChain.MergeStrategy.joining(","));
+
+        AgentResponse response = outer.execute(AgentTask.of("go"));
+
+        assertTrue(response.isSuccess());
+        assertEquals("X+Y,Z", response.content());
+    }
+
+    @Test
     void terminate_isBestEffort_oneMemberThrowingDoesNotStopTheRest() {
         AtomicBoolean secondTerminated = new AtomicBoolean(false);
         AraAgent throwsOnTerminate = new AraAgent() {
@@ -166,6 +211,35 @@ class ParallelAgentTest {
     }
 
     @Test
+    void defaultConstructor_stillBuildsTheDefaultParallelConfig() {
+        // Regression guard: adding the explicit-AgentConfig overload must not change
+        // what the existing constructors build on their own.
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("a", "A")), executor, AgentChain.MergeStrategy.joining(","));
+
+        assertEquals("parallel", parallel.config().agentType());
+        assertEquals(AgentId.of("fanout"), parallel.config().agentId());
+    }
+
+    @Test
+    void explicitConfig_isUsedVerbatim_insteadOfTheBuiltInDefault() {
+        AgentConfig config = AgentConfig.defaults()
+                .agentId(AgentId.of("fanout"))
+                .agentType("custom-fanout")
+                .build();
+
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"), config,
+                List.of(echoAgent("a", "A")), executor, AgentChain.MergeStrategy.joining(","));
+
+        assertSame(config, parallel.config());
+        assertEquals("custom-fanout", parallel.config().agentType());
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+        assertTrue(response.isSuccess(), "an explicit config must not otherwise change fan-out behavior");
+        assertEquals("A", response.content());
+    }
+
+    @Test
     void rejectsEmptyMemberList() {
         assertThrows(IllegalArgumentException.class, () ->
                 new ParallelAgent(AgentId.of("fanout"), List.of(), executor,
@@ -173,32 +247,6 @@ class ParallelAgentTest {
     }
 
     // ── Stubs ─────────────────────────────────────────────────────────────────
-
-    private static AraAgent echoAgent(String id, String output) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.success(task.taskId(), agentId, output, 1, 0, 0, Duration.ofMillis(1), List.of());
-            }
-            @Override public void terminate() {}
-        };
-    }
-
-    private static AraAgent failingAgent(String id, String reason) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.failure(task.taskId(), agentId, reason, Duration.ofMillis(1));
-            }
-            @Override public void terminate() {}
-        };
-    }
 
     private static AraAgent capturingAgent(String id, Set<String> seenInputs) {
         AgentId agentId = AgentId.of(id);

@@ -1,7 +1,6 @@
 package io.ara.runtime.pipeline;
 
 import io.ara.core.agent.AgentConfig;
-import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
@@ -75,16 +74,16 @@ final class PipelineStrategy implements ExecutionStrategy {
             AgentTask task, LlmClient llm, MemoryManager memory, ToolRegistry tools, AgentConfig config) {
         PipelineResult result = pipeline.run(task);
 
-        // PipelineResult only carries the last step's full AgentResponse (see its
-        // Javadoc) — token/iteration accounting across all steps isn't available
-        // without widening PipelineExecution.StepResult, so this is the same
-        // last-step-as-proxy fidelity the previous hand-rolled PipelineAgent implementation used,
-        // just extracted as numbers instead of returned as the raw AgentResponse.
-        AgentResponse last = result.lastResponse();
+        // Aggregated across every executed step's own AgentResponse (PipelineResult.
+        // totalInputTokens()/totalOutputTokens()), not just the last one — see
+        // PipelineResult's Javadoc. Likewise the execution-step trace is the
+        // concatenation of every step's own trace, in execution order.
         int iterations   = result.stepsExecuted().size();
-        int promptTokens = last != null ? last.inputTokens() : 0;
-        int outputTokens = last != null ? last.outputTokens() : 0;
-        List<ExecutionStep> steps = last != null ? last.steps() : List.of();
+        int promptTokens = result.totalInputTokens();
+        int outputTokens = result.totalOutputTokens();
+        List<ExecutionStep> steps = result.stepHistory().stream()
+                .flatMap(s -> s.response().steps().stream())
+                .toList();
 
         // On failure, finalOutput() still holds the real content of the last step that
         // ran successfully before the pipeline stopped (e.g. a maxSteps cap) — carried

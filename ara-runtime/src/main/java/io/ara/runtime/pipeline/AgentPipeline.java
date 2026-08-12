@@ -98,7 +98,6 @@ public final class AgentPipeline {
     public PipelineResult run(AgentTask task) {
         Objects.requireNonNull(task, "task must not be null");
         Instant start = Instant.now();
-        List<String> executed = new ArrayList<>();
 
         String        currentStep  = stepOrder.get(0);
         AgentResponse lastResponse = null;
@@ -110,35 +109,46 @@ public final class AgentPipeline {
                 log.warn("Pipeline exceeded maxSteps={}", maxSteps);
                 return PipelineResult.failure(
                         "Pipeline exceeded maximum step count of " + maxSteps,
-                        lastResponse, executed, elapsed(start));
+                        lastResponse, history, elapsed(start));
             }
 
             PipelineStep step = steps.get(currentStep);
             if (step == null) {
                 return PipelineResult.failure(
-                        "Unknown step: '" + currentStep + "'",
-                        lastResponse, executed, elapsed(start));
+                        "Unknown step: '" + currentStep + "' — declared steps: "
+                                + String.join(", ", stepOrder),
+                        lastResponse, history, elapsed(start));
             }
 
             PipelineExecution execution = new PipelineExecution(task, history, stepCount);
-            AgentTask stepTask = step.buildTask(execution);
+            AgentTask stepTask;
+            try {
+                stepTask = step.buildTask(execution);
+            } catch (RuntimeException e) {
+                log.warn("Pipeline step [{}] input shaper threw", currentStep, e);
+                return PipelineResult.failure(
+                        "Step '" + currentStep + "' input shaper threw: " + e,
+                        lastResponse, history, elapsed(start));
+            }
 
             log.debug("Pipeline step [{}] input.len={}", currentStep, stepTask.input().length());
             Instant stepStart = Instant.now();
             lastResponse = step.agent().execute(stepTask);
-            executed.add(currentStep);
             stepCount++;
+
+            // Recorded for every attempted step — success or failure — so token/cost
+            // totals and stepsExecuted() both reflect what actually ran, not just the
+            // steps that completed successfully.
+            history = new ArrayList<>(history);
+            history.add(new StepResult(currentStep, lastResponse.content(),
+                    Duration.between(stepStart, Instant.now()), lastResponse));
 
             if (!lastResponse.isSuccess()) {
                 log.warn("Pipeline step [{}] failed: {}", currentStep, lastResponse.failureReason());
                 return PipelineResult.failure(
                         "Step '" + currentStep + "' failed: " + lastResponse.failureReason(),
-                        lastResponse, executed, elapsed(start));
+                        lastResponse, history, elapsed(start));
             }
-
-            String output = lastResponse.content();
-            history = new ArrayList<>(history);
-            history.add(new StepResult(currentStep, output, Duration.between(stepStart, Instant.now())));
 
             // Determine next step via router, or advance sequentially
             Function<PipelineExecution, String> router = step.router();
@@ -156,7 +166,7 @@ public final class AgentPipeline {
 
         return PipelineResult.success(
                 lastResponse != null ? lastResponse.content() : "",
-                lastResponse, executed, elapsed(start));
+                lastResponse, history, elapsed(start));
     }
 
     private static Duration elapsed(Instant start) {

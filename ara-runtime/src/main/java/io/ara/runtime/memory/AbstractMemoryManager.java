@@ -27,7 +27,7 @@ public abstract class AbstractMemoryManager implements MemoryManager {
 
     @Override
     public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-        working.add(MemoryEntry.of(role, content, metadata != null ? metadata.encode() : null));
+        working.add(MemoryEntry.of(role, content, metadata));
     }
 
     @Override

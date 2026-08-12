@@ -38,12 +38,11 @@ import java.util.concurrent.Executor;
  *
  * <p>{@link #currentState()} always reports {@link AgentState#IDLE}: this agent owns no
  * session-scoped lifecycle of its own, and does not gate concurrent {@link #execute} calls
- * behind a single shared state field. An earlier, hand-rolled pipeline-as-agent adapter in
- * this codebase did exactly that with one {@code volatile AgentState} field and threw {@code
- * IllegalStateException("not IDLE")} on any second concurrent call — including one for a
- * completely different session — which is precisely the bug this class avoids by not tracking
- * state at all. Each member agent's own lifecycle (e.g. a real {@code AgentInstance}'s
- * per-session state machine) is what actually matters here.
+ * behind a single shared state field — deliberately, to avoid a concurrency bug an earlier
+ * hand-rolled pipeline-as-agent adapter in this codebase had (see the package README,
+ * "Why this isn't a hand-rolled AraAgent", for the full history). Each member agent's own
+ * lifecycle (e.g. a real {@code AgentInstance}'s per-session state machine) is what
+ * actually matters here.
  */
 public final class ParallelAgent implements AraAgent {
 
@@ -58,7 +57,30 @@ public final class ParallelAgent implements AraAgent {
 
     public ParallelAgent(AgentId agentId, List<AraAgent> members, Executor executor,
                          AgentChain.MergeStrategy merge, AgentChain.FailurePolicy failurePolicy) {
+        this(agentId, AgentConfig.defaults().agentId(agentId).agentType("parallel").build(),
+             members, executor, merge, failurePolicy);
+    }
+
+    /** Convenience: {@link AgentChain.FailurePolicy#FAIL_FAST}. */
+    public ParallelAgent(AgentId agentId, List<AraAgent> members, Executor executor,
+                         AgentChain.MergeStrategy merge) {
+        this(agentId, members, executor, merge, AgentChain.FailurePolicy.FAIL_FAST);
+    }
+
+    /**
+     * Like {@link #ParallelAgent(AgentId, List, Executor, AgentChain.MergeStrategy,
+     * AgentChain.FailurePolicy)}, but with a caller-supplied {@link AgentConfig} instead
+     * of the {@code AgentConfig.defaults().agentType("parallel")} this class otherwise
+     * builds on its own — for callers that need e.g. a custom {@code agentType()},
+     * {@code tags()}, or other config the default doesn't set. {@code config} is stored
+     * as-is; {@code agentId} (used for {@link #agentId()} and {@link #terminate()}/{@link
+     * #execute} logging) is not cross-checked against {@code config.agentId()} — same
+     * convention {@link PipelineAgents#of(AgentId, AgentConfig, AgentPipeline)} uses.
+     */
+    public ParallelAgent(AgentId agentId, AgentConfig config, List<AraAgent> members, Executor executor,
+                         AgentChain.MergeStrategy merge, AgentChain.FailurePolicy failurePolicy) {
         this.agentId = Objects.requireNonNull(agentId, "agentId must not be null");
+        this.config  = Objects.requireNonNull(config, "config must not be null");
         Objects.requireNonNull(members, "members must not be null");
         if (members.isEmpty()) {
             throw new IllegalArgumentException("ParallelAgent requires at least one member");
@@ -67,13 +89,12 @@ public final class ParallelAgent implements AraAgent {
         this.executor = Objects.requireNonNull(executor, "executor must not be null");
         this.merge = Objects.requireNonNull(merge, "merge must not be null");
         this.failurePolicy = Objects.requireNonNull(failurePolicy, "failurePolicy must not be null");
-        this.config = AgentConfig.defaults().agentId(agentId).agentType("parallel").build();
     }
 
-    /** Convenience: {@link AgentChain.FailurePolicy#FAIL_FAST}. */
-    public ParallelAgent(AgentId agentId, List<AraAgent> members, Executor executor,
+    /** Convenience: {@link AgentChain.FailurePolicy#FAIL_FAST}, with a caller-supplied {@link AgentConfig}. */
+    public ParallelAgent(AgentId agentId, AgentConfig config, List<AraAgent> members, Executor executor,
                          AgentChain.MergeStrategy merge) {
-        this(agentId, members, executor, merge, AgentChain.FailurePolicy.FAIL_FAST);
+        this(agentId, config, members, executor, merge, AgentChain.FailurePolicy.FAIL_FAST);
     }
 
     @Override public AgentId     agentId()      { return agentId; }

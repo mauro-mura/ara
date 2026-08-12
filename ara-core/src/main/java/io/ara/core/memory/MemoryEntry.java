@@ -9,13 +9,14 @@ import java.util.Objects;
  * @param role      speaker role: "system", "user", "assistant", "tool", "episode"
  * @param content   the text content of the entry
  * @param timestamp when this entry was recorded
- * @param metadata  optional label (e.g. tool name, episode type)
+ * @param metadata  optional structured metadata ({@link ToolCallMetadata},
+ *                  {@link EpisodeLabel}); {@code null} when the entry carries none
  */
 public record MemoryEntry(
         String role,
         String content,
         Instant timestamp,
-        String metadata
+        EntryMetadata metadata
 ) {
     public MemoryEntry {
         Objects.requireNonNull(role, "role must not be null");
@@ -28,8 +29,8 @@ public record MemoryEntry(
         return new MemoryEntry(role, content, Instant.now(), null);
     }
 
-    /** Creates a memory entry with the current timestamp and a metadata label. */
-    public static MemoryEntry of(String role, String content, String metadata) {
+    /** Creates a memory entry with the current timestamp and structured metadata. */
+    public static MemoryEntry of(String role, String content, EntryMetadata metadata) {
         return new MemoryEntry(role, content, Instant.now(), metadata);
     }
 }

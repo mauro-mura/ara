@@ -1,5 +1,6 @@
 package io.ara.runtime.pipeline;
 
+import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.RunState;
 
@@ -66,17 +67,35 @@ public record PipelineExecution(
     }
 
     /**
+     * Number of times {@code stepName} has already appeared in {@link #history()} —
+     * that step's own attempt count so far. The named primitive for bounding a retry
+     * loop on a single step (e.g. {@code execution.attemptsOf("generate") < 3 ? "generate"
+     * : "giveUp"}) without maintaining a separate {@link #state()} counter — {@code
+     * maxSteps} only bounds the whole pipeline, not one step's own retries.
+     */
+    public int attemptsOf(String stepName) {
+        Objects.requireNonNull(stepName, "stepName must not be null");
+        return (int) history.stream().filter(r -> r.stepName().equals(stepName)).count();
+    }
+
+    /**
      * Result produced by a single step execution.
      *
      * @param stepName name of the step as declared in the pipeline builder
      * @param output   the post-processed output string returned by the agent
      * @param elapsed  wall-clock duration of that step execution
+     * @param response the full {@link AgentResponse} the step's agent produced — carries
+     *                 that step's own token usage, cost, and execution-step trace, so a
+     *                 caller can aggregate them across every step instead of only the
+     *                 pipeline's last one (see {@link PipelineResult#totalInputTokens()}
+     *                 and friends).
      */
-    public record StepResult(String stepName, String output, Duration elapsed) {
+    public record StepResult(String stepName, String output, Duration elapsed, AgentResponse response) {
         public StepResult {
             Objects.requireNonNull(stepName, "stepName must not be null");
             Objects.requireNonNull(output,   "output must not be null");
             Objects.requireNonNull(elapsed,  "elapsed must not be null");
+            Objects.requireNonNull(response, "response must not be null");
         }
     }
 }

@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -38,9 +39,9 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void linear_chain_without_explicit_transitions_executes_in_declaration_order() {
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a", echo("a", "out-a"))
-                .state("b", echo("b", "out-b"))
-                .state("c", echo("c", "out-c"))
+                .state("a", echoAgent("a", "out-a"))
+                .state("b", echoAgent("b", "out-b"))
+                .state("c", echoAgent("c", "out-c"))
                 .build();
 
         PipelineResult r = pipeline.run("start");
@@ -54,9 +55,9 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void terminal_state_stops_pipeline_before_subsequent_states() {
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a",    echo("a",    "out-a"))
-                .state("done", echo("done", "finished"))
-                .state("c",    echo("c",    "should-not-run"))
+                .state("a",    echoAgent("a",    "out-a"))
+                .state("done", echoAgent("done", "finished"))
+                .state("c",    echoAgent("c",    "should-not-run"))
                 .terminal("done")
                 .transition("a", "done")
                 .build();
@@ -71,9 +72,9 @@ class AgentPipelineFsmBuilderTest {
     void multiple_terminal_states_each_stop_the_pipeline() {
         for (String verdict : List.of("APPROVED", "REJECTED")) {
             AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                    .state("review",   echo("review",   "VERDICT: " + verdict))
-                    .state("approved", echo("approved", "ok"))
-                    .state("rejected", echo("rejected", "ko"))
+                    .state("review",   echoAgent("review",   "VERDICT: " + verdict))
+                    .state("approved", echoAgent("approved", "ok"))
+                    .state("rejected", echoAgent("rejected", "ko"))
                     .terminal("approved", "rejected")
                     .transition("review", exec ->
                             exec.lastOutput().contains("APPROVED") ? "approved" : "rejected")
@@ -90,9 +91,9 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void unconditional_transition_overrides_sequential_order() {
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a", echo("a", "out-a"))
-                .state("b", echo("b", "out-b"))  // declared second but never reached
-                .state("c", echo("c", "out-c"))
+                .state("a", echoAgent("a", "out-a"))
+                .state("b", echoAgent("b", "out-b"))  // declared second but never reached
+                .state("c", echoAgent("c", "out-c"))
                 .terminal("c")
                 .transition("a", "c")            // skip b
                 .build();
@@ -108,18 +109,18 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void conditional_transition_routes_based_on_last_output() {
         AgentPipeline pipelineA = AgentPipeline.fsmBuilder()
-                .state("check", echo("check", "STATUS: OK"))
-                .state("pass",  echo("pass",  "passed"))
-                .state("fail",  echo("fail",  "failed"))
+                .state("check", echoAgent("check", "STATUS: OK"))
+                .state("pass",  echoAgent("pass",  "passed"))
+                .state("fail",  echoAgent("fail",  "failed"))
                 .terminal("pass", "fail")
                 .transition("check", exec ->
                         exec.lastOutput().contains("OK") ? "pass" : "fail")
                 .build();
 
         AgentPipeline pipelineB = AgentPipeline.fsmBuilder()
-                .state("check", echo("check", "STATUS: ERROR"))
-                .state("pass",  echo("pass",  "passed"))
-                .state("fail",  echo("fail",  "failed"))
+                .state("check", echoAgent("check", "STATUS: ERROR"))
+                .state("pass",  echoAgent("pass",  "passed"))
+                .state("fail",  echoAgent("fail",  "failed"))
                 .terminal("pass", "fail")
                 .transition("check", exec ->
                         exec.lastOutput().contains("OK") ? "pass" : "fail")
@@ -134,8 +135,8 @@ class AgentPipelineFsmBuilderTest {
         String[] capturedInitial = {null};
 
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a", echo("a", "out-a"))
-                .state("b", echo("b", "out-b"))
+                .state("a", echoAgent("a", "out-a"))
+                .state("b", echoAgent("b", "out-b"))
                 .terminal("b")
                 .transition("a", exec -> {
                     capturedInitial[0] = exec.initialInput();
@@ -166,10 +167,10 @@ class AgentPipelineFsmBuilderTest {
         };
 
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("draft",  echo("draft",  "design text"))
+                .state("draft",  echoAgent("draft",  "design text"))
                 .state("review", reviewAgent)
-                .state("revise", echo("revise", "revised design"))
-                .state("done",   echo("done",   "approved!"))
+                .state("revise", echoAgent("revise", "revised design"))
+                .state("done",   echoAgent("done",   "approved!"))
                 .terminal("done")
                 .transition("draft", "review")
                 .transition("review", exec ->
@@ -187,19 +188,16 @@ class AgentPipelineFsmBuilderTest {
     void loop_detection_via_history_count_triggers_escalation() {
         // review always says REVISE — router must escalate after 2 revisions
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("draft",    echo("draft",    "design"))
-                .state("review",   echo("review",   "VERDICT: REVISE"))
-                .state("revise",   echo("revise",   "revised"))
-                .state("escalate", echo("escalate", "ESCALATED"))
-                .state("done",     echo("done",     "closed"))
+                .state("draft",    echoAgent("draft",    "design"))
+                .state("review",   echoAgent("review",   "VERDICT: REVISE"))
+                .state("revise",   echoAgent("revise",   "revised"))
+                .state("escalate", echoAgent("escalate", "ESCALATED"))
+                .state("done",     echoAgent("done",     "closed"))
                 .terminal("done")
                 .transition("draft", "review")
                 .transition("review", exec -> {
-                    long revises = exec.history().stream()
-                            .filter(s -> s.stepName().equals("revise"))
-                            .count();
                     if (exec.lastOutput().contains("APPROVED")) return "done";
-                    return revises >= 2 ? "escalate" : "revise";
+                    return exec.attemptsOf("revise") >= 2 ? "escalate" : "revise";
                 })
                 .transition("revise",   "review")
                 .transition("escalate", "done")
@@ -218,9 +216,9 @@ class AgentPipelineFsmBuilderTest {
         List<String> capturedStepNames = new java.util.ArrayList<>();
 
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a", echo("a", "out-a"))
-                .state("b", echo("b", "out-b"))
-                .state("c", echo("c", "out-c"))
+                .state("a", echoAgent("a", "out-a"))
+                .state("b", echoAgent("b", "out-b"))
+                .state("c", echoAgent("c", "out-c"))
                 .terminal("c")
                 .transition("a", "b")
                 .transition("b", exec -> {
@@ -251,8 +249,8 @@ class AgentPipelineFsmBuilderTest {
 
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
                 .state("review", reviewAgent)
-                .state("revise", echo("revise", "patched"))
-                .state("done",   echo("done",   "ok"))
+                .state("revise", echoAgent("revise", "patched"))
+                .state("done",   echoAgent("done",   "ok"))
                 .terminal("done")
                 .transition("review", exec -> {
                     lastReviewOutput[0] = exec.resultOf("review").map(r -> r.output()).orElse(null);
@@ -271,9 +269,9 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void custom_initial_state_starts_execution_from_specified_state() {
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("skipped", echo("skipped", "should-not-run"))
-                .state("entry",   echo("entry",   "entry-out"))
-                .state("end",     echo("end",     "done"))
+                .state("skipped", echoAgent("skipped", "should-not-run"))
+                .state("entry",   echoAgent("entry",   "entry-out"))
+                .state("end",     echoAgent("end",     "done"))
                 .terminal("end")
                 .initial("entry")
                 .transition("entry", "end")
@@ -290,7 +288,7 @@ class AgentPipelineFsmBuilderTest {
     @Test
     void infinite_loop_is_caught_by_max_steps() {
         AgentPipeline pipeline = AgentPipeline.fsmBuilder()
-                .state("a", echo("a", "out"))
+                .state("a", echoAgent("a", "out"))
                 .transition("a", "a")   // self-loop
                 .maxSteps(4)
                 .build();
@@ -307,8 +305,8 @@ class AgentPipelineFsmBuilderTest {
     void duplicate_state_name_throws() {
         assertThrows(IllegalArgumentException.class, () ->
                 AgentPipeline.fsmBuilder()
-                        .state("a", echo("a", "out"))
-                        .state("a", echo("a2", "out"))
+                        .state("a", echoAgent("a", "out"))
+                        .state("a", echoAgent("a2", "out"))
                         .build());
     }
 
@@ -316,7 +314,7 @@ class AgentPipelineFsmBuilderTest {
     void unknown_initial_state_throws() {
         assertThrows(IllegalStateException.class, () ->
                 AgentPipeline.fsmBuilder()
-                        .state("a", echo("a", "out"))
+                        .state("a", echoAgent("a", "out"))
                         .initial("nonexistent")
                         .build());
     }
@@ -328,17 +326,6 @@ class AgentPipelineFsmBuilderTest {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static AraAgent echo(String id, String output) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId()        { return agentId; }
-            @Override public AgentConfig config()      { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) { return ok(task, id, output); }
-            @Override public void terminate() {}
-        };
-    }
 
     private static AgentResponse ok(AgentTask task, String id, String output) {
         return AgentResponse.success(

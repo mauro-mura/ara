@@ -13,10 +13,12 @@ without depending on a specific SDK. Concrete adapters live in `ara-adapters`.
 - **`LlmRouter`** — selects which `LlmClient` to use for a call, applying
   `LlmSelectionPolicy` (`PRIMARY_ONLY`, `FAILOVER`, `ROUND_ROBIN`). Default
   implementation is `DefaultLlmRouter` in `ara-runtime`.
-- **`LlmClientFactory`** — functional interface for building an `LlmClient` from a full
-  `LlmProfile`, wired by `AraPlatformFactory`. Takes the whole profile (not just
-  `baseUrl`/`apiKey`/`modelName`) so implementations can honor `streamingEnabled()`,
-  `nativeJsonSchema()`, and the cost fields on the inline-override path too.
+- **`LlmClientFactory`** — functional interface for building an `LlmClient` from an
+  `LlmTransport` (ADR-039 §3 "asse A" — `baseUrl`/`apiKey`/`modelName` only), wired by
+  `AraPlatformFactory`. Deliberately *not* given the full `LlmProfile`: parameters like
+  `temperature`, `streamingEnabled()`, `nativeJsonSchema()` are asse B and flow per-call
+  via `LlmCallContext` instead, since the same transport is shared across every profile
+  that references it regardless of their parameters.
 
 ## Data model
 
@@ -50,9 +52,6 @@ Three layers, increasing in specificity — later layers win:
 `LlmExecutionHints` is the channel (`AgentTask.hints()`) a caller uses to request
 per-call overrides without touching the data contract (`AgentContract`) — it describes
 *how* the model is called, not the shape of the output.
-
-`MemoryConfig` is unrelated to model selection: it's the working-memory/conversation
-sub-record of `AgentConfig` (token budget, eviction strategy, reflection settings).
 
 ## Notes for implementers
 
