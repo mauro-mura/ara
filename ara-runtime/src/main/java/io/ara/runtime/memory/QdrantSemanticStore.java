@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.ara.core.memory.EpisodeLabel;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticStore;
 import org.slf4j.Logger;
@@ -205,7 +206,7 @@ public final class QdrantSemanticStore implements SemanticStore {
                 String   content = p.path("content").asText("");
                 String   type    = p.path("type").asText(null);
                 if (!content.isBlank()) {
-                    entries.add(MemoryEntry.of(role, content, type));
+                    entries.add(MemoryEntry.of(role, content, type != null ? new EpisodeLabel(type) : null));
                 }
             }
 

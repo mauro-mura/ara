@@ -298,10 +298,9 @@ final class ReactExecutionSupport {
             var e = entries.get(i);
             if (i == 0 && "system".equals(e.role())) {
                 messages.add(new LlmMessage("system", e.content() + toolCatalog + reactSuffix));
-            } else if (e.metadata() != null
+            } else if (e.metadata() instanceof ToolCallMetadata meta
                     && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
                 // Propagate toolCallId and toolName for native function-calling reconstruction
-                ToolCallMetadata meta = ToolCallMetadata.decode(e.metadata());
                 messages.add(new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName()));
             } else {
                 messages.add(new LlmMessage(e.role(), e.content()));

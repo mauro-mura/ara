@@ -350,9 +350,8 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             var e = entries.get(i);
             if (i == 0 && "system".equals(e.role())) {
                 messages.add(new LlmMessage("system", e.content() + toolCatalog + respactSuffix));
-            } else if (e.metadata() != null
+            } else if (e.metadata() instanceof ToolCallMetadata meta
                     && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
-                ToolCallMetadata meta = ToolCallMetadata.decode(e.metadata());
                 messages.add(new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName()));
             } else {
                 messages.add(new LlmMessage(e.role(), e.content()));

@@ -49,7 +49,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
 
     @Override
     public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
-        working.add(MemoryEntry.of(role, content, metadata != null ? metadata.encode() : null));
+        working.add(MemoryEntry.of(role, content, metadata));
         if (maxTokens > 0) evictIfNeeded();
     }
 
