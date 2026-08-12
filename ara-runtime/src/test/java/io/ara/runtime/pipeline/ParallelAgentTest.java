@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.failingAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ParallelAgentTest {
@@ -173,32 +175,6 @@ class ParallelAgentTest {
     }
 
     // ── Stubs ─────────────────────────────────────────────────────────────────
-
-    private static AraAgent echoAgent(String id, String output) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.success(task.taskId(), agentId, output, 1, 0, 0, Duration.ofMillis(1), List.of());
-            }
-            @Override public void terminate() {}
-        };
-    }
-
-    private static AraAgent failingAgent(String id, String reason) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.failure(task.taskId(), agentId, reason, Duration.ofMillis(1));
-            }
-            @Override public void terminate() {}
-        };
-    }
 
     private static AraAgent capturingAgent(String id, Set<String> seenInputs) {
         AgentId agentId = AgentId.of(id);

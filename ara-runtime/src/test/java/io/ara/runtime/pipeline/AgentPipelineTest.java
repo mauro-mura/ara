@@ -17,6 +17,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.ara.runtime.pipeline.PipelineTestAgents.CapturingAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.echoAgent;
+import static io.ara.runtime.pipeline.PipelineTestAgents.failingAgent;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AgentPipelineTest {
@@ -52,7 +55,7 @@ class AgentPipelineTest {
                 .step("second", second)
                 .build();
         pipeline.run("initial");
-        assertEquals("first-output", second.lastInput);
+        assertEquals("first-output", second.lastInput());
     }
 
     @Test
@@ -145,7 +148,7 @@ class AgentPipelineTest {
                 .build();
         PipelineResult r = pipeline.run("start");
         assertTrue(r.success());
-        assertEquals("A+B", third.lastInput);
+        assertEquals("A+B", third.lastInput());
     }
 
     @Test
@@ -158,7 +161,7 @@ class AgentPipelineTest {
                 .step("second", second)
                 .build();
         pipeline.run("initial");
-        assertEquals("first-output", second.lastInput);
+        assertEquals("first-output", second.lastInput());
     }
 
     @Test
@@ -193,7 +196,7 @@ class AgentPipelineTest {
         PipelineResult r = pipeline.run(task);
 
         assertTrue(r.success());
-        assertEquals("hello-state", reader.lastInput,
+        assertEquals("hello-state", reader.lastInput(),
                 "every step's task derives from the same original task, so state is shared by construction");
     }
 
@@ -212,7 +215,7 @@ class AgentPipelineTest {
             PipelineResult r = pipeline.run("start");
 
             assertTrue(r.success());
-            assertEquals("A,B", after.lastInput);
+            assertEquals("A,B", after.lastInput());
         } finally {
             executor.shutdownNow();
         }
@@ -237,53 +240,5 @@ class AgentPipelineTest {
         } finally {
             executor.shutdownNow();
         }
-    }
-
-    // ── Stubs ─────────────────────────────────────────────────────────────────
-
-    private static AraAgent echoAgent(String id, String output) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.success(task.taskId(), agentId, output, 1, 0, 0, Duration.ofMillis(1), List.of());
-            }
-            @Override public void terminate() {}
-        };
-    }
-
-    private static AraAgent failingAgent(String id, String reason) {
-        AgentId agentId = AgentId.of(id);
-        return new AraAgent() {
-            @Override public AgentId agentId() { return agentId; }
-            @Override public AgentConfig config() { return null; }
-            @Override public AgentState currentState() { return AgentState.IDLE; }
-            @Override public AgentResponse execute(AgentTask task) {
-                return AgentResponse.failure(task.taskId(), agentId, reason, Duration.ofMillis(1));
-            }
-            @Override public void terminate() {}
-        };
-    }
-
-    private static class CapturingAgent implements AraAgent {
-        final AgentId agentId;
-        final String output;
-        String lastInput;
-
-        CapturingAgent(AgentId id, String output) {
-            this.agentId = id;
-            this.output  = output;
-        }
-
-        @Override public AgentId agentId() { return agentId; }
-        @Override public AgentConfig config() { return null; }
-        @Override public AgentState currentState() { return AgentState.IDLE; }
-        @Override public AgentResponse execute(AgentTask task) {
-            lastInput = task.input();
-            return AgentResponse.success(task.taskId(), agentId, output, 1, 0, 0, Duration.ofMillis(1), List.of());
-        }
-        @Override public void terminate() {}
     }
 }
