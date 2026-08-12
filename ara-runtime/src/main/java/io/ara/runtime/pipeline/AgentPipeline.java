@@ -121,7 +121,15 @@ public final class AgentPipeline {
             }
 
             PipelineExecution execution = new PipelineExecution(task, history, stepCount);
-            AgentTask stepTask = step.buildTask(execution);
+            AgentTask stepTask;
+            try {
+                stepTask = step.buildTask(execution);
+            } catch (RuntimeException e) {
+                log.warn("Pipeline step [{}] input shaper threw", currentStep, e);
+                return PipelineResult.failure(
+                        "Step '" + currentStep + "' input shaper threw: " + e,
+                        lastResponse, executed, elapsed(start));
+            }
 
             log.debug("Pipeline step [{}] input.len={}", currentStep, stepTask.input().length());
             Instant stepStart = Instant.now();

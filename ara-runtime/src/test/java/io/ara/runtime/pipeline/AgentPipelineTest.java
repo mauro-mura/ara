@@ -152,6 +152,24 @@ class AgentPipelineTest {
     }
 
     @Test
+    void inputShaper_thatThrows_producesGracefulFailure_insteadOfCrashing() {
+        // An input shaper referencing a step that was never declared (typo, or a step
+        // that hasn't run yet) throws from .get() on an empty Optional. The pipeline must
+        // report this as a normal failed PipelineResult, not let the exception escape run().
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("first", echoAgent("first", "A"))
+                .step("second", echoAgent("second", "B"), execution ->
+                        execution.task().withInput(execution.resultOf("nonexistent").get().output()))
+                .build();
+
+        PipelineResult r = pipeline.run("start");
+
+        assertFalse(r.success());
+        assertTrue(r.failureReason().contains("second"));
+        assertTrue(r.failureReason().contains("input shaper threw"));
+    }
+
+    @Test
     void step_withoutInputShaper_keepsDefaultBehavior_previousOutputVerbatim() {
         // Regression guard: the 2-arg step(name, agent) overload must behave exactly
         // as before now that it delegates to the 3-arg one with input = null.
