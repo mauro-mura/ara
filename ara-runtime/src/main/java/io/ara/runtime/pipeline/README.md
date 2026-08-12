@@ -312,6 +312,22 @@ AgentState` bug described above ("No per-session concurrency"). Nested fan-out
 (`ParallelAgent` inside `ParallelAgent`, or a pipeline whose own step is a `ParallelAgent`)
 works for the same reason everything else in this package composes: it is just an `AraAgent`.
 
+By default `ParallelAgent` builds its own `AgentConfig.defaults().agentType("parallel")`
+internally — for a caller that needs a custom `agentType()`, `tags()`, or other config the
+default doesn't set, every constructor has an overload that takes an explicit `AgentConfig`
+instead, the same shape `PipelineAgents.of(agentId, config, pipeline)` already offered:
+
+```java
+AgentConfig config = AgentConfig.defaults()
+        .agentId(AgentId.of("gather"))
+        .agentType("research-fanout")
+        .build();
+
+ParallelAgent gather = new ParallelAgent(AgentId.of("gather"), config,
+        List.of(sourceA, sourceB, sourceC), runtime.executor(),
+        AgentChain.MergeStrategy.joining("\n\n"));
+```
+
 ## Advanced usage
 
 ### Bounded retry loop with a graceful give-up

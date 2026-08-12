@@ -168,6 +168,35 @@ class ParallelAgentTest {
     }
 
     @Test
+    void defaultConstructor_stillBuildsTheDefaultParallelConfig() {
+        // Regression guard: adding the explicit-AgentConfig overload must not change
+        // what the existing constructors build on their own.
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"),
+                List.of(echoAgent("a", "A")), executor, AgentChain.MergeStrategy.joining(","));
+
+        assertEquals("parallel", parallel.config().agentType());
+        assertEquals(AgentId.of("fanout"), parallel.config().agentId());
+    }
+
+    @Test
+    void explicitConfig_isUsedVerbatim_insteadOfTheBuiltInDefault() {
+        AgentConfig config = AgentConfig.defaults()
+                .agentId(AgentId.of("fanout"))
+                .agentType("custom-fanout")
+                .build();
+
+        ParallelAgent parallel = new ParallelAgent(AgentId.of("fanout"), config,
+                List.of(echoAgent("a", "A")), executor, AgentChain.MergeStrategy.joining(","));
+
+        assertSame(config, parallel.config());
+        assertEquals("custom-fanout", parallel.config().agentType());
+
+        AgentResponse response = parallel.execute(AgentTask.of("go"));
+        assertTrue(response.isSuccess(), "an explicit config must not otherwise change fan-out behavior");
+        assertEquals("A", response.content());
+    }
+
+    @Test
     void rejectsEmptyMemberList() {
         assertThrows(IllegalArgumentException.class, () ->
                 new ParallelAgent(AgentId.of("fanout"), List.of(), executor,
