@@ -104,6 +104,39 @@ class AgentPipelineTest {
     }
 
     @Test
+    void attemptsOf_countsThatStepsPriorRuns_forABoundedRetryWithoutARunStateCounter() {
+        AraAgent generate = echoAgent("generate", "INVALID");
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("generate", generate)
+                .step("validate", echoAgent("validate", "still invalid"))
+                .step("giveUp",   echoAgent("giveUp",   "gave up"))
+                .route("validate", execution ->
+                        execution.attemptsOf("generate") < 3 ? "generate" : "giveUp")
+                .maxSteps(12)
+                .build();
+
+        PipelineResult r = pipeline.run("start");
+
+        assertTrue(r.success(), "giveUp is a normal step, so the pipeline still succeeds");
+        assertEquals("gave up", r.finalOutput());
+        assertEquals(3, r.stepsExecuted().stream().filter("generate"::equals).count());
+    }
+
+    @Test
+    void attemptsOf_isZero_forAStepThatHasNotRunYet() {
+        AgentPipeline pipeline = AgentPipeline.builder()
+                .step("first", echoAgent("first", "out"))
+                .route("first", execution -> {
+                    assertEquals(0, execution.attemptsOf("never-declared"));
+                    assertEquals(1, execution.attemptsOf("first"));
+                    return null;
+                })
+                .build();
+
+        assertTrue(pipeline.run("start").success());
+    }
+
+    @Test
     void pipeline_fails_when_step_fails() {
         AgentPipeline pipeline = AgentPipeline.builder()
                 .step("a", echoAgent("a", "ok"))

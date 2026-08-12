@@ -67,6 +67,18 @@ public record PipelineExecution(
     }
 
     /**
+     * Number of times {@code stepName} has already appeared in {@link #history()} —
+     * that step's own attempt count so far. The named primitive for bounding a retry
+     * loop on a single step (e.g. {@code execution.attemptsOf("generate") < 3 ? "generate"
+     * : "giveUp"}) without maintaining a separate {@link #state()} counter — {@code
+     * maxSteps} only bounds the whole pipeline, not one step's own retries.
+     */
+    public int attemptsOf(String stepName) {
+        Objects.requireNonNull(stepName, "stepName must not be null");
+        return (int) history.stream().filter(r -> r.stepName().equals(stepName)).count();
+    }
+
+    /**
      * Result produced by a single step execution.
      *
      * @param stepName name of the step as declared in the pipeline builder

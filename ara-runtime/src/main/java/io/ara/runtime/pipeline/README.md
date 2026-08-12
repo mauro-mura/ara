@@ -334,8 +334,9 @@ ParallelAgent gather = new ParallelAgent(AgentId.of("gather"), config,
 
 `maxSteps` is a blunt safety net — it fails the whole pipeline once every step in the
 run, across every loop, hits the cap. A step that should retry a *bounded* number of
-times and then fall back to something else needs its own counter, kept in `RunState` via
-`merge(...)` (the concurrency-safe accumulator primitive — see `RunState.merge`):
+times and then fall back to something else can check `PipelineExecution.attemptsOf(name)`
+— how many times `name` has already run, counted from `history()` — instead of
+maintaining its own counter:
 
 ```java
 AgentPipeline pipeline = AgentPipeline.builder()
@@ -346,8 +347,7 @@ AgentPipeline pipeline = AgentPipeline.builder()
             if (execution.lastOutput().contains("VALID")) {
                 return null; // done — validation passed
             }
-            int attempts = execution.state().merge("validateAttempts", 1, Integer::sum);
-            return attempts < 3 ? "generate" : "giveUp";
+            return execution.attemptsOf("generate") < 3 ? "generate" : "giveUp";
         })
         .maxSteps(12) // safety net well above the 3 intended retries; should never fire
         .build();
@@ -358,6 +358,12 @@ AgentPipeline pipeline = AgentPipeline.builder()
 (which ends the pipeline in `failure()` instead). Reserve `maxSteps` for genuinely
 unbounded loops (a bug in a router, an LLM that never emits the expected token) rather
 than as the primary way to bound an intentional retry.
+
+For state that isn't simply "how many times did this step run" — an accumulating score,
+a value a *tool* sets mid-step, anything that needs to survive independently of step
+re-execution — `RunState.merge` (see above) is still the right, concurrency-safe
+primitive. `attemptsOf` only covers the step-count case, which is common enough on its
+own to deserve a named primitive instead of every caller re-deriving it from `history()`.
 
 ### Multi-way branching (not just approve/reject)
 

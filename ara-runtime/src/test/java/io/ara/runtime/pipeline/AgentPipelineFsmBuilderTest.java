@@ -196,11 +196,8 @@ class AgentPipelineFsmBuilderTest {
                 .terminal("done")
                 .transition("draft", "review")
                 .transition("review", exec -> {
-                    long revises = exec.history().stream()
-                            .filter(s -> s.stepName().equals("revise"))
-                            .count();
                     if (exec.lastOutput().contains("APPROVED")) return "done";
-                    return revises >= 2 ? "escalate" : "revise";
+                    return exec.attemptsOf("revise") >= 2 ? "escalate" : "revise";
                 })
                 .transition("revise",   "review")
                 .transition("escalate", "done")
