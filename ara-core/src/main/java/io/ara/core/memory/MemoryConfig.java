@@ -1,4 +1,4 @@
-package io.ara.core.llm;
+package io.ara.core.memory;
 
 import java.util.Objects;
 

@@ -4,7 +4,7 @@ import io.ara.core.common.AgentId;
 import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
-import io.ara.core.llm.MemoryConfig;
+import io.ara.core.memory.MemoryConfig;
 
 import java.time.Duration;
 import java.util.List;

@@ -51,9 +51,6 @@ Three layers, increasing in specificity — later layers win:
 per-call overrides without touching the data contract (`AgentContract`) — it describes
 *how* the model is called, not the shape of the output.
 
-`MemoryConfig` is unrelated to model selection: it's the working-memory/conversation
-sub-record of `AgentConfig` (token budget, eviction strategy, reflection settings).
-
 ## Notes for implementers
 
 - `temperature`/`topP` can be set on `LlmProfile`, overridden per-call on
