@@ -52,7 +52,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * to silently miss in a second copy — the parallel-dispatch interrupt propagation and
  * the streaming-subscription-leak-on-timeout fix (see {@link #dispatchParallel} / {@link
  * #streamAndCollect}) were both real bugs, and {@link ReflActStrategy} choosing to reuse
- * {@link #decideNextStep} rather than re-implement it is what keeps a future ReAct
+ * {@link #decideNormal} rather than re-implement it is what keeps a future ReAct
  * protocol tweak (e.g. a new sentinel format) from silently applying to one strategy and
  * not the other.
  */
@@ -141,17 +141,23 @@ final class ReactExecutionSupport {
     // ── Plain ReAct decision logic (shared by ReactStrategy and ReflActStrategy) ───
 
     /**
-     * What to do with the current completion, in priority order:
+     * What to do with the current completion on a <strong>normal</strong> (non-forced)
+     * iteration, in priority order:
      * <ol>
-     *   <li>{@link FinalAnswer} — the LLM signalled it is done (explicit sentinel,
-     *       natural stop, or the forced-final iteration produced plain text).</li>
+     *   <li>{@link FinalAnswer} — the LLM signalled it is done (explicit sentinel or
+     *       a natural stop with no tool call).</li>
      *   <li>{@link DispatchTools} — one or more tool calls to run, from either the
      *       LLM adapter's structured tool-call channel (OpenAI function-calling) or
      *       an inline {@code {"tool_id":...}} / {@code <|channel|>} call extracted
      *       from the raw text (for models that don't use native function-calling).</li>
-     *   <li>{@link Continue} — intermediate reasoning step, or a forced-final
-     *       iteration with no final answer yet; loop again.</li>
+     *   <li>{@link Continue} — intermediate reasoning step; loop again.</li>
      * </ol>
+     *
+     * <p>See {@link ForcedFinalDecision} for the forced-final-iteration counterpart.
+     * Splitting the two iteration shapes into separate sealed types — rather than one
+     * type plus a {@code forceFinal} boolean the caller has to remember to check — means
+     * a forced-final iteration dispatching a tool is a compile error, not a rule enforced
+     * by a runtime {@code if}.
      */
     sealed interface StepDecision {
         record FinalAnswer(String answer) implements StepDecision {}
@@ -160,32 +166,36 @@ final class ReactExecutionSupport {
     }
 
     /**
-     * Decides the next step from the current completion — see {@link StepDecision}
-     * for the priority order.
+     * What to do with the current completion on the <strong>forced-final</strong>
+     * iteration — tools were withheld from the LLM for this call (see {@code forceFinal}
+     * in {@link ReactStrategy}/{@link ReflActStrategy}), so there is nothing to dispatch:
+     * either the output is a final answer, or the caller loops again.
      */
-    static StepDecision decideNextStep(
-            String output, LlmCompletion completion, boolean forceFinal, AgentTask task, boolean noToolsAvailable) {
+    sealed interface ForcedFinalDecision {
+        record FinalAnswer(String answer) implements ForcedFinalDecision {}
+        record Continue() implements ForcedFinalDecision {}
+    }
 
-        // On the forced-final iteration tools are withheld — any tool-call signal
-        // from the LLM is ignored and the output is treated as a final-answer candidate.
-        // Same when the agent has no enabled tools at all: extractInline() matches any
-        // {"name": ...} JSON object in the text as a fallback heuristic, which collides
-        // with tool-less agents (e.g. an AgentBased grader) that legitimately emit JSON
-        // containing a "name" field of their own — there is nothing to dispatch either
-        // way, so skipping the parse costs nothing and avoids false-positive tool calls.
-        Optional<ToolCallParser.ToolCallRequest> inlineCall = (completion.hasToolCall() || forceFinal || noToolsAvailable)
+    /**
+     * Decides the next step on a normal iteration — see {@link StepDecision} for the
+     * priority order. Use {@link #decideForcedFinal} once tools have been withheld for
+     * the forced-final iteration(s) instead.
+     */
+    static StepDecision decideNormal(
+            String output, LlmCompletion completion, AgentTask task, boolean noToolsAvailable) {
+
+        // When the agent has no enabled tools at all, skip the inline-JSON parse:
+        // extractInline() matches any {"name": ...} JSON object in the text as a
+        // fallback heuristic, which collides with tool-less agents (e.g. an AgentBased
+        // grader) that legitimately emit JSON containing a "name" field of their own —
+        // there is nothing to dispatch either way, so skipping the parse costs nothing
+        // and avoids false-positive tool calls.
+        Optional<ToolCallParser.ToolCallRequest> inlineCall = (completion.hasToolCall() || noToolsAvailable)
                 ? Optional.empty()
                 : ToolCallParser.extractInline(output);
 
         if (!completion.hasToolCall() && inlineCall.isEmpty() && isFinalAnswer(output, completion)) {
             return new StepDecision.FinalAnswer(extractFinalAnswer(output));
-        }
-
-        // On the forced-final iteration we never dispatch a tool even if the LLM
-        // emitted one — the caller loops and lets isFinalAnswer catch it later
-        // (or hits maxIterations).
-        if (forceFinal) {
-            return new StepDecision.Continue();
         }
 
         List<ToolCallParser.ToolCallRequest> allCalls = new ArrayList<>();
@@ -197,6 +207,19 @@ final class ReactExecutionSupport {
         }
 
         return allCalls.isEmpty() ? new StepDecision.Continue() : new StepDecision.DispatchTools(allCalls);
+    }
+
+    /**
+     * Decides the next step on the forced-final iteration. Tools were withheld from the
+     * LLM for this call, so any tool-call signal it emits anyway is ignored outright —
+     * unlike {@link #decideNormal}, there is no inline-JSON parse to run (nothing would
+     * be done with the result) and no {@code DispatchTools} case to return it as.
+     */
+    static ForcedFinalDecision decideForcedFinal(String output, LlmCompletion completion) {
+        if (!completion.hasToolCall() && isFinalAnswer(output, completion)) {
+            return new ForcedFinalDecision.FinalAnswer(extractFinalAnswer(output));
+        }
+        return new ForcedFinalDecision.Continue();
     }
 
     /**
