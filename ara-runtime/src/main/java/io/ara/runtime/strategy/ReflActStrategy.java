@@ -191,37 +191,53 @@ public final class ReflActStrategy implements ExecutionStrategy {
             ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
             ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
 
-            ReactExecutionSupport.StepDecision decision = ReactExecutionSupport.decideNextStep(
-                    output, completion, forceFinal, task, resolvedTools.isEmpty());
-            switch (decision) {
-                case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
-                    log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                    steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                    return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
-                }
-                case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
-                    unproductiveStreak = 0;   // an action was taken — the "thinking in circles" trigger does not apply
-                    ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
-                            tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
-                    boolean anyFailed;
-                    if (calls.size() == 1) {
-                        anyFailed = ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
-                    } else {
-                        log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
-                        anyFailed = ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+            // forceFinal picks which sealed decision type governs this iteration — see
+            // ReactStrategy for why DispatchTools not existing on the forced branch matters.
+            // Reflection triggers are suppressed on that branch simply by living in the
+            // other branch's switch: there is no DispatchTools/Continue-with-streak case
+            // there to attach them to, so "no reflection on the forced-final iteration"
+            // no longer needs its own runtime check.
+            if (forceFinal) {
+                ReactExecutionSupport.ForcedFinalDecision decision =
+                        ReactExecutionSupport.decideForcedFinal(output, completion);
+                switch (decision) {
+                    case ReactExecutionSupport.ForcedFinalDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
                     }
-                    if (anyFailed && !forceFinal && rc.reflectOnToolFailure() && reflectionsUsed < rc.maxReflections()) {
-                        var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
-                                "A tool call failed. Diagnose why and suggest what to try instead.", iterations);
-                        totalPromptTokens += usage.promptTokens();
-                        totalOutputTokens += usage.outputTokens();
-                        reflectionsUsed++;
-                    }
-                }
-                case ReactExecutionSupport.StepDecision.Continue ignored -> {
-                    if (forceFinal) {
+                    case ReactExecutionSupport.ForcedFinalDecision.Continue ignored ->
                         log.debug("Forced-final iteration: skipping tool dispatch for task [{}]", task.taskId());
-                    } else {
+                }
+            } else {
+                ReactExecutionSupport.StepDecision decision = ReactExecutionSupport.decideNormal(
+                        output, completion, task, resolvedTools.isEmpty());
+                switch (decision) {
+                    case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                    }
+                    case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
+                        unproductiveStreak = 0;   // an action was taken — the "thinking in circles" trigger does not apply
+                        ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
+                                tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
+                        boolean anyFailed;
+                        if (calls.size() == 1) {
+                            anyFailed = ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
+                        } else {
+                            log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
+                            anyFailed = ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+                        }
+                        if (anyFailed && rc.reflectOnToolFailure() && reflectionsUsed < rc.maxReflections()) {
+                            var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
+                                    "A tool call failed. Diagnose why and suggest what to try instead.", iterations);
+                            totalPromptTokens += usage.promptTokens();
+                            totalOutputTokens += usage.outputTokens();
+                            reflectionsUsed++;
+                        }
+                    }
+                    case ReactExecutionSupport.StepDecision.Continue ignored -> {
                         unproductiveStreak++;
                         if (unproductiveStreak >= rc.unproductiveStreak() && reflectionsUsed < rc.maxReflections()) {
                             var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),

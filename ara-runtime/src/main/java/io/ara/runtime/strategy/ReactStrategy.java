@@ -160,33 +160,46 @@ public final class ReactStrategy implements ExecutionStrategy {
             ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
 
             // ── Evaluate / Act ─────────────────────────────────────────────────
-            ReactExecutionSupport.StepDecision decision = ReactExecutionSupport.decideNextStep(
-                    output, completion, forceFinal, task, resolvedTools.isEmpty());
-            switch (decision) {
-                case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
-                    log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                    steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                    return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
-                }
-                case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
-                    ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
-                            tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
-                    if (calls.size() == 1) {
-                        // Single tool call — same deadline-bounded dispatch, plus the
-                        // legacy top-level toolCallId fallback batches never need.
-                        ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
-                    } else {
-                        // Multiple tool calls — dispatch in parallel via virtual threads
-                        log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
-                        ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+            // forceFinal picks which sealed decision type governs this iteration — on the
+            // forced branch DispatchTools does not exist as a case, so a tool dispatch here
+            // is a compile error rather than a rule enforced by remembering to check a flag.
+            if (forceFinal) {
+                ReactExecutionSupport.ForcedFinalDecision decision =
+                        ReactExecutionSupport.decideForcedFinal(output, completion);
+                switch (decision) {
+                    case ReactExecutionSupport.ForcedFinalDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
                     }
-                }
-                case ReactExecutionSupport.StepDecision.Continue ignored -> {
-                    // No tool call and no final answer this iteration — either the forced-final
-                    // iteration produced plain text that isFinalAnswer() will catch on the next
-                    // check, or the LLM emitted an intermediate reasoning step. Either way: loop.
-                    if (forceFinal) {
+                    case ReactExecutionSupport.ForcedFinalDecision.Continue ignored ->
                         log.debug("Forced-final iteration: skipping tool dispatch for task [{}]", task.taskId());
+                }
+            } else {
+                ReactExecutionSupport.StepDecision decision = ReactExecutionSupport.decideNormal(
+                        output, completion, task, resolvedTools.isEmpty());
+                switch (decision) {
+                    case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                    }
+                    case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
+                        ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
+                                tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
+                        if (calls.size() == 1) {
+                            // Single tool call — same deadline-bounded dispatch, plus the
+                            // legacy top-level toolCallId fallback batches never need.
+                            ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
+                        } else {
+                            // Multiple tool calls — dispatch in parallel via virtual threads
+                            log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
+                            ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+                        }
+                    }
+                    case ReactExecutionSupport.StepDecision.Continue ignored -> {
+                        // No tool call and no final answer this iteration — an intermediate
+                        // reasoning step. Loop again.
                     }
                 }
             }

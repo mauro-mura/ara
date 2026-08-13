@@ -59,12 +59,19 @@ fix lands once instead of drifting between near-copies. `ReactStrategy` and
 `ReflActStrategy` use all of it; `ReSpActStrategy` uses the dispatch/streaming half but
 brings its own three-branch decision (see below).
 
-- **Decision logic** — `StepDecision` (`FinalAnswer` / `DispatchTools` / `Continue`) and
-  `decideNextStep(...)`, checked in priority order each iteration: a structured tool call
-  from the LLM adapter → an inline `{"tool_id":...}` JSON or `<|channel|>` blob found in
-  the raw text (`ToolCallParser`) → the `FINAL_ANSWER` sentinel or a natural
+- **Decision logic** — two sealed types instead of one type gated by a `forceFinal`
+  boolean: `StepDecision` (`FinalAnswer` / `DispatchTools` / `Continue`) via
+  `decideNormal(...)` for ordinary iterations, and `ForcedFinalDecision` (`FinalAnswer` /
+  `Continue` — no `DispatchTools` case at all) via `decideForcedFinal(...)` for the
+  forced-final iteration(s). A forced-final iteration dispatching a tool is therefore a
+  compile error, not a rule enforced by an `if (forceFinal) return Continue()` a caller
+  has to get right. `decideNormal` checks, in priority order: a structured tool call from
+  the LLM adapter → an inline `{"tool_id":...}` JSON or `<|channel|>` blob found in the
+  raw text (`ToolCallParser`) → the `FINAL_ANSWER` sentinel or a natural
   `finishReason == "stop"` with no tool call → otherwise, an intermediate reasoning step
-  (loop again).
+  (loop again). `decideForcedFinal` only ever checks the final-answer condition, since
+  there is no tool catalog to have produced a call from and nothing to dispatch even if
+  the LLM emits one anyway.
 - **Message building** (`buildMessages`) and the `REACT_SYSTEM_SUFFIX` / tool-catalog
   injection, both skipped when the client speaks native function-calling.
 - **Synthesis nudge** (`maybeInjectSynthesis`): fires once, `tail` iterations before the

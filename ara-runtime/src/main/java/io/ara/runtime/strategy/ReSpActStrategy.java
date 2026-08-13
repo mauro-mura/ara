@@ -67,7 +67,7 @@ import java.util.Optional;
  * Action: SPEAK
  * Message: <text directed at the user>
  * }</pre>
- * A completion is resolved in this priority order (see {@link #decideNextStep}):
+ * A completion is resolved in this priority order (see {@link #decideNormal}):
  * a requested tool call, then an explicit {@code Action: FINAL_ANSWER} sentinel, then an
  * explicit {@code Action: SPEAK} sentinel, then — for a model that stops generating
  * without any sentinel and without a tool call — an <em>implicit SPEAK</em>, not an
@@ -164,7 +164,7 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             iterations++;
 
             // Hard stop: on the final iteration(s) withhold tools so the model cannot
-            // emit a structured tool call and MUST produce plain text — decideNextStep's
+            // emit a structured tool call and MUST produce plain text — decideForcedFinal's
             // implicit-SPEAK fallback then guarantees termination even for a model that
             // never emits either sentinel. Same rationale as ReactStrategy's forceFinal.
             boolean forceFinal = iterations >= config.maxIterations() - 1;
@@ -199,32 +199,53 @@ public final class ReSpActStrategy implements ExecutionStrategy {
 
             ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
 
-            StepDecision decision = decideNextStep(output, completion, forceFinal, task, resolvedTools.isEmpty());
-            switch (decision) {
-                case StepDecision.FinalAnswer(String answer) -> {
-                    log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                    steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                    return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
-                }
-                case StepDecision.Speak(String message) -> {
-                    log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iterations);
-                    steps.add(ExecutionStep.speak(message, iterations));
-                    task.notifySpeak(message);
-                    return ExecutionResult.success(message, iterations, totalPromptTokens, totalOutputTokens, steps);
-                }
-                case StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
-                    ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
-                            tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
-                    if (calls.size() == 1) {
-                        ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
-                    } else {
-                        log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
-                        ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+            // forceFinal picks which sealed decision type governs this iteration — on the
+            // forced branch DispatchTools does not exist as a case (same rationale as
+            // ReactStrategy.ForcedFinalDecision), so a tool dispatch here is a compile
+            // error rather than a rule enforced by remembering to check a flag.
+            if (forceFinal) {
+                ForcedFinalDecision decision = decideForcedFinal(output, completion);
+                switch (decision) {
+                    case ForcedFinalDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
                     }
-                }
-                case StepDecision.Continue ignored -> {
-                    if (forceFinal) {
+                    case ForcedFinalDecision.Speak(String message) -> {
+                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.speak(message, iterations));
+                        task.notifySpeak(message);
+                        return ExecutionResult.success(message, iterations, totalPromptTokens, totalOutputTokens, steps);
+                    }
+                    case ForcedFinalDecision.Continue ignored ->
                         log.debug("Forced-final iteration: skipping tool dispatch for task [{}]", task.taskId());
+                }
+            } else {
+                StepDecision decision = decideNormal(output, completion, task, resolvedTools.isEmpty());
+                switch (decision) {
+                    case StepDecision.FinalAnswer(String answer) -> {
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
+                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                    }
+                    case StepDecision.Speak(String message) -> {
+                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iterations);
+                        steps.add(ExecutionStep.speak(message, iterations));
+                        task.notifySpeak(message);
+                        return ExecutionResult.success(message, iterations, totalPromptTokens, totalOutputTokens, steps);
+                    }
+                    case StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
+                        ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
+                                tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
+                        if (calls.size() == 1) {
+                            ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
+                        } else {
+                            log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
+                            ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+                        }
+                    }
+                    case StepDecision.Continue ignored -> {
+                        // No terminal signal yet — an intermediate reasoning step. Loop again.
                     }
                 }
             }
@@ -240,7 +261,8 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     // ── Private helpers ────────────────────────────────────────────────────────
 
     /**
-     * What to do with the current completion, in priority order:
+     * What to do with the current completion on a <strong>normal</strong> (non-forced)
+     * iteration, in priority order:
      * <ol>
      *   <li>{@link DispatchTools} — a tool call was requested (native or inline);
      *       highest priority, same as {@link ReactStrategy}.</li>
@@ -249,9 +271,12 @@ public final class ReSpActStrategy implements ExecutionStrategy {
      *       divergence from plain ReAct) stopped naturally with no sentinel and no tool
      *       call — treated as an implicit speak turn, not an implicit final answer;
      *       see the class Javadoc for why.</li>
-     *   <li>{@link Continue} — a forced-final iteration with no terminal signal yet;
-     *       loop again.</li>
+     *   <li>{@link Continue} — no terminal signal yet; loop again.</li>
      * </ol>
+     *
+     * <p>See {@link ForcedFinalDecision} for the forced-final-iteration counterpart,
+     * whose type has no {@code DispatchTools} case — the compiler, not a runtime check,
+     * is what keeps a forced-final iteration from ever dispatching a tool.
      */
     private sealed interface StepDecision {
         record FinalAnswer(String answer) implements StepDecision {}
@@ -260,14 +285,29 @@ public final class ReSpActStrategy implements ExecutionStrategy {
         record Continue() implements StepDecision {}
     }
 
-    private StepDecision decideNextStep(
-            String output, LlmCompletion completion, boolean forceFinal, AgentTask task, boolean noToolsAvailable) {
+    /**
+     * What to do with the current completion on the <strong>forced-final</strong>
+     * iteration — tools were withheld from the LLM for this call, so there is nothing to
+     * dispatch: a terminal signal (final answer or speak), or the caller loops again.
+     */
+    private sealed interface ForcedFinalDecision {
+        record FinalAnswer(String answer) implements ForcedFinalDecision {}
+        record Speak(String message) implements ForcedFinalDecision {}
+        record Continue() implements ForcedFinalDecision {}
+    }
 
-        // Same rationale as ReactStrategy.decideNextStep: on the forced-final iteration,
-        // or when the agent has no tools at all, skip the inline-JSON tool-call parse
-        // entirely — extractInline()'s {"name":...} heuristic would otherwise collide
-        // with a tool-less agent's own legitimate JSON output.
-        Optional<ToolCallParser.ToolCallRequest> inlineCall = (completion.hasToolCall() || forceFinal || noToolsAvailable)
+    /**
+     * Decides the next step on a normal iteration — see {@link StepDecision} for the
+     * priority order. Use {@link #decideForcedFinal} once tools have been withheld for
+     * the forced-final iteration(s) instead.
+     */
+    private StepDecision decideNormal(
+            String output, LlmCompletion completion, AgentTask task, boolean noToolsAvailable) {
+
+        // When the agent has no tools at all, skip the inline-JSON tool-call parse:
+        // extractInline()'s {"name":...} heuristic would otherwise collide with a
+        // tool-less agent's own legitimate JSON output.
+        Optional<ToolCallParser.ToolCallRequest> inlineCall = (completion.hasToolCall() || noToolsAvailable)
                 ? Optional.empty()
                 : ToolCallParser.extractInline(output);
 
@@ -280,10 +320,6 @@ public final class ReSpActStrategy implements ExecutionStrategy {
             return new StepDecision.Speak(extractAfterMarker(output, SPEAK_SENTINEL, MESSAGE_MARKER));
         }
 
-        if (forceFinal) {
-            return new StepDecision.Continue();
-        }
-
         List<ToolCallParser.ToolCallRequest> allCalls = new ArrayList<>();
         if (completion.hasToolCall()) {
             allCalls.addAll(ToolCallParser.extractAll(completion));
@@ -293,6 +329,24 @@ public final class ReSpActStrategy implements ExecutionStrategy {
         }
 
         return allCalls.isEmpty() ? new StepDecision.Continue() : new StepDecision.DispatchTools(allCalls);
+    }
+
+    /**
+     * Decides the next step on the forced-final iteration. Tools were withheld from the
+     * LLM for this call, so any tool-call signal it emits anyway is ignored outright —
+     * unlike {@link #decideNormal}, there is no inline-JSON parse to run and no {@code
+     * DispatchTools} case to return it as.
+     */
+    private ForcedFinalDecision decideForcedFinal(String output, LlmCompletion completion) {
+        boolean hasTerminalText = !completion.hasToolCall();
+
+        if (hasTerminalText && isFinalAnswer(output)) {
+            return new ForcedFinalDecision.FinalAnswer(extractAfterMarker(output, FINAL_ANSWER_SENTINEL, ANSWER_MARKER));
+        }
+        if (hasTerminalText && isSpeak(output, completion)) {
+            return new ForcedFinalDecision.Speak(extractAfterMarker(output, SPEAK_SENTINEL, MESSAGE_MARKER));
+        }
+        return new ForcedFinalDecision.Continue();
     }
 
     /** Returns {@code true} when the output carries the explicit {@code FINAL_ANSWER} sentinel. */

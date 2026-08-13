@@ -94,7 +94,7 @@ before registering it:
   instead.
 
 - **`ReactExecutionSupport` is package-private.** The shared ReAct loop
-  machinery (`buildMessages`, `decideNextStep`, `dispatchParallel`,
+  machinery (`buildMessages`, `decideNormal`/`decideForcedFinal`, `dispatchParallel`,
   `maybeInjectSynthesis`, `streamAndCollect`, …) lives in
   `io.ara.runtime.strategy` and isn't part of the public API. A strategy
   implemented in your own application package cannot call it directly — you
