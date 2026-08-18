@@ -248,7 +248,8 @@ public final class ToolConversionUtils {
                 if (prop.containsKey("enum")) {
                     @SuppressWarnings("unchecked")
                     List<String> enumValues = (List<String>) prop.get("enum");
-                    builder.addEnumProperty(name, enumValues);
+                    if (description != null) builder.addEnumProperty(name, enumValues, description);
+                    else                     builder.addEnumProperty(name, enumValues);
                 } else if (description != null) {
                     builder.addStringProperty(name, description);
                 } else {
@@ -294,12 +295,17 @@ public final class ToolConversionUtils {
         String description = (String) prop.get("description");
 
         return switch (type) {
-            case "string"          -> JsonStringSchema.builder().description(description).build();
-            case "integer","number"-> JsonIntegerSchema.builder().description(description).build();
-            case "boolean"         -> JsonBooleanSchema.builder().description(description).build();
-            case "array"           -> buildArraySchema(prop, description);
-            case "object"          -> buildObjectSchema(prop);
-            default                -> JsonStringSchema.builder().description(description).build();
+            case "string"  -> JsonStringSchema.builder().description(description).build();
+            case "integer" -> JsonIntegerSchema.builder().description(description).build();
+            // Distinct from "integer": collapsing the two here (as this did) told the model
+            // that every nested/array number was a whole number, so decimals got truncated
+            // at the source — the top-level path never had the bug, since it goes through
+            // addNumberProperty, which made the same schema behave differently by depth.
+            case "number"  -> JsonNumberSchema.builder().description(description).build();
+            case "boolean" -> JsonBooleanSchema.builder().description(description).build();
+            case "array"   -> buildArraySchema(prop, description);
+            case "object"  -> buildObjectSchema(prop);
+            default        -> JsonStringSchema.builder().description(description).build();
         };
     }
 
@@ -325,7 +331,11 @@ public final class ToolConversionUtils {
         if (prop.containsKey("required")) {
             @SuppressWarnings("unchecked")
             List<String> required = (List<String>) prop.get("required");
-            required.forEach(builder::required);
+            // One call with the whole list, never one per name: JsonObjectSchema.Builder
+            // .required() assigns the list rather than appending to it, so iterating left
+            // only the last name required and silently made every other one optional to
+            // the model — which shows up as missing arguments, not as a schema error.
+            builder.required(required);
         }
         return builder.build();
     }
