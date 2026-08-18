@@ -1,5 +1,7 @@
 package io.ara.adapters.llm.anthropic;
 
+import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -8,11 +10,9 @@ import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.anthropic.AnthropicStreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
-import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Flow;
 import java.util.stream.Collectors;
 
@@ -141,8 +141,9 @@ public class AnthropicLlmClient implements LlmClient {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
                     .messages(toLC4jMessages(messages));
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            if (context.hasResolvedTools()) {
+            if (context != null && context.hasResolvedTools()) {
                 reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
             }
 
@@ -169,37 +170,19 @@ public class AnthropicLlmClient implements LlmClient {
      */
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return subscriber -> {
-            CompletableFuture<Void> done = new CompletableFuture<>();
-            subscriber.onSubscribe(new Flow.Subscription() {
-                @Override public void request(long n) { /* push-based */ }
-                @Override public void cancel() { done.cancel(true); }
-            });
+        return TokenStreamPublisher.of(
+                handler -> {
+                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                            .messages(toLC4jMessages(messages));
+                    CallParameterUtils.applyTo(reqBuilder, context);
 
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
+                    if (context != null && context.hasResolvedTools()) {
+                        reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
+                    }
 
-            if (context.hasResolvedTools()) {
-                reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-            }
-
-            streamingModel.chat(reqBuilder.build(), new StreamingChatResponseHandler() {
-                @Override
-                public void onPartialResponse(String token) {
-                    subscriber.onNext(token);
-                }
-                @Override
-                public void onCompleteResponse(ChatResponse completeResponse) {
-                    subscriber.onComplete();
-                    done.complete(null);
-                }
-                @Override
-                public void onError(Throwable error) {
-                    subscriber.onError(mapException(error));
-                    done.completeExceptionally(error);
-                }
-            });
-        };
+                    streamingModel.chat(reqBuilder.build(), handler);
+                },
+                this::mapException);
     }
 
     // ── Conversion helpers ────────────────────────────────────────────────────

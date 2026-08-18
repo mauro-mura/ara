@@ -9,9 +9,10 @@ import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
-import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
+import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
@@ -111,9 +112,9 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
                     .messages(toLC4jMessages(messages));
-            applyPerCallParameters(reqBuilder, context);
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            if (context.hasResolvedTools()) {
+            if (context != null && context.hasResolvedTools()) {
                 reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
             }
 
@@ -129,62 +130,19 @@ public class OpenAiLlmClient implements LlmClient {
 
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return subscriber -> {
-            subscriber.onSubscribe(new Flow.Subscription() {
-                @Override public void request(long n) { /* push-based SSE */ }
-                @Override public void cancel() { }
-            });
+        return TokenStreamPublisher.of(
+                handler -> {
+                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                            .messages(toLC4jMessages(messages));
+                    CallParameterUtils.applyTo(reqBuilder, context);
 
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
-            applyPerCallParameters(reqBuilder, context);
+                    if (context != null && context.hasResolvedTools()) {
+                        reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
+                    }
 
-            if (context.hasResolvedTools()) {
-                reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-            }
-
-            getStreamingModel().chat(reqBuilder.build(), new StreamingChatResponseHandler() {
-                @Override
-                public void onPartialResponse(String token) {
-                    subscriber.onNext(token);
-                }
-                @Override
-                public void onCompleteResponse(ChatResponse completeResponse) {
-                    subscriber.onComplete();
-                }
-                @Override
-                public void onError(Throwable error) {
-                    subscriber.onError(mapException(error));
-                }
-            });
-        };
-    }
-
-    /**
-     * Applies the per-call sampling parameters from {@code context} to {@code reqBuilder},
-     * overriding the client-level defaults baked into {@link #chatModel}/{@link
-     * #streamingModel} at construction time — but only when the caller actually asked
-     * for an override.
-     *
-     * <p>{@link LlmCallContext#temperature()} and {@link LlmCallContext#topP()} are
-     * {@code null} unless a per-call override or an {@code AgentConfig} value was
-     * explicitly set (see the class javadoc on {@code LlmCallContext}) — when {@code
-     * null}, this method deliberately leaves the corresponding {@code ChatRequest}
-     * field unset, so the client-level default set via {@link Builder#temperature}/
-     * {@link Builder#topP} at construction time survives untouched. Silently forcing
-     * some other "default" here (e.g. {@code LlmProfile}'s own fallback) would defeat
-     * whatever the caller explicitly configured directly on this client.
-     *
-     * <p>{@link LlmCallContext#maxOutputTokens()} is different: it is a non-nullable
-     * {@code int} because {@code ReactStrategy}'s cost-budget projection needs a
-     * concrete value regardless of what gets sent to the provider, so it is always
-     * applied — see {@code AgentConfig#maxTokensPerStep()}.
-     */
-    private static void applyPerCallParameters(ChatRequest.Builder reqBuilder, LlmCallContext context) {
-        if (context == null) return;
-        if (context.temperature() != null) reqBuilder.temperature(context.temperature());
-        if (context.topP() != null)        reqBuilder.topP(context.topP());
-        reqBuilder.maxOutputTokens(context.maxOutputTokens());
+                    getStreamingModel().chat(reqBuilder.build(), handler);
+                },
+                this::mapException);
     }
 
     // Thread-safe lazy initialization using double-checked locking.
