@@ -42,9 +42,19 @@ import java.util.stream.Collectors;
  * }</pre>
  *
  * <h2>Function calling</h2>
- * <p>Most Ollama models do <em>not</em> support native function calling.
- * {@link LlmCallContext#hasResolvedTools()} is therefore ignored. Use prompt-based tool routing
- * ({@link io.ara.core.llm.LlmSelectionPolicy}) when tools are required.
+ * <p>Off by default: tools in {@link LlmCallContext} are ignored and the strategy's
+ * prompt-based routing applies. Whether a model can use tools natively depends on the model
+ * rather than on Ollama — {@code llama3.1} and later, {@code qwen2.5} and {@code mistral-nemo}
+ * can, {@code llama3}, {@code gemma} and {@code phi} cannot — and this client has no reliable
+ * way to tell which one it is talking to, so enabling it is left to the caller:
+ * <pre>{@code
+ * LlmClient llama = OllamaLlmClient.builder()
+ *     .model(OllamaLlmClient.Models.LLAMA_3_1)
+ *     .nativeTools(true)
+ *     .build();
+ * }</pre>
+ * See {@link Builder#nativeTools(boolean)} for what goes wrong if it is enabled for a model
+ * that does not support tools.
  *
  * @see LlmClient
  * @see OllamaLlmClient.Models
@@ -56,6 +66,7 @@ public class OllamaLlmClient implements LlmClient {
     private final OllamaChatModel          chatModel;
     private final OllamaStreamingChatModel streamingModel;
     private final String                   modelName;
+    private final boolean                  nativeTools;
 
     // ── Model catalogue ───────────────────────────────────────────────────────
 
@@ -106,6 +117,7 @@ public class OllamaLlmClient implements LlmClient {
 
     private OllamaLlmClient(Builder builder) {
         this.modelName     = builder.modelName;
+        this.nativeTools   = builder.nativeTools;
         this.chatModel     = OllamaChatModel.builder()
                 .baseUrl(builder.baseUrl)
                 .modelName(builder.modelName)
@@ -129,11 +141,18 @@ public class OllamaLlmClient implements LlmClient {
         return "ollama-" + modelName;
     }
 
+    /** Reflects {@link Builder#nativeTools(boolean)} — see its javadoc for why this is opt-in. */
+    @Override
+    public boolean supportsNativeTools() {
+        return nativeTools;
+    }
+
     /**
      * Sends {@code messages} to the local Ollama instance and blocks until completion.
      *
-     * <p>Tools in {@link LlmCallContext} are ignored (most Ollama models do not support
-     * native function calling).
+     * <p>Tools from {@link LlmCallContext} are forwarded only when the client was built with
+     * {@link Builder#nativeTools(boolean)}; otherwise they are ignored and the strategy's
+     * prompt-based tool routing applies.
      *
      * @param messages the conversation history (system → user → assistant turns)
      * @param context  per-call parameters (temperature, max tokens)
@@ -146,6 +165,7 @@ public class OllamaLlmClient implements LlmClient {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
                     .messages(toLC4jMessages(messages));
             CallParameterUtils.applyTo(reqBuilder, context);
+            applyToolsIfEnabled(reqBuilder, context);
 
             ChatResponse response = chatModel.chat(reqBuilder.build());
             return toLlmCompletion(response);
@@ -174,21 +194,35 @@ public class OllamaLlmClient implements LlmClient {
                     ChatRequest.Builder reqBuilder = ChatRequest.builder()
                             .messages(toLC4jMessages(messages));
                     CallParameterUtils.applyTo(reqBuilder, context);
+                    applyToolsIfEnabled(reqBuilder, context);
 
                     streamingModel.chat(reqBuilder.build(), handler);
                 },
                 this::mapException);
     }
 
+    /**
+     * Forwards the call's tools, but only when this client was built for a tool-capable model.
+     *
+     * <p>The {@code nativeTools} guard is not redundant with {@code hasResolvedTools()}:
+     * {@code ReactStrategy} attaches resolved tools to the context unconditionally, for every
+     * client, so keying off the context alone would send tool specifications to a model that
+     * cannot use them the moment any agent has tools registered.
+     */
+    private void applyToolsIfEnabled(ChatRequest.Builder reqBuilder, LlmCallContext context) {
+        if (nativeTools && context != null && context.hasResolvedTools()) {
+            reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
+        }
+    }
+
     // ── Conversion helpers ────────────────────────────────────────────────────
 
     private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages) {
-        // Ollama itself never emits native tool calls (see class javadoc — tools in
-        // LlmCallContext are ignored), but a session using ROUND_ROBIN/FAILOVER across
-        // providers can still hand this client a history that contains an earlier turn's
-        // native tool-call/tool-result entries (e.g. an OpenAI/Anthropic call answered
-        // first). Delegating here keeps that history intact instead of degrading it to a
-        // confusing generic user turn — see ToolConversionUtils.toNativeAwareChatMessage.
+        // Native tool-call and tool-result turns reach this client from two directions: its
+        // own, once nativeTools is on, and another provider's — a session using
+        // ROUND_ROBIN/FAILOVER can hand it a history whose earlier turns were answered by
+        // OpenAI or Anthropic. Delegating here keeps both intact instead of degrading them to
+        // a confusing generic user turn — see ToolConversionUtils.toNativeAwareChatMessage.
         return messages.stream()
                 .map(ToolConversionUtils::toNativeAwareChatMessage)
                 .collect(Collectors.toList());
@@ -216,7 +250,25 @@ public class OllamaLlmClient implements LlmClient {
         }
 
         if (finishReason == null) finishReason = "stop";
-        return new LlmCompletion(text, inputTokens, outputTokens, finishReason, null);
+
+        String toolCallJson = null;
+        String toolCallId   = null;
+        List<ToolCallEntry> toolCalls = List.of();
+        if (ai != null && ai.hasToolExecutionRequests()) {
+            // Mapped whether or not nativeTools is on: a model only emits these when tools
+            // were sent, so there is nothing to gate, and dropping them if one ever arrived
+            // would lose the call silently. Ollama identifies tool calls by name and sends no
+            // call id, so toolCallId stays null here — ToolCallEntry documents it as nullable
+            // and the runtime checks before using it.
+            var requests = ai.toolExecutionRequests();
+            toolCalls    = ToolConversionUtils.toToolCallEntries(requests);
+            toolCallJson = ToolConversionUtils.toLegacyToolCallJson(requests.get(0));
+            toolCallId   = requests.get(0).id();
+            finishReason = "tool_calls";
+        }
+
+        return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
+                toolCallJson, toolCallId, toolCalls);
     }
 
     private LlmException mapException(Throwable ex) {
@@ -255,6 +307,7 @@ public class OllamaLlmClient implements LlmClient {
         private Duration timeout      = Duration.ofMinutes(5);
         private boolean  logRequests  = false;
         private boolean  logResponses = false;
+        private boolean  nativeTools  = false;
 
         /** Sets the Ollama base URL. Defaults to {@code http://localhost:11434}. */
         public Builder baseUrl(String baseUrl)     { this.baseUrl = baseUrl; return this; }
@@ -276,6 +329,23 @@ public class OllamaLlmClient implements LlmClient {
 
         /** Enables LangChain4j response logging to SLF4J. */
         public Builder logResponses(boolean v)     { this.logResponses = v; return this; }
+
+        /**
+         * Sends tools to the model natively instead of leaving them to the strategy's
+         * prompt-based routing. Off by default.
+         *
+         * <p>Opt-in rather than automatic because tool support is a property of the model,
+         * not of Ollama, and this client cannot infer it: {@link #modelName(String)} accepts
+         * any tag the server happens to host, so there is no name to match on reliably. Turn
+         * it on for a model that does support tools — {@code llama3.1} and later,
+         * {@code qwen2.5}, {@code mistral-nemo}, {@code mistral} — and leave it off for one
+         * that does not, such as {@code llama3}, {@code gemma2}/{@code gemma3} or
+         * {@code phi3.5}: enabling it there sends tool specifications the model ignores while
+         * {@link LlmClient#supportsNativeTools()} tells the strategy to drop the text
+         * scaffolding those models actually rely on, so the agent would stop calling tools
+         * altogether.
+         */
+        public Builder nativeTools(boolean v)      { this.nativeTools = v; return this; }
 
         /**
          * Builds the {@link OllamaLlmClient}.
