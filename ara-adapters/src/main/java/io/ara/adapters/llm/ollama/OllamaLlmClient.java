@@ -1,5 +1,6 @@
 package io.ara.adapters.llm.ollama;
 
+import io.ara.adapters.llm.CallParameterUtils;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
 import dev.langchain4j.data.message.*;
@@ -143,11 +144,11 @@ public class OllamaLlmClient implements LlmClient {
     @Override
     public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
         try {
-            ChatRequest request = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages))
-                    .build();
+            ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                    .messages(toLC4jMessages(messages));
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            ChatResponse response = chatModel.chat(request);
+            ChatResponse response = chatModel.chat(reqBuilder.build());
             return toLlmCompletion(response);
 
         } catch (LlmException ex) {
@@ -176,11 +177,11 @@ public class OllamaLlmClient implements LlmClient {
                 @Override public void cancel() { done.cancel(true); }
             });
 
-            ChatRequest request = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages))
-                    .build();
+            ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                    .messages(toLC4jMessages(messages));
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            streamingModel.chat(request, new StreamingChatResponseHandler() {
+            streamingModel.chat(reqBuilder.build(), new StreamingChatResponseHandler() {
                 @Override
                 public void onPartialResponse(String token) {
                     subscriber.onNext(token);

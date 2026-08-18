@@ -1,5 +1,6 @@
 package io.ara.adapters.llm.anthropic;
 
+import io.ara.adapters.llm.CallParameterUtils;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -141,8 +142,9 @@ public class AnthropicLlmClient implements LlmClient {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
                     .messages(toLC4jMessages(messages));
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            if (context.hasResolvedTools()) {
+            if (context != null && context.hasResolvedTools()) {
                 reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
             }
 
@@ -178,8 +180,9 @@ public class AnthropicLlmClient implements LlmClient {
 
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
                     .messages(toLC4jMessages(messages));
+            CallParameterUtils.applyTo(reqBuilder, context);
 
-            if (context.hasResolvedTools()) {
+            if (context != null && context.hasResolvedTools()) {
                 reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
             }
 
