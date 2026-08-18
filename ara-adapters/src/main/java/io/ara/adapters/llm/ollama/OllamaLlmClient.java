@@ -215,7 +215,12 @@ public class OllamaLlmClient implements LlmClient {
     }
 
     private LlmCompletion toLlmCompletion(ChatResponse response) {
-        String text = response.aiMessage() != null ? response.aiMessage().text() : "";
+        // Both halves matter: AiMessage.text() is null on a response that carries no text
+        // (a tool-call-only turn), and LlmCompletion rejects a null text outright — so
+        // guarding only the message, as this did, moved the failure to the record's
+        // constructor instead of preventing it. Same shape as the other two adapters.
+        var ai = response.aiMessage();
+        String text = (ai != null && ai.text() != null) ? ai.text() : "";
         String finishReason = null;
         int inputTokens  = 0;
         int outputTokens = 0;

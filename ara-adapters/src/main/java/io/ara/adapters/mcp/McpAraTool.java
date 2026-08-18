@@ -6,6 +6,8 @@ import io.ara.core.mcp.McpTool;
 import io.ara.core.mcp.McpToolResult;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.Map;
@@ -31,6 +33,7 @@ import java.util.Objects;
  */
 public class McpAraTool implements AraTool {
 
+    private static final Logger log = LoggerFactory.getLogger(McpAraTool.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
@@ -60,13 +63,30 @@ public class McpAraTool implements AraTool {
         try {
             return MAPPER.writeValueAsString(tool.inputSchema());
         } catch (Exception e) {
+            // Same "{}" as a tool that genuinely takes no parameters, so log it: without
+            // this the two are indistinguishable, and a server whose schema fails to
+            // serialise silently advertises itself to the model as parameterless.
+            log.warn("MCP tool '{}' has an inputSchema that could not be serialised — advertising "
+                    + "it as taking no parameters. Schema: {}", tool.name(), tool.inputSchema(), e);
             return "{}";
         }
     }
 
     @Override
     public ToolResult execute(String argumentJson) {
-        Map<String, Object> args = parseArgs(argumentJson);
+        Map<String, Object> args;
+        try {
+            args = parseArgs(argumentJson);
+        } catch (IllegalArgumentException e) {
+            // Fail rather than call the server with no arguments. An MCP tool invoked
+            // without the parameters the model meant to pass still runs and still returns
+            // something, so degrading here turns a malformed-arguments bug into a plausible
+            // wrong answer — the one failure mode nobody can trace back to this line.
+            log.warn("MCP tool '{}' was called with malformed argument JSON — not calling the "
+                    + "server. Raw arguments: {}", tool.name(), argumentJson, e);
+            return ToolResult.failure(tool.name(), "Malformed argument JSON: " + e.getMessage());
+        }
+
         try {
             McpToolResult result = registry.callTool(tool.name(), args).join();
             if (result.isError()) {
@@ -78,14 +98,24 @@ public class McpAraTool implements AraTool {
         }
     }
 
+    /**
+     * Parses the model's argument JSON into the map the MCP SDK expects.
+     *
+     * @param argumentJson the raw arguments; {@code null}, blank and {@code "{}"} all mean
+     *                     "no arguments", as does a bare JSON {@code null}
+     * @return the parsed arguments, never {@code null}
+     * @throws IllegalArgumentException if {@code argumentJson} is not a JSON object — the
+     *                                  caller turns this into a failed {@link ToolResult}
+     */
     private static Map<String, Object> parseArgs(String argumentJson) {
         if (argumentJson == null || argumentJson.isBlank() || "{}".equals(argumentJson.strip())) {
             return Collections.emptyMap();
         }
         try {
-            return MAPPER.readValue(argumentJson, MAP_TYPE);
+            Map<String, Object> parsed = MAPPER.readValue(argumentJson, MAP_TYPE);
+            return parsed != null ? parsed : Collections.emptyMap();
         } catch (Exception e) {
-            return Collections.emptyMap();
+            throw new IllegalArgumentException(e.getMessage(), e);
         }
     }
 }
