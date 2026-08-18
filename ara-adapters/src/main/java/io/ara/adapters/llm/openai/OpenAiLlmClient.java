@@ -9,10 +9,10 @@ import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
-import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
@@ -130,35 +130,19 @@ public class OpenAiLlmClient implements LlmClient {
 
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return subscriber -> {
-            subscriber.onSubscribe(new Flow.Subscription() {
-                @Override public void request(long n) { /* push-based SSE */ }
-                @Override public void cancel() { }
-            });
+        return TokenStreamPublisher.of(
+                handler -> {
+                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                            .messages(toLC4jMessages(messages));
+                    CallParameterUtils.applyTo(reqBuilder, context);
 
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
-            CallParameterUtils.applyTo(reqBuilder, context);
+                    if (context != null && context.hasResolvedTools()) {
+                        reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
+                    }
 
-            if (context != null && context.hasResolvedTools()) {
-                reqBuilder.toolSpecifications(ToolConversionUtils.toolSpecificationsFor(context));
-            }
-
-            getStreamingModel().chat(reqBuilder.build(), new StreamingChatResponseHandler() {
-                @Override
-                public void onPartialResponse(String token) {
-                    subscriber.onNext(token);
-                }
-                @Override
-                public void onCompleteResponse(ChatResponse completeResponse) {
-                    subscriber.onComplete();
-                }
-                @Override
-                public void onError(Throwable error) {
-                    subscriber.onError(mapException(error));
-                }
-            });
-        };
+                    getStreamingModel().chat(reqBuilder.build(), handler);
+                },
+                this::mapException);
     }
 
     // Thread-safe lazy initialization using double-checked locking.

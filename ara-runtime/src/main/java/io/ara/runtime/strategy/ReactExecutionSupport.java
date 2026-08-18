@@ -821,9 +821,11 @@ final class ReactExecutionSupport {
 
         // Bounded wait: a stream that never completes must not block past the deadline.
         // On timeout (or interrupt) the subscription is cancelled before giving up —
-        // without that, the publisher keeps streaming into this dead task indefinitely:
-        // the provider connection stays open and the SSE tokenCallback keeps firing for
-        // a task the caller has already been told failed.
+        // without that, the publisher keeps streaming into this dead task: the buffer
+        // above keeps growing and the SSE tokenCallback keeps firing for a task the
+        // caller has already been told failed. Cancelling stops the delivery, not the
+        // provider connection — langchain4j's streaming call hands back no handle to
+        // close, so the connection drains on its own and its tokens are discarded.
         long remainingMs = Math.max(0, Duration.between(Instant.now(), deadline).toMillis());
         try {
             if (!latch.await(remainingMs, TimeUnit.MILLISECONDS)) {

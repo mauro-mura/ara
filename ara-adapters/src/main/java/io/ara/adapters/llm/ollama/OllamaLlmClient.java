@@ -1,18 +1,17 @@
 package io.ara.adapters.llm.ollama;
 
 import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
 import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
-import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.ollama.OllamaChatModel;
 import dev.langchain4j.model.ollama.OllamaStreamingChatModel;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Flow;
 import java.util.stream.Collectors;
 
@@ -170,34 +169,15 @@ public class OllamaLlmClient implements LlmClient {
      */
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return subscriber -> {
-            CompletableFuture<Void> done = new CompletableFuture<>();
-            subscriber.onSubscribe(new Flow.Subscription() {
-                @Override public void request(long n) { /* push-based */ }
-                @Override public void cancel() { done.cancel(true); }
-            });
+        return TokenStreamPublisher.of(
+                handler -> {
+                    ChatRequest.Builder reqBuilder = ChatRequest.builder()
+                            .messages(toLC4jMessages(messages));
+                    CallParameterUtils.applyTo(reqBuilder, context);
 
-            ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
-            CallParameterUtils.applyTo(reqBuilder, context);
-
-            streamingModel.chat(reqBuilder.build(), new StreamingChatResponseHandler() {
-                @Override
-                public void onPartialResponse(String token) {
-                    subscriber.onNext(token);
-                }
-                @Override
-                public void onCompleteResponse(ChatResponse completeResponse) {
-                    subscriber.onComplete();
-                    done.complete(null);
-                }
-                @Override
-                public void onError(Throwable error) {
-                    subscriber.onError(mapException(error));
-                    done.completeExceptionally(error);
-                }
-            });
-        };
+                    streamingModel.chat(reqBuilder.build(), handler);
+                },
+                this::mapException);
     }
 
     // ── Conversion helpers ────────────────────────────────────────────────────
