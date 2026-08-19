@@ -248,13 +248,19 @@ Implement `AraTool` and register it in a `ToolRegistry`:
 import io.ara.core.tool.*;
 
 class WeatherTool implements AraTool {
-    @Override public String toolId()      { return "get_weather"; }
-    @Override public String description() { return "Returns current weather for a city."; }
-    @Override public String argumentSchema() {
+    @Override
+    public String toolId()      { return "get_weather"; }
+
+    @Override
+    public String description() { return "Returns current weather for a city."; }
+
+    @Override
+    public String argumentSchema() {
         return """
                {"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}
                """;
     }
+
     @Override
     public ToolResult execute(String argumentJson) {
         return ToolResult.success(toolId(), "Milan: Sunny, 22°C");
