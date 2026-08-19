@@ -124,6 +124,22 @@ public record LlmProfile(
         /** Sugar for an inline {@link LlmTransport} — see the class javadoc. */
         public Builder modelName(String v)                { this.modelName = v;                return this; }
         public Builder streamingEnabled(boolean v)        { this.streamingEnabled = v;         return this; }
+        /**
+         * Declares that the schema of a structured-output contract should travel as a
+         * provider-native {@code response_format} rather than be appended to the system prompt.
+         *
+         * <p><strong>No ARA adapter implements the native path yet</strong>, so setting this to
+         * {@code true} together with an {@code AgentContract.outputSchema(...)} is a
+         * configuration that cannot be honoured, and {@code AgentFactory} rejects it at agent
+         * creation with an explanation. Left at its default {@code false}, the schema is
+         * appended to the system prompt — which works against every endpoint, including the
+         * OpenAI-compatible gateways that support no {@code response_format} at all.
+         *
+         * <p>The flag stays because the native path is worth having: it is more reliable than
+         * an instruction a model can ignore. It needs the same declared-capability treatment as
+         * media types, since {@code response_format} support is per-endpoint rather than
+         * per-provider.
+         */
         public Builder nativeJsonSchema(boolean v)        { this.nativeJsonSchema = v;         return this; }
         public Builder costInputPer1kTokens(Money v)      { this.costInputPer1kTokens = v;     return this; }
         public Builder costOutputPer1kTokens(Money v)     { this.costOutputPer1kTokens = v;    return this; }
