@@ -408,7 +408,11 @@ public final class ReSpActStrategy implements ExecutionStrategy {
                     && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
                 messages.add(new LlmMessage(e.role(), e.content(), meta.callId(), meta.toolName()));
             } else {
-                messages.add(new LlmMessage(e.role(), e.content()));
+                // Entry media rides along: this is the only path from the task's attachments
+                // to the outgoing request, and the adapter is what turns the references into
+                // provider content. A text-only entry produces exactly the message it did
+                // before media existed.
+                messages.add(new LlmMessage(e.role(), e.content(), null, null, e.media()));
             }
         }
         return messages;
