@@ -799,11 +799,8 @@ simplicity first, no premature abstractions, short single-responsibility functio
 honest naming, and a taxonomy of what to keep vs. avoid in comments. Read it before
 opening a PR.
 
-ARA is developed with heavy AI assistance under human architectural review. Design
-decisions are recorded as ADRs in [`docs/adr/`](docs/adr/), and every change is expected to
-pass the checklist in [`docs/CODING-GUIDELINES.md`](docs/CODING-GUIDELINES.md). Commits
-carry `Co-Authored-By` trailers where that applies.
-
+ARA is developed with heavy AI assistance under human architectural review.
+Every change is expected to pass the checklist in [`docs/CODING-GUIDELINES.md`](docs/CODING-GUIDELINES.md).
 ---
 
 ## License
