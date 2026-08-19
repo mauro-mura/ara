@@ -75,6 +75,30 @@ public class LlmException extends RuntimeException {
     }
 
     /**
+     * A request the provider rejected as malformed, naming the provider that rejected it.
+     *
+     * <p>Non-retryable, which is the point: a 400 cannot become a 200 by being sent again, so
+     * retrying it burns a strategy iteration and then every fallback in a failover pool for
+     * nothing. The provider is carried because a caller reading this needs to know <em>which</em>
+     * endpoint refused the payload — the same request is often valid on another one.
+     */
+    public static LlmException invalidRequest(String provider, String message) {
+        return new LlmException(message, null, ErrorType.INVALID_REQUEST, provider, 400, false);
+    }
+
+    /**
+     * The provider refused to answer because its content filter blocked the request or the
+     * response.
+     *
+     * <p>Distinct from {@link #invalidRequest} even though providers report it with the same
+     * status code: the payload is well-formed, so whoever reads the error should not go looking
+     * for a bug in it. Non-retryable — the same content will be filtered again.
+     */
+    public static LlmException contentFiltered(String provider, String message) {
+        return new LlmException(message, null, ErrorType.CONTENT_FILTERED, provider, 400, false);
+    }
+
+    /**
      * A call carried media of a type the selected client does not support.
      *
      * <p>Non-retryable by design, and that is the whole point: it makes

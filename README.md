@@ -373,7 +373,7 @@ entry.
 | Provider  | Images | PDF as document | Text files |
 |-----------|--------|-----------------|------------|
 | Mistral   | yes    | yes             | yes        |
-| OpenAI    | yes    | yes             | yes        |
+| OpenAI    | yes    | yes — hosted only, see below | yes |
 | Anthropic | yes    | yes             | yes        |
 | Ollama    | yes    | **no**          | yes        |
 
@@ -384,6 +384,25 @@ answer about a document the model never saw, which is indistinguishable from a r
 whoever reads it. Because the failure is non-retryable, `FailoverLlmClient` aborts instead
 of letting a text-only fallback answer instead — and a `FAILOVER` or `ROUND_ROBIN` pool
 reports the *intersection* of its members' media types for the same reason.
+
+**Media support belongs to the endpoint, not the vendor.** `OpenAiLlmClient` is meant to be
+pointed at any OpenAI-compatible API, and while they all accept the `image_url` part, many
+reject the `file` part a PDF becomes — a corporate gateway typically answers
+`Unknown part type: file`. So documents are claimed only when no custom `baseUrl` is set
+(i.e. hosted OpenAI); behind a `baseUrl` the client reports images and text only, and you
+opt back in when you know the endpoint forwards `file` parts:
+
+```java
+LlmClient viaGateway = AraLlmClientFactory.openAi()
+        .apiKey(KEY)
+        .baseUrl("https://gateway.internal/v1")
+        .modelName("mistral-small-3.2-24b")
+        .documentSupport(true)      // only if this endpoint really accepts `file` parts
+        .build();
+```
+
+Guessing generously here is what produces the confusing failure, so the default guesses
+strictly: a refused PDF says so clearly, naming the type and the provider.
 
 **Cost across turns.** A document is paid for on the turn that introduced it. Replayed
 conversation turns name their attachments rather than re-sending them, while

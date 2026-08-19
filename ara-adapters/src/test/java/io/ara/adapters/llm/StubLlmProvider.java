@@ -58,6 +58,23 @@ public final class StubLlmProvider implements AutoCloseable {
     }
 
     /**
+     * Starts a stub that answers every request with {@code status} and {@code responseBody}.
+     *
+     * <p>Needed to pin down how an adapter <em>classifies</em> a provider failure, which is
+     * not observable from a successful call: whether a malformed request comes back retryable
+     * decides whether the strategy above retries it and whether a failover pool walks its
+     * fallback list, for a request that can never succeed.
+     */
+    public static StubLlmProvider failingWith(int status, String responseBody) throws Exception {
+        return new StubLlmProvider(exchange -> {
+            byte[] out = responseBody.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(status, out.length);
+            exchange.getResponseBody().write(out);
+        });
+    }
+
+    /**
      * Starts a stub that streams {@code lines} as newline-delimited JSON, pausing between each
      * — the shape Ollama's {@code /api/chat} uses when {@code stream} is on.
      *
