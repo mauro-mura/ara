@@ -7,10 +7,12 @@ import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
 import io.ara.core.llm.LlmTransport;
 import io.ara.core.mcp.McpClient;
+import io.ara.core.media.MediaStore;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.runtime.factory.FailoverLlmClient;
 import io.ara.runtime.llm.LoggingLlmClient;
+import io.ara.runtime.llm.MediaResolvingLlmClient;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,8 +43,9 @@ public final class DefaultWiringFactory implements WiringFactory {
     private final ResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports;
     private final Map<String, McpServerBinding> mcpServers;
     private final Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory;
+    private final MediaStore mediaStore;
 
-    /** Convenience constructor for agents with no ARA-managed MCP servers. */
+    /** Convenience constructor for agents with no ARA-managed MCP servers and no media. */
     public DefaultWiringFactory(
             ResourceRegistry<LlmTransport, LlmClient> llmTransports,
             String defaultLlmClientId,
@@ -66,6 +69,24 @@ public final class DefaultWiringFactory implements WiringFactory {
             Map<String, McpServerBinding> mcpServers,
             Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory
     ) {
+        this(llmTransports, defaultLlmClientId, mcpTransports, mcpServers,
+                statelessToolRegistryFactory, MediaStore.noop());
+    }
+
+    /**
+     * @param mediaStore where the bytes of a task's media live, so the adapter can fetch them
+     *                    when it builds the provider request. {@link MediaStore#noop()} for a
+     *                    deployment that never attaches media.
+     */
+    public DefaultWiringFactory(
+            ResourceRegistry<LlmTransport, LlmClient> llmTransports,
+            String defaultLlmClientId,
+            ResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports,
+            Map<String, McpServerBinding> mcpServers,
+            Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory,
+            MediaStore mediaStore
+    ) {
+        this.mediaStore                    = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
         this.llmTransports                = Objects.requireNonNull(llmTransports, "llmTransports must not be null");
         this.defaultLlmClientId            = Objects.requireNonNull(defaultLlmClientId, "defaultLlmClientId must not be null");
         this.mcpTransports                 = mcpTransports;
@@ -102,6 +123,20 @@ public final class DefaultWiringFactory implements WiringFactory {
             };
             if (llmConfig.logIo()) {
                 llm = new LoggingLlmClient(llm, llmConfig.logIoMaxChars());
+            }
+            // Outermost, and applied here rather than where AraRuntime wraps its registered
+            // clients: a client built on demand by an LlmClientFactory (ADR-039 dynamic
+            // transports) is created inside the transport registry and never passes through
+            // that point, so wrapping there would leave exactly those agents unable to resolve
+            // a stored attachment — failing with "no MediaStore is wired" when one was. Every
+            // agent's effective client, statically registered or leased, passes through here.
+            //
+            // Skipped entirely for the no-op store, which is the default: it can never resolve
+            // anything, so a resolver backed by it fails exactly as the call context's own
+            // default already does. Wrapping anyway would add a layer with no behaviour to it
+            // and would change the identity of the leased client that callers can observe.
+            if (mediaStore != MediaStore.noop()) {
+                llm = new MediaResolvingLlmClient(llm, mediaStore);
             }
 
             List<AraTool> mcpTools = new ArrayList<>();

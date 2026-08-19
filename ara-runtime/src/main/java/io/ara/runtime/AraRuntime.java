@@ -35,7 +35,6 @@ import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.media.MediaStore;
 import io.ara.runtime.llm.InstrumentedLlmClient;
-import io.ara.runtime.llm.MediaResolvingLlmClient;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.core.retriever.Retriever;
 import io.ara.core.retriever.RetrieverRouter;
@@ -1045,20 +1044,11 @@ public final class AraRuntime implements AutoCloseable {
             }
         }
 
-        /**
-         * Wraps every registered client so every LLM call — including reflection — is
-         * instrumented and carries this runtime's media resolver.
-         *
-         * <p>Both wraps happen here, once per registered client, because this is the only
-         * point that sees every client and the runtime-wide collaborators at the same time.
-         * The media wrap is outermost so the resolver is attached before instrumentation
-         * records the call, and neither adds measurable overhead when the collaborator is the
-         * no-op default.
-         */
+        /** Wraps every registered client so every LLM call — including reflection — is instrumented. */
         private Map<String, LlmClient> instrumentClients() {
             Map<String, LlmClient> instrumentedClients = new java.util.LinkedHashMap<>();
-            namedClients.forEach((id, client) -> instrumentedClients.put(id,
-                    new MediaResolvingLlmClient(new InstrumentedLlmClient(client, telemetry), mediaStore)));
+            namedClients.forEach((id, client) ->
+                    instrumentedClients.put(id, new InstrumentedLlmClient(client, telemetry)));
             return instrumentedClients;
         }
 
@@ -1154,6 +1144,7 @@ public final class AraRuntime implements AutoCloseable {
                     .executionPlanner(planner)
                     .telemetry(telemetry)
                     .sessionStore(sessionStore)
+                    .mediaStore(mediaStore)
                     .interceptors(interceptors)
                     .registry(registry)
                     .build();
