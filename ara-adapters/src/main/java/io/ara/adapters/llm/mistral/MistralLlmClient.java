@@ -12,6 +12,7 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.mistralai.MistralAiChatModel;
 import dev.langchain4j.model.mistralai.MistralAiStreamingChatModel;
 import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.ProviderErrorMapper;
 import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.LlmCallContext;
@@ -266,6 +267,15 @@ public class MistralLlmClient implements LlmClient {
         if (msg.contains("too large") || msg.contains("context") && msg.contains("length")) {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
+
+        // Before falling through to a retryable network error: langchain4j classifies HTTP
+        // failures onto its own retriable/non-retriable hierarchy, and reading that is both
+        // more accurate than the substring checks above and immune to a provider rewording
+        // its error bodies. Without it a malformed request (400) was reported as a network
+        // error — retryable — so the strategy retried it and every fallback in a failover
+        // pool was tried in turn, for a request that could not succeed on any of them.
+        LlmException typed = ProviderErrorMapper.fromTypedException(PROVIDER, ex);
+        if (typed != null) return typed;
         return LlmException.networkError(PROVIDER, msg, ex);
     }
 

@@ -12,6 +12,7 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import io.ara.adapters.llm.CallParameterUtils;
+import io.ara.adapters.llm.ProviderErrorMapper;
 import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.LlmCallContext;
@@ -73,6 +74,7 @@ public class OpenAiLlmClient implements LlmClient {
     private final Duration timeout;
     private final boolean logRequests;
     private final boolean logResponses;
+    private final boolean documentSupport;
 
     private OpenAiLlmClient(Builder builder) {
         this.modelName = builder.modelName;
@@ -84,6 +86,12 @@ public class OpenAiLlmClient implements LlmClient {
         this.timeout = builder.timeout;
         this.logRequests = builder.logRequests;
         this.logResponses = builder.logResponses;
+        // Unset by the caller ⇒ derive it: hosted OpenAI (no custom base URL) accepts `file`
+        // parts, an arbitrary OpenAI-compatible endpoint usually does not. See
+        // supportedMediaTypes().
+        this.documentSupport = builder.documentSupport != null
+                ? builder.documentSupport
+                : (builder.baseUrl == null || builder.baseUrl.isBlank());
 
         this.chatModel = OpenAiChatModel.builder()
                 .apiKey(builder.apiKey)
@@ -110,14 +118,36 @@ public class OpenAiLlmClient implements LlmClient {
     }
 
     /**
-     * Images as image parts, PDFs as file parts, and text files inlined as text — the whole
-     * accepted vocabulary. Declared by category rather than by listing MIME strings, so a
-     * type added to {@code MediaTypes} in a category OpenAI already handles is picked up here
-     * instead of silently staying unsupported.
+     * Images as image parts and text files inlined as text — always; PDFs as {@code file}
+     * parts only when this client talks to an endpoint known to accept them.
+     *
+     * <h4>Why documents are conditional</h4>
+     * <p>Media support is not a property of "OpenAI" but of the <em>endpoint</em>. This adapter
+     * exists to be pointed at any OpenAI-compatible API (Azure, Groq, LM Studio, vLLM, a
+     * corporate gateway), and while essentially all of them accept the {@code image_url} part,
+     * many reject the {@code file} part that a PDF becomes — typically with an opaque
+     * {@code "Unknown part type: file"} 400 from the proxy. Claiming document support there
+     * would defeat the whole point of declaring capabilities: instead of a clear ARA failure
+     * naming the type and the provider <em>before</em> the request goes out, the caller gets a
+     * provider error they have to reverse-engineer.
+     *
+     * <p>So the default is derived from configuration rather than assumed: no {@link
+     * Builder#baseUrl(String)} means hosted OpenAI, which does accept documents; a custom base
+     * URL means an endpoint whose document support is unknown, and unknown is treated as
+     * unsupported. A caller who knows better opts in with
+     * {@link Builder#documentSupport(boolean)} — the same shape as
+     * {@code OllamaLlmClient.nativeTools(boolean)}, and for the same reason: the adapter cannot
+     * discover this, and guessing generously is what produces the confusing failure.
+     *
+     * <p>Declared by category rather than by listing MIME strings, so a type added to
+     * {@code MediaTypes} in a category the endpoint already handles is picked up here instead
+     * of silently staying unsupported.
      */
     @Override
     public Set<String> supportedMediaTypes() {
-        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
+        return documentSupport
+                ? MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT)
+                : MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
     }
 
     @Override
@@ -229,6 +259,15 @@ public class OpenAiLlmClient implements LlmClient {
         if (msg.contains("context_length_exceeded")) {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
+
+        // Before falling through to a retryable network error: langchain4j classifies HTTP
+        // failures onto its own retriable/non-retriable hierarchy, and reading that is both
+        // more accurate than the substring checks above and immune to a provider rewording
+        // its error bodies. Without it a malformed request (400) was reported as a network
+        // error — retryable — so the strategy retried it and every fallback in a failover
+        // pool was tried in turn, for a request that could not succeed on any of them.
+        LlmException typed = ProviderErrorMapper.fromTypedException(PROVIDER, ex);
+        if (typed != null) return typed;
         return LlmException.networkError(PROVIDER, msg, ex);
     }
 
@@ -259,6 +298,8 @@ public class OpenAiLlmClient implements LlmClient {
         private Duration timeout      = Duration.ofSeconds(60);
         private boolean  logRequests  = false;
         private boolean  logResponses = false;
+        /** Nullable on purpose: null means "derive from baseUrl" — see supportedMediaTypes(). */
+        private Boolean  documentSupport;
 
         /** Sets the OpenAI API key (required). */
         public Builder apiKey(String apiKey)       { this.apiKey = apiKey; return this; }
@@ -290,6 +331,22 @@ public class OpenAiLlmClient implements LlmClient {
 
         /** Enables LangChain4j response logging to SLF4J. */
         public Builder logResponses(boolean v)     { this.logResponses = v; return this; }
+
+        /**
+         * Declares whether this endpoint accepts PDFs as {@code file} content parts.
+         *
+         * <p>Leave it unset unless you have to: the default is hosted OpenAI ⇒ yes, custom
+         * {@link #baseUrl(String)} ⇒ no, which is right for almost every deployment. Set it to
+         * {@code true} for a proxy or gateway you know forwards {@code file} parts (Azure
+         * OpenAI, say), and to {@code false} to refuse documents even on hosted OpenAI.
+         *
+         * <p>Getting it wrong in the generous direction is what this flag exists to prevent:
+         * an endpoint that rejects {@code file} parts answers with an opaque
+         * {@code "Unknown part type: file"} 400 instead of ARA naming the unsupported type
+         * before the call. Wrong in the strict direction merely refuses a PDF that would have
+         * worked, saying so clearly.
+         */
+        public Builder documentSupport(boolean v)  { this.documentSupport = v; return this; }
 
         /**
          * Builds the {@link OpenAiLlmClient}.
