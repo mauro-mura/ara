@@ -10,23 +10,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.Flow;
 
 /**
  * {@link LlmClient} decorator that logs request messages and the response at INFO level.
  * Applied automatically by {@link io.ara.runtime.factory.DefaultLlmRouter} when
  * {@code LlmConfig.logIo()} is {@code true}.
  */
-public final class LoggingLlmClient implements LlmClient {
+public final class LoggingLlmClient extends DelegatingLlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingLlmClient.class);
 
-    private final LlmClient delegate;
-    private final int       maxChars;
+    private final int maxChars;
 
     public LoggingLlmClient(LlmClient delegate, int maxChars) {
-        this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+        super(delegate);
         this.maxChars = maxChars;
     }
 
@@ -45,26 +42,6 @@ public final class LoggingLlmClient implements LlmClient {
         LlmCompletion completion = delegate.complete(messages, config);
         logResponse(completion, maxChars);
         return completion;
-    }
-
-    @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return delegate.stream(messages, context);
-    }
-
-    @Override
-    public String providerId() {
-        return delegate.providerId();
-    }
-
-    @Override
-    public String lastUsedProviderId() {
-        return delegate.lastUsedProviderId();
-    }
-
-    @Override
-    public boolean supportsNativeTools() {
-        return delegate.supportsNativeTools();
     }
 
     private void logRequest(List<LlmMessage> messages, int chars) {

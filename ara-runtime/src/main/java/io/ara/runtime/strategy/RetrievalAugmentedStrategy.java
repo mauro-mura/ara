@@ -13,6 +13,7 @@ import io.ara.core.retriever.RetrievedChunk;
 import io.ara.core.retriever.Retriever;
 import io.ara.core.retriever.RetrieverRouter;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.runtime.llm.DelegatingLlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -184,13 +185,12 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
      * LLM call. Both {@link #complete} and {@link #stream} are intercepted so that
      * streaming-enabled strategies also receive the augmented context.
      */
-    private static final class AugmentingLlmClient implements LlmClient {
+    private static final class AugmentingLlmClient extends DelegatingLlmClient {
 
-        private final LlmClient delegate;
-        private final String    contextBlock;
+        private final String contextBlock;
 
         AugmentingLlmClient(LlmClient delegate, String contextBlock) {
-            this.delegate     = delegate;
+            super(delegate);
             this.contextBlock = contextBlock;
         }
 
@@ -202,16 +202,6 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
         @Override
         public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
             return delegate.stream(augment(messages), context);
-        }
-
-        @Override
-        public String providerId() {
-            return delegate.providerId();
-        }
-
-        @Override
-        public boolean supportsNativeTools() {
-            return delegate.supportsNativeTools();
         }
 
         private List<LlmMessage> augment(List<LlmMessage> messages) {
