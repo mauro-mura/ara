@@ -74,6 +74,23 @@ public class LlmException extends RuntimeException {
         return new LlmException(message, null, ErrorType.INVALID_REQUEST, null, 400, false);
     }
 
+    /**
+     * A call carried media of a type the selected client does not support.
+     *
+     * <p>Non-retryable by design, and that is the whole point: it makes
+     * {@code FailoverLlmClient} abort instead of walking down the fallback list, so a
+     * text-only fallback can never answer a question about a document it was never sent.
+     * The message names the type, the file and the provider, because the caller that
+     * attached the file is several layers above wherever this is thrown.
+     */
+    public static LlmException unsupportedMediaType(String provider, String mimeType,
+                                                   String mediaName, java.util.Set<String> supported) {
+        String msg = String.format(
+                "Provider '%s' does not support media type '%s' (attachment '%s'). Supported: %s",
+                provider, mimeType, mediaName, supported.isEmpty() ? "none — text only" : supported);
+        return new LlmException(msg, null, ErrorType.UNSUPPORTED_OPERATION, provider, null, false);
+    }
+
     public static LlmException modelNotFound(String provider, String model) {
         return new LlmException(
                 String.format("Model '%s' not found for provider '%s'", model, provider),

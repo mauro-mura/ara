@@ -33,7 +33,9 @@ import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
 import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.core.agent.ExecutionStrategy;
+import io.ara.core.media.MediaStore;
 import io.ara.runtime.llm.InstrumentedLlmClient;
+import io.ara.runtime.llm.MediaResolvingLlmClient;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.core.retriever.Retriever;
 import io.ara.core.retriever.RetrieverRouter;
@@ -742,6 +744,7 @@ public final class AraRuntime implements AutoCloseable {
         private InstanceContextStore instanceContextStore;
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
+        private MediaStore   mediaStore   = MediaStore.noop();
         private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
         private AgentProvider agentProvider;
         private AraRuntimeConfig runtimeConfig;
@@ -921,6 +924,24 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * Sets the {@link MediaStore} holding the bytes of any media attached to a task, so
+         * the adapter can fetch them when it builds the provider request. Defaults to {@link
+         * MediaStore#noop()}, which stores nothing — invisible to a deployment that never
+         * attaches media, and a clear failure naming the attachment for one that does without
+         * wiring a store.
+         *
+         * <p>Runtime-wide rather than per-agent on purpose: two agents in one delegation chain
+         * must agree on where a document lives, or a {@code MediaRef} handed from one to the
+         * other resolves for the first and not the second. {@link MediaStore#inMemory()} is a
+         * process-local reference implementation; a deployment that keeps media beyond one JVM
+         * needs a real backend, and owns the retention policy for it.
+         */
+        public Builder mediaStore(MediaStore mediaStore) {
+            this.mediaStore = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
+            return this;
+        }
+
+        /**
          * Sets how long {@code delegate_task} waits for the target agent's reply before
          * failing the delegation, for every agent this runtime creates. Defaults to
          * {@value AgentDelegationTool#DEFAULT_TIMEOUT_SEC} seconds ({@link
@@ -1024,11 +1045,20 @@ public final class AraRuntime implements AutoCloseable {
             }
         }
 
-        /** Wraps every registered client so every LLM call — including reflection — is instrumented. */
+        /**
+         * Wraps every registered client so every LLM call — including reflection — is
+         * instrumented and carries this runtime's media resolver.
+         *
+         * <p>Both wraps happen here, once per registered client, because this is the only
+         * point that sees every client and the runtime-wide collaborators at the same time.
+         * The media wrap is outermost so the resolver is attached before instrumentation
+         * records the call, and neither adds measurable overhead when the collaborator is the
+         * no-op default.
+         */
         private Map<String, LlmClient> instrumentClients() {
             Map<String, LlmClient> instrumentedClients = new java.util.LinkedHashMap<>();
-            namedClients.forEach((id, client) ->
-                    instrumentedClients.put(id, new InstrumentedLlmClient(client, telemetry)));
+            namedClients.forEach((id, client) -> instrumentedClients.put(id,
+                    new MediaResolvingLlmClient(new InstrumentedLlmClient(client, telemetry), mediaStore)));
             return instrumentedClients;
         }
 

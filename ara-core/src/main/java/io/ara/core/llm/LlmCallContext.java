@@ -2,6 +2,7 @@ package io.ara.core.llm;
 
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.media.MediaResolver;
 import io.ara.core.tool.AraTool;
 
 import java.util.ArrayList;
@@ -80,6 +81,23 @@ public final class LlmCallContext {
     private final List<AraTool> resolvedTools;
 
     /**
+     * How the adapter turns a {@code MediaRef} on an outgoing message back into bytes.
+     * Never {@code null} — {@link MediaResolver#none()} is the default, and it answers by
+     * failing with the reference's name and id rather than by producing empty bytes.
+     *
+     * <p><b>Second occurrence of the same widening, declared as such.</b> Like
+     * {@code resolvedTools} above, this is not a sampling parameter, and the cleaner shape
+     * is a dedicated argument on {@code LlmClient.complete(...)}. The change that finally
+     * touches every adapter — this one — is also the change that already carries a breaking
+     * modification to a public record ({@code LlmMessage}), and stacking a signature change
+     * to the primary {@code LlmClient} method on top would make two independent migrations
+     * land on the same twelve call sites at once. So it is deferred again, on purpose. If a
+     * third occurrence shows up, that is the one that should trigger the refactor rather
+     * than a third note here.
+     */
+    private final MediaResolver mediaResolver;
+
+    /**
      * The originating task's session id ({@code SessionId.value()}), or {@code null} for
      * ephemeral tasks with no session. Carried through purely for observability — e.g.
      * {@code InstrumentedLlmClient} tags the {@code llm.complete} span with it — never
@@ -103,6 +121,7 @@ public final class LlmCallContext {
         this.logLlmIoMaxChars    = b.logLlmIoMaxChars;
         this.nativeJsonSchema    = b.nativeJsonSchema;
         this.resolvedTools       = b.resolvedTools != null ? List.copyOf(b.resolvedTools) : null;
+        this.mediaResolver       = b.mediaResolver != null ? b.mediaResolver : MediaResolver.none();
         this.sessionId           = b.sessionId;
     }
 
@@ -186,6 +205,11 @@ public final class LlmCallContext {
     public List<AraTool> resolvedTools()       { return resolvedTools; }
     public boolean hasResolvedTools()         { return resolvedTools != null; }
 
+    /** How to fetch the bytes of a {@code MediaRef}; never {@code null} — see the field javadoc. */
+    public MediaResolver mediaResolver()      { return mediaResolver; }
+    /** {@code true} when a resolver was set deliberately, rather than defaulted to {@code none()}. */
+    public boolean hasMediaResolver()         { return mediaResolver != MediaResolver.none(); }
+
     public boolean hasOutputSchema()          { return outputJsonSchema != null; }
     public boolean hasStopSequences()         { return !stopSequences.isEmpty(); }
     public boolean hasSeed()                  { return seed != null; }
@@ -221,6 +245,10 @@ public final class LlmCallContext {
         return toBuilder().resolvedTools(tools).build();
     }
 
+    public LlmCallContext withMediaResolver(MediaResolver resolver) {
+        return toBuilder().mediaResolver(resolver).build();
+    }
+
     private Builder toBuilder() {
         Builder b = new Builder();
         b.agentType           = this.agentType;
@@ -238,6 +266,7 @@ public final class LlmCallContext {
         b.logLlmIoMaxChars    = this.logLlmIoMaxChars;
         b.nativeJsonSchema    = this.nativeJsonSchema;
         b.resolvedTools       = this.resolvedTools != null ? new ArrayList<>(this.resolvedTools) : null;
+        b.mediaResolver       = this.mediaResolver;
         b.sessionId           = this.sessionId;
         return b;
     }
@@ -258,6 +287,7 @@ public final class LlmCallContext {
         private int          logLlmIoMaxChars  = 500;
         private boolean      nativeJsonSchema  = true;
         private List<AraTool> resolvedTools;
+        private MediaResolver mediaResolver;
         private String       sessionId;
 
         public Builder agentType(String v)           { this.agentType = v;           return this; }
@@ -275,6 +305,7 @@ public final class LlmCallContext {
         public Builder logLlmIoMaxChars(int v)        { this.logLlmIoMaxChars = v;    return this; }
         public Builder nativeJsonSchema(boolean v)    { this.nativeJsonSchema = v;    return this; }
         public Builder resolvedTools(List<AraTool> v) { this.resolvedTools = v;       return this; }
+        public Builder mediaResolver(MediaResolver v) { this.mediaResolver = v;       return this; }
         public Builder sessionId(String v)            { this.sessionId = v;           return this; }
 
         public LlmCallContext build() { return new LlmCallContext(this); }

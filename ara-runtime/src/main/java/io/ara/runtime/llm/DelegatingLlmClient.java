@@ -8,6 +8,7 @@ import io.ara.core.llm.LlmMessage;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Flow;
 
 /**
@@ -72,5 +73,10 @@ public abstract class DelegatingLlmClient implements LlmClient {
     @Override
     public boolean supportsNativeTools() {
         return delegate.supportsNativeTools();
+    }
+
+    @Override
+    public Set<String> supportedMediaTypes() {
+        return delegate.supportedMediaTypes();
     }
 }

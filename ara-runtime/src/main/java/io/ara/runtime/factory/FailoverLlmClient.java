@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * {@link LlmClient} decorator that implements ordered failover across multiple clients.
@@ -102,6 +104,26 @@ public final class FailoverLlmClient implements LlmClient {
     @Override
     public boolean supportsNativeTools() {
         return clients.stream().allMatch(LlmClient::supportsNativeTools);
+    }
+
+    /**
+     * The intersection of the candidates' supported media types — the pool can only promise
+     * what every client it might fall back to can deliver.
+     *
+     * <p>Claiming the union instead would mean a call with a PDF succeeds or fails depending
+     * on which candidate happened to answer. Reporting the intersection makes the mismatch
+     * a non-retryable failure raised by the first candidate, which aborts the failover
+     * rather than letting a text-only fallback answer about a document it never received.
+     * Excluding media-incapable candidates from the rotation instead would give better
+     * availability, but it is a determinism improvement, not a correctness one — the
+     * intersection already rules out the wrong answer — and it is not done here.
+     */
+    @Override
+    public Set<String> supportedMediaTypes() {
+        return clients.stream()
+                .map(LlmClient::supportedMediaTypes)
+                .reduce((a, b) -> a.stream().filter(b::contains).collect(Collectors.toUnmodifiableSet()))
+                .orElseGet(Set::of);
     }
 
     private static String buildCompositeId(List<LlmClient> clients) {

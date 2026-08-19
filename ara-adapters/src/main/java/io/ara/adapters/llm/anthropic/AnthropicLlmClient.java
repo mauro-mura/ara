@@ -4,6 +4,8 @@ import io.ara.adapters.llm.CallParameterUtils;
 import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
+import io.ara.core.media.MediaTypes;
+import io.ara.core.media.MediaTypes.MediaKind;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
@@ -128,6 +130,17 @@ public class AnthropicLlmClient implements LlmClient {
     }
 
     /**
+     * Images as image blocks, PDFs as document blocks, and text files inlined as text — the
+     * whole accepted vocabulary. Declared by category rather than as a list of MIME strings,
+     * so a type added to {@code MediaTypes} in a category Anthropic already handles is picked
+     * up here instead of silently staying unsupported.
+     */
+    @Override
+    public Set<String> supportedMediaTypes() {
+        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
+    }
+
+    /**
      * Sends {@code messages} to the Anthropic Chat API and blocks until a completion arrives.
      *
      * @param messages the conversation history (system → user → assistant turns)
@@ -140,7 +153,7 @@ public class AnthropicLlmClient implements LlmClient {
     public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
+                    .messages(toLC4jMessages(messages, context));
             CallParameterUtils.applyTo(reqBuilder, context);
 
             if (context != null && context.hasResolvedTools()) {
@@ -173,7 +186,7 @@ public class AnthropicLlmClient implements LlmClient {
         return TokenStreamPublisher.of(
                 handler -> {
                     ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages));
+                            .messages(toLC4jMessages(messages, context));
                     CallParameterUtils.applyTo(reqBuilder, context);
 
                     if (context != null && context.hasResolvedTools()) {
@@ -187,14 +200,13 @@ public class AnthropicLlmClient implements LlmClient {
 
     // ── Conversion helpers ────────────────────────────────────────────────────
 
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages) {
+    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
         // Delegates to ToolConversionUtils so "assistant_tool_call"/"assistant_tool_calls"/"tool"
         // roles are reconstructed as native AiMessage(toolExecutionRequests)/
         // ToolExecutionResultMessage instead of collapsing into a generic UserMessage — see its
-        // javadoc for the previous bug this replaced.
-        return messages.stream()
-                .map(ToolConversionUtils::toNativeAwareChatMessage)
-                .collect(Collectors.toList());
+        // javadoc for the previous bug this replaced — and so media is checked against this
+        // client's declared types and flattened in one shared place.
+        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
     }
 
     private LlmCompletion toLlmCompletion(ChatResponse response) {

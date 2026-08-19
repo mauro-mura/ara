@@ -15,6 +15,10 @@ import java.util.List;
  * {@link LlmClient} decorator that logs request messages and the response at INFO level.
  * Applied automatically by {@link io.ara.runtime.factory.DefaultLlmRouter} when
  * {@code LlmConfig.logIo()} is {@code true}.
+ *
+ * <p>Attachments are logged as name, type and size. Their bytes never reach this class — a
+ * {@code MediaRef} carries none — which is why the log stays readable with a 2 MB PDF
+ * attached, with no flag to turn media logging off.
  */
 public final class LoggingLlmClient extends DelegatingLlmClient {
 
@@ -49,6 +53,11 @@ public final class LoggingLlmClient extends DelegatingLlmClient {
         StringBuilder sb = new StringBuilder("LLM REQUEST [").append(messages.size()).append(" messages]");
         for (LlmMessage m : messages) {
             sb.append("\n  [").append(m.role()).append("] ").append(truncate(m.content(), chars));
+            for (var ref : m.media()) {
+                sb.append("\n    + media ").append(ref.name())
+                  .append(" (").append(ref.mimeType()).append(", ")
+                  .append(ref.sizeBytes()).append(" bytes)");
+            }
         }
         log.info("{}", sb);
     }

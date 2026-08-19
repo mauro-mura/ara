@@ -72,6 +72,22 @@ public final class MediaTypes {
     }
 
     /**
+     * The accepted MIME types belonging to any of {@code kinds} — how an adapter declares
+     * what its provider takes ({@code ofKinds(IMAGE, TEXT)} for one with no document path).
+     *
+     * <p>Adapters use this instead of listing MIME strings themselves so that a type added
+     * to the vocabulary is picked up by every adapter whose provider handles that category,
+     * rather than quietly staying unsupported in each hand-written list.
+     */
+    public static Set<String> ofKinds(MediaKind... kinds) {
+        Set<MediaKind> wanted = Set.of(kinds);
+        return VOCABULARY.entrySet().stream()
+                .filter(e -> wanted.contains(e.getValue()))
+                .map(Map.Entry::getKey)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    /**
      * Returns {@code mimeType} in canonical form (trimmed, lowercase), or throws if it is
      * not in {@link #allowed()}.
      *
