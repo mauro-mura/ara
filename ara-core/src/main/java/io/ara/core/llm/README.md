@@ -25,7 +25,9 @@ without depending on a specific SDK. Concrete adapters live in `ara-adapters`.
 - **`LlmMessage`** — one turn in the conversation. `role` is a plain `String`
   (`"system"`, `"user"`, `"assistant"`, `"assistant_tool_call"`, `"tool"`) rather than
   an enum; use the static factories (`system`, `user`, `assistant`, `assistantToolCall`,
-  `tool`) instead of constructing roles by hand.
+  `tool`) instead of constructing roles by hand. `media` (a `List<MediaRef>`) carries
+  images and documents accompanying a `"user"` turn — references, never bytes; use
+  `user(String, List<MediaRef>)`.
 - **`LlmCompletion`** — the result of a call. Supports both a single legacy tool call
   (`toolCallJson` / `toolCallId`) and multiple parallel tool calls (`toolCalls`, a list
   of `ToolCallEntry`). When `toolCalls` is non-empty it takes precedence; use
@@ -64,19 +66,52 @@ per-call overrides without touching the data contract (`AgentContract`) — it d
 - `LlmCallContext` also carries `resolvedTools` (a `List<AraTool>`) when the calling
   strategy has already resolved tools for the step — clients must use these instead of
   resolving from their own registry when present (`hasResolvedTools()`).
+- `LlmCallContext.mediaResolver()` is how an adapter turns a `MediaRef` on an outgoing
+  message back into bytes. Never `null`: when no `MediaStore` is wired the default
+  resolver answers by failing with the reference's name and id, rather than by producing
+  empty bytes and letting the model answer confidently about nothing.
+- `LlmClient.supportedMediaTypes()` declares what a client can really send. Provider
+  media support is per-type, not a boolean: Ollama takes images but has no PDF path at
+  all. A type absent from the set must produce a **non-retryable** `LlmException` naming
+  the type and the provider, raised before the request goes out — never a dropped
+  attachment, never a downgrade to text, never a warning and a continue. Stripping the
+  attachment produces a fluent answer about a document the model never saw, with the only
+  trace in a log nobody reads in production; the non-retryable classification is also
+  what stops `FailoverLlmClient` from letting a text-only fallback answer instead.
 
-### Architectural note: `resolvedTools` on `LlmCallContext`
+### Capability methods and decorators
+
+Every capability default on `LlmClient` (`supportsNativeTools()`,
+`supportedMediaTypes()`) is the safe answer for a *leaf* client and a lie for a
+decorator. Single-wrap decorators must extend `io.ara.runtime.llm.DelegatingLlmClient`,
+which forwards all of them, rather than hand-copying the delegation — a decorator that
+forgets one silently masks the capability of what it wraps, with no exception and no log
+line. Composites over a list of clients (`Failover`, `RoundRobin`, `Routing`) report the
+**intersection** of their delegates', since they cannot promise what a candidate they
+might pick lacks. Leaf stubs that wrap nothing are correct with the interface defaults.
+
+### Architectural note: `resolvedTools` and `mediaResolver` on `LlmCallContext`
 
 Tool availability is conceptually a different concern from the sampling parameters
 (temperature, schema, stop sequences, seed) that otherwise make up `LlmCallContext`.
-It lives there anyway because every adapter (OpenAI, Anthropic, Ollama) already reads
-tool specs off the call context it's given, and `AraTool` is itself a `ara-core` domain
-type — so this isn't a module-boundary violation, just a widening of the class's
+It lives there anyway because every adapter (OpenAI, Anthropic, Ollama, Mistral) already
+reads tool specs off the call context it's given, and `AraTool` is itself a `ara-core`
+domain type — so this isn't a module-boundary violation, just a widening of the class's
 responsibility. The cleaner long-term shape is a dedicated parameter on
 `LlmClient.complete(messages, context, tools)`, but that means changing the primary
-`LlmClient` signature across every adapter and strategy call site. Do that split
-together with the next change that already has to touch every adapter, rather than as
-an isolated refactor.
+`LlmClient` signature across every adapter and strategy call site.
+
+This note used to say: do that split together with the next change that already has to
+touch every adapter. That change has since happened — multimodal input — and the split
+was **deliberately deferred again**, because that change already carried a breaking
+modification to a public record (`LlmMessage` gaining `media`), and stacking a signature
+change to the primary `LlmClient` method on top would have landed two independent
+migrations on the same twelve call sites at once. `mediaResolver` therefore sits beside
+`resolvedTools` as the second declared occurrence of the same widening.
+
+So the trigger is now the **third** occurrence, not "the next adapter-wide change":
+if another non-sampling concern needs to reach the adapter this way, split the signature
+then instead of adding a third field and a third paragraph here.
 
 Note also that `LlmCallContext` used to carry a second, redundant tool-related field —
 `enabledTools` (`List<String>`, copied straight from `AgentConfig`) — that no strategy
