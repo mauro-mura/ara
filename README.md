@@ -801,7 +801,6 @@ opening a PR.
 
 ARA is developed with heavy AI assistance under human architectural review.
 Every change is expected to pass the checklist in [`docs/CODING-GUIDELINES.md`](docs/CODING-GUIDELINES.md).
----
 
 ## License
 
