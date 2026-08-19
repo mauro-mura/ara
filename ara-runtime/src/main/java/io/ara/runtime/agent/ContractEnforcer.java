@@ -6,6 +6,7 @@ import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.processor.InputProcessor;
+import io.ara.core.agent.processor.MediaValidator;
 import io.ara.core.agent.processor.OutputProcessor;
 import io.ara.core.agent.processor.ProcessingResult;
 import io.ara.core.agent.processor.PromptShaper;
@@ -14,6 +15,7 @@ import io.ara.core.llm.LlmExecutionHints;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.BiFunction;
 
 /**
@@ -34,6 +36,17 @@ final class ContractEnforcer {
                 task.input(), contract.inputProcessors(), InputProcessor::process);
         if (processedInput.rejected()) {
             return violation(task, inner, start, "input", processedInput.rejectionReason());
+        }
+
+        // ── 1b. Media validation ──────────────────────────────────────────────
+        // Separate from the input chain because a processor only sees the input string and
+        // cannot look at an attachment. Runs before shaping and before execution, so a task
+        // over its media limits never reaches the model and never spends a token.
+        for (MediaValidator validator : contract.mediaValidators()) {
+            Optional<String> rejection = validator.validate(task.media());
+            if (rejection.isPresent()) {
+                return violation(task, inner, start, "media", rejection.get());
+            }
         }
 
         // ── 2+3. Prompt shaping + outputSchema (ADR-014) ──────────────────────
