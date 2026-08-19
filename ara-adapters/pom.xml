@@ -74,6 +74,12 @@
       <artifactId>langchain4j-ollama</artifactId>
     </dependency>
 
+    <!-- Provider: Mistral — version comes from the langchain4j BOM imported above -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-mistral-ai</artifactId>
+    </dependency>
+
     <!-- MCP SDK
          Older Jackson transitives excluded so LangChain4j's versions win:
            - jackson-annotations:2.20 from mcp-core (vs 2.21 from LC4j)

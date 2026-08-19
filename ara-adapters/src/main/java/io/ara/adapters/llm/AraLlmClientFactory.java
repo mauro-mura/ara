@@ -1,6 +1,7 @@
 package io.ara.adapters.llm;
 
 import io.ara.adapters.llm.anthropic.AnthropicLlmClient;
+import io.ara.adapters.llm.mistral.MistralLlmClient;
 import io.ara.adapters.llm.ollama.OllamaLlmClient;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
 import io.ara.core.llm.LlmClient;
@@ -27,6 +28,11 @@ import io.ara.core.llm.LlmClient;
  *     .model(OllamaLlmClient.Models.LLAMA_3_2)
  *     .build();
  *
+ * LlmClient mistral = AraLlmClientFactory.mistral()
+ *     .apiKey(System.getenv("MISTRAL_API_KEY"))
+ *     .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
+ *     .build();
+ *
  * AraRuntime runtime = AraRuntime.builder()
  *     .llmClient("gpt-4o",  gpt4o)
  *     .llmClient("claude",  claude)
@@ -40,6 +46,7 @@ import io.ara.core.llm.LlmClient;
  * @see OpenAiLlmClient
  * @see AnthropicLlmClient
  * @see OllamaLlmClient
+ * @see MistralLlmClient
  * @see LlmClient
  */
 public final class AraLlmClientFactory {
@@ -76,5 +83,16 @@ public final class AraLlmClientFactory {
      */
     public static OllamaLlmClient.Builder ollama() {
         return OllamaLlmClient.builder();
+    }
+
+    /**
+     * Returns a builder for a Mistral AI {@link LlmClient} — the adapter to reach for when a
+     * task attaches a PDF that must be read as a document rather than pre-extracted to text.
+     *
+     * @return {@link MistralLlmClient.Builder}
+     * @see MistralLlmClient.Models
+     */
+    public static MistralLlmClient.Builder mistral() {
+        return MistralLlmClient.builder();
     }
 }

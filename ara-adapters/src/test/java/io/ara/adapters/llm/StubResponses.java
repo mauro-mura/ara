@@ -19,6 +19,13 @@ public final class StubResponses {
              "content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
              "usage":{"input_tokens":1,"output_tokens":1}}""";
 
+    /** Mistral's chat completion is OpenAI-shaped on the reply side. */
+    public static final String MISTRAL = """
+            {"id":"c","object":"chat.completion","created":1,"model":"mistral-medium-latest",
+             "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},
+                         "finish_reason":"stop"}],
+             "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}""";
+
     public static final String OLLAMA = """
             {"model":"llama3.2","created_at":"2024-01-01T00:00:00Z",
              "message":{"role":"assistant","content":"hi"},"done":true,
