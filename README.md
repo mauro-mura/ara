@@ -455,6 +455,15 @@ AgentContract contract = AgentContract.builder()
 AraAgent agent = runtime.createAgent(config, contract);
 ```
 
+`outputSchema(...)` does two things: it declares the contract *and* instructs the model, by
+appending the schema to the system prompt (`"Respond ONLY with a single valid JSON object
+matching this schema"`). That route works against every endpoint, including gateways that
+support no `response_format` at all, and it is what the default `nativeJsonSchema(false)`
+selects. Setting `nativeJsonSchema(true)` on the `LlmProfile` asks for a provider-native
+`response_format` instead — which no adapter sends yet, so combining it with an output schema
+is rejected at `createAgent` rather than left to fail on every task with a puzzling
+missing-field error.
+
 ### Built-in processors
 
 **Validation**
