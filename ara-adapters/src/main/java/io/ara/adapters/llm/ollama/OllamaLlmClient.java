@@ -4,6 +4,8 @@ import io.ara.adapters.llm.CallParameterUtils;
 import io.ara.adapters.llm.TokenStreamPublisher;
 import io.ara.adapters.llm.ToolConversionUtils;
 import io.ara.core.llm.*;
+import io.ara.core.media.MediaTypes;
+import io.ara.core.media.MediaTypes.MediaKind;
 import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -148,6 +150,18 @@ public class OllamaLlmClient implements LlmClient {
     }
 
     /**
+     * Images and text files, but <strong>not</strong> PDFs: Ollama's chat API has no document
+     * part, so there is nothing for a PDF to become. It is declared unsupported rather than
+     * silently converted or dropped, which makes a PDF sent here a non-retryable failure
+     * naming the provider — the alternative would be an answer about a document the model
+     * never received.
+     */
+    @Override
+    public Set<String> supportedMediaTypes() {
+        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
+    }
+
+    /**
      * Sends {@code messages} to the local Ollama instance and blocks until completion.
      *
      * <p>Tools from {@link LlmCallContext} are forwarded only when the client was built with
@@ -163,7 +177,7 @@ public class OllamaLlmClient implements LlmClient {
     public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
+                    .messages(toLC4jMessages(messages, context));
             CallParameterUtils.applyTo(reqBuilder, context);
             applyToolsIfEnabled(reqBuilder, context);
 
@@ -192,7 +206,7 @@ public class OllamaLlmClient implements LlmClient {
         return TokenStreamPublisher.of(
                 handler -> {
                     ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages));
+                            .messages(toLC4jMessages(messages, context));
                     CallParameterUtils.applyTo(reqBuilder, context);
                     applyToolsIfEnabled(reqBuilder, context);
 
@@ -217,15 +231,14 @@ public class OllamaLlmClient implements LlmClient {
 
     // ── Conversion helpers ────────────────────────────────────────────────────
 
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages) {
+    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
         // Native tool-call and tool-result turns reach this client from two directions: its
         // own, once nativeTools is on, and another provider's — a session using
         // ROUND_ROBIN/FAILOVER can hand it a history whose earlier turns were answered by
         // OpenAI or Anthropic. Delegating here keeps both intact instead of degrading them to
-        // a confusing generic user turn — see ToolConversionUtils.toNativeAwareChatMessage.
-        return messages.stream()
-                .map(ToolConversionUtils::toNativeAwareChatMessage)
-                .collect(Collectors.toList());
+        // a confusing generic user turn, and applies the shared media check and flattening —
+        // see ToolConversionUtils.toNativeAwareChatMessages.
+        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
     }
 
     private LlmCompletion toLlmCompletion(ChatResponse response) {

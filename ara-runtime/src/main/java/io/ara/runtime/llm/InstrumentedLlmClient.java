@@ -1,6 +1,5 @@
 package io.ara.runtime.llm;
 
-import io.ara.core.agent.AgentConfig;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -13,7 +12,6 @@ import io.ara.core.telemetry.SpanStatus;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.Flow;
 
 /**
  * {@link LlmClient} decorator that records OpenTelemetry spans for every
@@ -41,13 +39,12 @@ import java.util.concurrent.Flow;
  * LlmClient instrumented = new InstrumentedLlmClient(delegate, telemetry);
  * }</pre>
  */
-public final class InstrumentedLlmClient implements LlmClient {
+public final class InstrumentedLlmClient extends DelegatingLlmClient {
 
-    private final LlmClient delegate;
     private final AraTelemetry telemetry;
 
     public InstrumentedLlmClient(LlmClient delegate, AraTelemetry telemetry) {
-        this.delegate  = Objects.requireNonNull(delegate,  "delegate must not be null");
+        super(delegate);
         this.telemetry = Objects.requireNonNull(telemetry, "telemetry must not be null");
     }
 
@@ -82,32 +79,6 @@ public final class InstrumentedLlmClient implements LlmClient {
         } finally {
             span.end();
         }
-    }
-
-    @Override
-
-    public LlmCompletion complete(List<LlmMessage> messages, AgentConfig config) {
-        return complete(messages, LlmCallContext.from(config));
-    }
-
-    @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return delegate.stream(messages, context);
-    }
-
-    @Override
-    public String providerId() {
-        return delegate.providerId();
-    }
-
-    @Override
-    public String lastUsedProviderId() {
-        return delegate.lastUsedProviderId();
-    }
-
-    @Override
-    public boolean supportsNativeTools() {
-        return delegate.supportsNativeTools();
     }
 
     private String resolveModel(LlmCallContext context) {

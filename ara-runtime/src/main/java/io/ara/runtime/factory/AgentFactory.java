@@ -18,6 +18,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmTransport;
 import io.ara.core.mcp.McpClient;
+import io.ara.core.media.MediaStore;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.tool.AraTool;
@@ -81,6 +82,7 @@ public final class AgentFactory implements AgentLifecycleManager {
 
     private final String defaultLlmClientId;
     private final LlmClientFactory llmClientFactory;
+    private final MediaStore       mediaStore;
     private final Function<AgentConfig, MemoryManager> memoryManagerFactory;
     private final Function<AgentConfig, ToolRegistry>  toolRegistryFactory;
     private final ExecutionPlanner executionPlanner;
@@ -120,6 +122,7 @@ public final class AgentFactory implements AgentLifecycleManager {
         this.registry             = builder.registry;
         this.telemetry            = builder.telemetry;
         this.sessionStore         = builder.sessionStore;
+        this.mediaStore           = builder.mediaStore;
 
         this.llmTransports = new DefaultResourceRegistry<>(
                 transport -> {
@@ -265,7 +268,8 @@ public final class AgentFactory implements AgentLifecycleManager {
         Function<SessionId, MemoryManager> sessionMemoryFactory = sid -> memoryManagerFactory.apply(config);
         ToolRegistry toolRegistry = toolRegistryFactory.apply(config);
         WiringFactory wiringFactory = new DefaultWiringFactory(
-                llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry);
+                llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
+                mediaStore);
         AgentInterceptorChain chain = new AgentInterceptorChain(interceptors);
         return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore);
     }
@@ -387,6 +391,7 @@ public final class AgentFactory implements AgentLifecycleManager {
         private final Map<String, LlmClient> llmClientRegistry = new LinkedHashMap<>();
         private String defaultLlmClientId = "default";
         private LlmClientFactory llmClientFactory;
+        private MediaStore       mediaStore = MediaStore.noop();
         private final Map<String, McpServerBinding> mcpServers = new LinkedHashMap<>();
         private Function<AgentConfig, MemoryManager>  memoryManagerFactory;
         private Function<AgentConfig, ToolRegistry>   toolRegistryFactory;
@@ -415,6 +420,16 @@ public final class AgentFactory implements AgentLifecycleManager {
         /** Sets which registered id is used when the agent's llmProvider is not found. */
         public Builder defaultLlmClient(String id) {
             this.defaultLlmClientId = Objects.requireNonNull(id);
+            return this;
+        }
+
+        /**
+         * Sets where the bytes of a task's media live, so adapters can fetch them when they
+         * build the provider request. Defaults to {@link MediaStore#noop()} — no storage, and
+         * a clear failure naming the attachment for an agent that receives one anyway.
+         */
+        public Builder mediaStore(MediaStore mediaStore) {
+            this.mediaStore = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
             return this;
         }
 

@@ -10,6 +10,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Test/stub {@link LlmClient} that dispatches to different clients based on
@@ -71,6 +73,20 @@ public final class RoutingLlmClient implements LlmClient {
     public boolean supportsNativeTools() {
         return routes.values().stream().allMatch(LlmClient::supportsNativeTools)
                 && defaultClient.supportsNativeTools();
+    }
+
+    /**
+     * The intersection across every route <em>and</em> the default — the route is chosen by
+     * agent type at call time, so the honest answer is what all of them can do.
+     */
+    @Override
+    public Set<String> supportedMediaTypes() {
+        Set<String> shared = defaultClient.supportedMediaTypes();
+        for (LlmClient routed : routes.values()) {
+            Set<String> other = routed.supportedMediaTypes();
+            shared = shared.stream().filter(other::contains).collect(Collectors.toUnmodifiableSet());
+        }
+        return shared;
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────

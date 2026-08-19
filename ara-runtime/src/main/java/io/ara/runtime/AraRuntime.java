@@ -33,6 +33,7 @@ import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
 import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.core.agent.ExecutionStrategy;
+import io.ara.core.media.MediaStore;
 import io.ara.runtime.llm.InstrumentedLlmClient;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.core.retriever.Retriever;
@@ -742,6 +743,7 @@ public final class AraRuntime implements AutoCloseable {
         private InstanceContextStore instanceContextStore;
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
+        private MediaStore   mediaStore   = MediaStore.noop();
         private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
         private AgentProvider agentProvider;
         private AraRuntimeConfig runtimeConfig;
@@ -917,6 +919,24 @@ public final class AraRuntime implements AutoCloseable {
          */
         public Builder sessionStore(SessionStore sessionStore) {
             this.sessionStore = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the {@link MediaStore} holding the bytes of any media attached to a task, so
+         * the adapter can fetch them when it builds the provider request. Defaults to {@link
+         * MediaStore#noop()}, which stores nothing — invisible to a deployment that never
+         * attaches media, and a clear failure naming the attachment for one that does without
+         * wiring a store.
+         *
+         * <p>Runtime-wide rather than per-agent on purpose: two agents in one delegation chain
+         * must agree on where a document lives, or a {@code MediaRef} handed from one to the
+         * other resolves for the first and not the second. {@link MediaStore#inMemory()} is a
+         * process-local reference implementation; a deployment that keeps media beyond one JVM
+         * needs a real backend, and owns the retention policy for it.
+         */
+        public Builder mediaStore(MediaStore mediaStore) {
+            this.mediaStore = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
             return this;
         }
 
@@ -1124,6 +1144,7 @@ public final class AraRuntime implements AutoCloseable {
                     .executionPlanner(planner)
                     .telemetry(telemetry)
                     .sessionStore(sessionStore)
+                    .mediaStore(mediaStore)
                     .interceptors(interceptors)
                     .registry(registry)
                     .build();

@@ -489,8 +489,11 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         return List.of(
                 new LlmMessage("system",
                         run.systemPrompt() + ToolCatalogFormatter.format(run.resolvedTools()) + PLAN_SUFFIX),
-                new LlmMessage("user",
-                        run.task().input() + "\n\n(Produce at most " + maxPlanSteps + " steps.)")
+                // The planner has to see the attachments too: "summarise this PDF" cannot be
+                // broken into steps by a model shown only the words around the document.
+                LlmMessage.user(
+                        run.task().input() + "\n\n(Produce at most " + maxPlanSteps + " steps.)",
+                        run.task().media())
         );
     }
 
@@ -512,7 +515,11 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         String toolCatalog = run.nativeTools() ? "" : ToolCatalogFormatter.format(run.resolvedTools());
         String execSuffix  = run.nativeTools() ? EXEC_SUFFIX_NATIVE : EXEC_SUFFIX;
         messages.add(new LlmMessage("system", run.systemPrompt() + toolCatalog + execSuffix));
-        messages.add(new LlmMessage("user", "Task: " + run.task().input()));
+        // Unlike the ReAct family, this strategy does not rebuild the conversation from
+        // working memory — it re-serialises the task into a fresh per-step prompt. So the
+        // task's attachments have to be re-attached here, or a plan-execute agent would be
+        // the one strategy that silently loses them.
+        messages.add(LlmMessage.user("Task: " + run.task().input(), run.task().media()));
 
         // Compact plan overview with execution status markers
         StringBuilder planCtx = new StringBuilder("Execution plan:\n");

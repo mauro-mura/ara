@@ -1,8 +1,10 @@
 package io.ara.core.agent;
 
 import io.ara.core.llm.LlmExecutionHints;
+import io.ara.core.media.MediaRef;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -16,6 +18,14 @@ import java.util.function.Consumer;
  * and opaque objects such as a {@code SecurityContext} — lives in {@link #runContext}
  * (ADR-041 rev. 2), a single value shared by reference across a delegation chain
  * instead of being copied at every hop.
+ *
+ * <p>{@link #media} is the task's non-textual input: images and documents the model is
+ * meant to look at. It is a component of its own, and deliberately <em>not</em> another
+ * entry in {@code runContext.opaque()}, because the two carry opposite guarantees:
+ * everything in {@code opaque} must never reach a prompt (that is the whole point of
+ * keeping a {@code SecurityContext} out of a naive prompt shaper's reach), while
+ * everything in {@code media} is LLM-visible by definition. Merging them would destroy
+ * the invariant that justifies {@code opaque}.
  *
  * <p>For streaming executions (when {@link AgentConfig#streamingEnabled()} is
  * {@code true}), a {@link #tokenCallback} can be attached to receive each token
@@ -36,7 +46,10 @@ import java.util.function.Consumer;
  * @param taskId           unique identifier for this task; normally assigned by {@link #of},
  *                         but callers that must correlate the task with externally-keyed
  *                         state can override it via {@link #withTaskId}
- * @param input            the raw natural-language or structured input from the caller
+ * @param input            the raw natural-language or structured input from the caller;
+ *                         may be blank only when {@code media} is non-empty
+ * @param media            images and documents the model should look at, in the order they
+ *                         should be presented; never {@code null} (empty means text-only)
  * @param runContext       flow state of the current request — prompt variables and
  *                         opaque objects, shared by reference across delegation (ADR-041)
  * @param correlationId    optional identifier linking this task to a larger workflow
@@ -58,6 +71,7 @@ import java.util.function.Consumer;
 public record AgentTask(
         String taskId,
         String input,
+        List<MediaRef> media,
         RunContext runContext,
         String correlationId,
         String requestedBy,
@@ -73,8 +87,13 @@ public record AgentTask(
     public AgentTask {
         Objects.requireNonNull(taskId, "taskId must not be null");
         Objects.requireNonNull(input, "input must not be null");
-        if (input.isBlank()) {
-            throw new IllegalArgumentException("AgentTask input must not be blank");
+        media = media != null ? List.copyOf(media) : List.of();
+        // "Look at this PDF" with no words at all is the most common shape of a task that
+        // attaches a document, so blank input is legal exactly when media carries the
+        // request instead. A task with neither still says nothing, and stays rejected.
+        if (input.isBlank() && media.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "AgentTask input must not be blank unless media is present");
         }
         Objects.requireNonNull(createdAt, "createdAt must not be null");
         runContext = Objects.requireNonNullElseGet(runContext, RunContext::empty);
@@ -84,6 +103,29 @@ public record AgentTask(
         return new AgentTask(
                 UUID.randomUUID().toString(),
                 input,
+                List.of(),
+                RunContext.empty(),
+                null,
+                "system",
+                Instant.now(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    /**
+     * Creates a task carrying media alongside (or instead of) text. {@code input} may be
+     * blank here — "read this contract" is often the document itself and nothing else.
+     */
+    public static AgentTask of(String input, List<MediaRef> media) {
+        return new AgentTask(
+                UUID.randomUUID().toString(),
+                input,
+                media,
                 RunContext.empty(),
                 null,
                 "system",
@@ -102,6 +144,7 @@ public record AgentTask(
         return new AgentTask(
                 UUID.randomUUID().toString(),
                 input,
+                List.of(),
                 new RunContext(promptVars, Map.of(), RunState.noop()),
                 null,
                 "system",
@@ -121,6 +164,7 @@ public record AgentTask(
         return new AgentTask(
                 UUID.randomUUID().toString(),
                 input,
+                List.of(),
                 new RunContext(promptVars, Map.of(), RunState.noop()),
                 correlationId,
                 requestedBy,
@@ -139,6 +183,7 @@ public record AgentTask(
         return new AgentTask(
                 UUID.randomUUID().toString(),
                 input,
+                List.of(),
                 RunContext.empty(),
                 null,
                 "system",
@@ -154,7 +199,7 @@ public record AgentTask(
 
     /** Returns a copy of this task with the given {@link RunContext}. */
     public AgentTask withRunContext(RunContext newRunContext) {
-        return new AgentTask(taskId, input, newRunContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+        return new AgentTask(taskId, input, media, newRunContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
     }
 
     /** Returns a copy of this task with an additional prompt variable merged into its {@link RunContext}. */
@@ -162,15 +207,25 @@ public record AgentTask(
         return withRunContext(runContext.withPromptVar(key, value));
     }
 
+    /**
+     * Returns a copy of this task with {@code media} replaced by {@code newMedia}, which
+     * <em>replaces</em> the existing list rather than appending to it.
+     *
+     * @throws IllegalArgumentException if {@code newMedia} is empty and {@link #input()} is blank
+     */
+    public AgentTask withMedia(List<MediaRef> newMedia) {
+        return new AgentTask(taskId, input, newMedia, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+    }
+
     /** Returns a copy of this task with {@code input} replaced by {@code newInput}. */
     public AgentTask withInput(String newInput) {
         Objects.requireNonNull(newInput, "newInput must not be null");
-        return new AgentTask(taskId, newInput, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+        return new AgentTask(taskId, newInput, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
     }
 
     /** Returns a copy with the given execution hints. */
     public AgentTask withHints(LlmExecutionHints h) {
-        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, h, sessionId, userId, speakCallback);
+        return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, h, sessionId, userId, speakCallback);
     }
 
     /** Returns a copy with an output schema hint (convenience for schema-only hints). */
@@ -189,27 +244,27 @@ public record AgentTask(
      */
     public AgentTask withTaskId(String newTaskId) {
         Objects.requireNonNull(newTaskId, "newTaskId must not be null");
-        return new AgentTask(newTaskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
+        return new AgentTask(newTaskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, speakCallback);
     }
 
     /** Returns a copy with the given session identifier. */
     public AgentTask withSessionId(SessionId sid) {
-        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sid, userId, speakCallback);
+        return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sid, userId, speakCallback);
     }
 
     /** Returns a copy with the given user identifier (ADR-043 rev. 3). */
     public AgentTask withUserId(UserId uid) {
-        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, uid, speakCallback);
+        return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, uid, speakCallback);
     }
 
     /** Returns a copy with the given tool-call callback. */
     public AgentTask withToolCallCallback(Consumer<String> callback) {
-        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, callback, hints, sessionId, userId, speakCallback);
+        return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, callback, hints, sessionId, userId, speakCallback);
     }
 
     /** Returns a copy with the given ReSpAct speak callback (see {@link #speakCallback}). */
     public AgentTask withSpeakCallback(Consumer<String> callback) {
-        return new AgentTask(taskId, input, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, callback);
+        return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, toolCallCallback, hints, sessionId, userId, callback);
     }
 
     /**

@@ -1,5 +1,6 @@
 package io.ara.runtime.memory;
 
+import io.ara.core.media.MediaRef;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.memory.ToolCallMetadata;
@@ -28,6 +29,11 @@ public abstract class AbstractMemoryManager implements MemoryManager {
     @Override
     public void appendToWorkingMemory(String role, String content, ToolCallMetadata metadata) {
         working.add(MemoryEntry.of(role, content, metadata));
+    }
+
+    @Override
+    public void appendToWorkingMemory(String role, String content, List<MediaRef> media) {
+        working.add(MemoryEntry.of(role, content, media));
     }
 
     @Override

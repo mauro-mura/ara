@@ -1,8 +1,8 @@
 package io.ara.adapters.llm.openai;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Flow;
 
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -20,6 +20,8 @@ import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.ToolCallEntry;
+import io.ara.core.media.MediaTypes;
+import io.ara.core.media.MediaTypes.MediaKind;
 
 /**
  * {@link LlmClient} adapter for the <a href="https://platform.openai.com/">OpenAI</a> API,
@@ -107,11 +109,22 @@ public class OpenAiLlmClient implements LlmClient {
         return true;
     }
 
+    /**
+     * Images as image parts, PDFs as file parts, and text files inlined as text — the whole
+     * accepted vocabulary. Declared by category rather than by listing MIME strings, so a
+     * type added to {@code MediaTypes} in a category OpenAI already handles is picked up here
+     * instead of silently staying unsupported.
+     */
+    @Override
+    public Set<String> supportedMediaTypes() {
+        return MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
+    }
+
     @Override
     public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
         try {
             ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                    .messages(toLC4jMessages(messages));
+                    .messages(toLC4jMessages(messages, context));
             CallParameterUtils.applyTo(reqBuilder, context);
 
             if (context != null && context.hasResolvedTools()) {
@@ -133,7 +146,7 @@ public class OpenAiLlmClient implements LlmClient {
         return TokenStreamPublisher.of(
                 handler -> {
                     ChatRequest.Builder reqBuilder = ChatRequest.builder()
-                            .messages(toLC4jMessages(messages));
+                            .messages(toLC4jMessages(messages, context));
                     CallParameterUtils.applyTo(reqBuilder, context);
 
                     if (context != null && context.hasResolvedTools()) {
@@ -167,16 +180,13 @@ public class OpenAiLlmClient implements LlmClient {
         return streamingModel;
     }
 
-    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages) {
+    private List<ChatMessage> toLC4jMessages(List<LlmMessage> messages, LlmCallContext context) {
         // Delegates to ToolConversionUtils so "assistant_tool_call"/"assistant_tool_calls"/"tool"
         // roles are reconstructed as native AiMessage(toolExecutionRequests)/
         // ToolExecutionResultMessage instead of collapsing into a generic UserMessage — see its
-        // javadoc for the previous bug this replaced.
-        List<ChatMessage> lc4jMessages = new ArrayList<>(messages.size());
-        for (LlmMessage m : messages) {
-            lc4jMessages.add(ToolConversionUtils.toNativeAwareChatMessage(m));
-        }
-        return lc4jMessages;
+        // javadoc for the previous bug this replaced — and so media is checked against this
+        // client's declared types and flattened in one shared place.
+        return ToolConversionUtils.toNativeAwareChatMessages(messages, context, this);
     }
 
     private LlmCompletion toLlmCompletion(ChatResponse response) {

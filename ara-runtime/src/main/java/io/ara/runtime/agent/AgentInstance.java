@@ -18,6 +18,7 @@ import io.ara.core.agent.SessionStore;
 import io.ara.core.agent.UserId;
 import io.ara.core.common.AgentId;
 import io.ara.core.common.Money;
+import io.ara.core.media.MediaRef;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmRouter;
@@ -405,7 +406,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             } else {
                 // Record the turn before resetting working memory
                 if (config.maxConversationTurns() > 0) {
-                    session.conversationHistory().addTurn(task.input(), result.output());
+                    session.conversationHistory().addTurn(task.input(), result.output(), task.media());
                 }
                 return handleSuccess(task.taskId(), session, result, elapsed, effectiveLlm);
             }
@@ -429,7 +430,14 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     /**
      * Seeds working memory for a fresh execution: system prompt, then up to
      * {@code config.maxConversationTurns()} replayed turns for multi-turn continuity,
-     * then the new task input.
+     * then the new task input — with this task's attachments, and only this task's.
+     *
+     * <p>Replayed turns are text: their attachments are named, not re-sent. Re-attaching them
+     * would mean paying for every document again on every subsequent turn of the session, for
+     * a model that has already been shown it and already answered about it. Naming them keeps
+     * the history readable — a turn that was about a contract does not come back as a turn
+     * about nothing — while the reference stays in {@code ConversationTurn} for anyone who
+     * needs to fetch the file again.
      */
     private void seedWorkingMemory(MemoryManager memoryManager, AgentConfig config,
                                     AgentSession session, String effectiveSystemPrompt, AgentTask task) {
@@ -437,11 +445,25 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         int maxTurns = config.maxConversationTurns();
         if (maxTurns > 0) {
             for (var turn : session.conversationHistory().recentTurns(maxTurns)) {
-                memoryManager.appendToWorkingMemory("user",      turn.userInput());
+                memoryManager.appendToWorkingMemory("user",      replayText(turn));
                 memoryManager.appendToWorkingMemory("assistant", turn.assistantOutput());
             }
         }
-        memoryManager.appendToWorkingMemory("user", task.input());
+        memoryManager.appendToWorkingMemory("user", task.input(), task.media());
+    }
+
+    /**
+     * The text of a replayed turn: what the user said, plus a note naming whatever they
+     * attached. A media-only turn would otherwise replay as an empty user message, which
+     * loses the fact that the exchange happened at all.
+     */
+    private static String replayText(ConversationTurn turn) {
+        if (turn.media().isEmpty()) return turn.userInput();
+        String names = turn.media().stream()
+                .map(MediaRef::name)
+                .collect(java.util.stream.Collectors.joining(", "));
+        String note = "[attached earlier in this conversation: " + names + "]";
+        return turn.userInput().isBlank() ? note : turn.userInput() + "\n" + note;
     }
 
     @Override

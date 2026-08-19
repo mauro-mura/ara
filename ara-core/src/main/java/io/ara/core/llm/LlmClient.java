@@ -119,4 +119,35 @@ public interface LlmClient {
     default boolean supportsNativeTools() {
         return false;
     }
+
+    /**
+     * The MIME types from {@code MediaTypes.allowed()} that this client can actually send to
+     * its provider.
+     *
+     * <p>Provider media support is per-type, not a boolean: Ollama takes images but has no
+     * PDF path at all, while OpenAI, Anthropic and Mistral take both. A client must declare
+     * only what it really forwards.
+     *
+     * <p><b>A media type absent from this set is a hard error, never a downgrade.</b> When a
+     * call carries media this client does not support, the adapter must raise a
+     * <em>non-retryable</em> {@link LlmException} naming the type and the provider, before
+     * the request goes out. It must not strip the attachment, must not fall back to text, and
+     * must not log a warning and continue: doing so produces a confident, well-formed answer
+     * about a document the model never saw — indistinguishable from a real answer to anyone
+     * reading the response, with the only trace in a log nobody reads in production. The
+     * non-retryable classification also stops {@code FailoverLlmClient} from quietly trying
+     * the next candidate, which would turn one such answer into an ordinary-looking success.
+     *
+     * <p>Defaults to an empty set — text only, the safe answer for a leaf client that has
+     * no media path. Decorators must not inherit this default: extend {@code
+     * DelegatingLlmClient} so the delegate's set is forwarded, or a decorator silently
+     * masks the capability of whatever it wraps. Composites over several clients report the
+     * <em>intersection</em>, since they cannot promise what any candidate they might pick
+     * lacks.
+     *
+     * @return the supported MIME types; never {@code null}, empty means text-only
+     */
+    default java.util.Set<String> supportedMediaTypes() {
+        return java.util.Set.of();
+    }
 }

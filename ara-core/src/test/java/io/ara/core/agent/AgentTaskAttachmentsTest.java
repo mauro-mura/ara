@@ -1,8 +1,10 @@
 package io.ara.core.agent;
 
 import io.ara.core.llm.LlmExecutionHints;
+import io.ara.core.media.MediaRef;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.function.UnaryOperator;
 
@@ -13,10 +15,17 @@ import static org.junit.jupiter.api.Assertions.*;
  * existing {@code with*} method on {@link AgentTask} must propagate {@link
  * AgentTask#runContext()} unchanged, since {@code ContractEnforcer} chains several of
  * them on the critical execution path before {@code AraAgent.execute()} is reached.
+ *
+ * <p>{@link AgentTask#media()} carries the same guarantee for the same reason, and is
+ * checked by the same withers: a task whose PDF is dropped halfway down the enforcement
+ * chain reaches the model as a question about a document it was never shown.
  */
 class AgentTaskAttachmentsTest {
 
     private record Marker(String value) {}
+
+    private static final MediaRef PDF =
+            new MediaRef("digest-1", "application/pdf", "contract.pdf", 2048, null);
 
     @Test
     void default_attachments_is_empty() {
@@ -98,11 +107,90 @@ class AgentTaskAttachmentsTest {
         assertSame(marker, afterChain.runContext().opaque("securityContext", Marker.class));
     }
 
+    // ── Media survival through every wither (same binding requirement) ────────────
+
+    @Test
+    void media_survives_withContextEntry() {
+        assertMediaSurvives(t -> t.withContextEntry("k", "v"));
+    }
+
+    @Test
+    void media_survives_withInput() {
+        assertMediaSurvives(t -> t.withInput("new input"));
+    }
+
+    @Test
+    void media_survives_withHints() {
+        assertMediaSurvives(t -> t.withHints(LlmExecutionHints.empty()));
+    }
+
+    @Test
+    void media_survives_withOutputSchema() {
+        assertMediaSurvives(t -> t.withOutputSchema("{\"type\":\"object\"}", true));
+    }
+
+    @Test
+    void media_survives_withSessionId() {
+        assertMediaSurvives(t -> t.withSessionId(SessionId.of("s1")));
+    }
+
+    @Test
+    void media_survives_withUserId() {
+        assertMediaSurvives(t -> t.withUserId(UserId.of("u1")));
+    }
+
+    @Test
+    void media_survives_withTaskId() {
+        assertMediaSurvives(t -> t.withTaskId("other-id"));
+    }
+
+    @Test
+    void media_survives_withToolCallCallback() {
+        assertMediaSurvives(t -> t.withToolCallCallback(id -> { }));
+    }
+
+    @Test
+    void media_survives_withSpeakCallback() {
+        assertMediaSurvives(t -> t.withSpeakCallback(msg -> { }));
+    }
+
+    @Test
+    void media_survives_withRunContext() {
+        assertMediaSurvives(t -> t.withRunContext(RunContext.empty()));
+    }
+
+    @Test
+    void media_survives_withAttachment() {
+        assertMediaSurvives(t -> t.withAttachment("k", new Marker("v")));
+    }
+
+    @Test
+    void media_survives_chain_of_withers_in_ContractEnforcer_order() {
+        AgentTask afterChain = AgentTask.of("read this", List.of(PDF))
+                .withInput("shaped input")
+                .withOutputSchema("{\"type\":\"object\"}", false)
+                .withContextEntry("ara.system_prompt", "shaped prompt");
+
+        assertEquals(List.of(PDF), afterChain.media());
+    }
+
+    @Test
+    void withMedia_replaces_the_list() {
+        MediaRef image = new MediaRef("digest-2", "image/png", "scan.png", 512, null);
+        AgentTask task = AgentTask.of("look", List.of(PDF)).withMedia(List.of(image));
+        assertEquals(List.of(image), task.media());
+    }
+
     private static void assertSurvives(UnaryOperator<AgentTask> wither) {
         Marker marker = new Marker("payload");
         AgentTask task = AgentTask.of("hi", Map.of()).withAttachment("k", marker);
         AgentTask after = wither.apply(task);
         assertSame(marker, after.runContext().opaque("k", Marker.class),
                 "attachment must survive " + wither);
+    }
+
+    private static void assertMediaSurvives(UnaryOperator<AgentTask> wither) {
+        AgentTask after = wither.apply(AgentTask.of("hi", List.of(PDF)));
+        assertEquals(List.of(PDF), after.media(), "media must survive " + wither);
     }
 }

@@ -33,6 +33,19 @@ public interface MemoryManager {
     }
 
     /**
+     * Appends an entry carrying media references — images or documents the model should look
+     * at alongside {@code content}.
+     *
+     * <p>The default drops the references, which is the right behaviour for a manager that
+     * has no media-aware storage: the alternative would be to pretend the attachments are in
+     * the window when nothing will ever send them. Managers that store {@link MemoryEntry}
+     * (all of the built-in ones, via {@code AbstractMemoryManager}) override this.
+     */
+    default void appendToWorkingMemory(String role, String content, java.util.List<io.ara.core.media.MediaRef> media) {
+        appendToWorkingMemory(role, content);
+    }
+
+    /**
      * Returns the current working memory window, ordered oldest-first,
      * ready to be sent as conversation history to an LLM.
      */

@@ -1,16 +1,15 @@
 package io.ara.runtime.interceptor;
 
-import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentExecutionContext;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.runtime.llm.DelegatingLlmClient;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.Flow;
 import java.util.function.Supplier;
 
 /**
@@ -28,15 +27,14 @@ import java.util.function.Supplier;
  * discrete {@link LlmCompletion} to report until {@code ReactStrategy} has finished
  * collecting tokens and reconstructed one itself.
  */
-public final class InterceptingLlmClient implements LlmClient {
+public final class InterceptingLlmClient extends DelegatingLlmClient {
 
-    private final LlmClient delegate;
     private final AgentInterceptorChain interceptorChain;
     private final Supplier<AgentExecutionContext> contextSupplier;
 
     public InterceptingLlmClient(LlmClient delegate, AgentInterceptorChain interceptorChain,
                                   Supplier<AgentExecutionContext> contextSupplier) {
-        this.delegate         = Objects.requireNonNull(delegate,         "delegate must not be null");
+        super(delegate);
         this.interceptorChain = Objects.requireNonNull(interceptorChain, "interceptorChain must not be null");
         this.contextSupplier  = Objects.requireNonNull(contextSupplier,  "contextSupplier must not be null");
     }
@@ -48,30 +46,5 @@ public final class InterceptingLlmClient implements LlmClient {
         LlmCompletion completion = delegate.complete(messages, context);
         interceptorChain.afterThink(execCtx, completion);
         return completion;
-    }
-
-    @Override
-    public LlmCompletion complete(List<LlmMessage> messages, AgentConfig config) {
-        return complete(messages, LlmCallContext.from(config));
-    }
-
-    @Override
-    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-        return delegate.stream(messages, context);
-    }
-
-    @Override
-    public String providerId() {
-        return delegate.providerId();
-    }
-
-    @Override
-    public String lastUsedProviderId() {
-        return delegate.lastUsedProviderId();
-    }
-
-    @Override
-    public boolean supportsNativeTools() {
-        return delegate.supportsNativeTools();
     }
 }

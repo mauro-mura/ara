@@ -3,6 +3,7 @@ package io.ara.runtime.agent;
 import io.ara.core.agent.ConversationTurn;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
+import io.ara.core.media.MediaRef;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,7 +50,16 @@ public final class ConversationHistory {
      * order can never diverge.
      */
     public synchronized void addTurn(String userInput, String assistantOutput) {
-        ConversationTurn turn = new ConversationTurn(userInput, assistantOutput);
+        addTurn(userInput, assistantOutput, List.of());
+    }
+
+    /**
+     * Appends a turn that carried attachments, recording their references. Same write-through
+     * contract as {@link #addTurn(String, String)}; only references are stored, never bytes,
+     * so a session's persisted history stays small however large the documents were.
+     */
+    public synchronized void addTurn(String userInput, String assistantOutput, List<MediaRef> media) {
+        ConversationTurn turn = new ConversationTurn(userInput, assistantOutput, media);
         turns.add(turn);
         store.appendTurn(sessionId, turn);
     }

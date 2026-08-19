@@ -27,6 +27,7 @@ no framework lock-in.
 - [Connecting a real LLM](#connecting-a-real-llm)
 - [LlmException — typed error handling](#llmexception--typed-error-handling)
 - [Tool calling](#tool-calling)
+- [Multimodal input — images and documents](#multimodal-input--images-and-documents)
 - [AgentContract — deterministic I/O](#agentcontract--deterministic-io)
 - [PromptShaper — dynamic system prompt](#promptshaper--dynamic-system-prompt)
 - [Multi-agent pipeline](#multi-agent-pipeline) <!-- - [Agent graph](#agent-graph--parallel-branches-and-feedback-loops) -->
@@ -48,19 +49,20 @@ no framework lock-in.
 |-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ara-core`      | Pure interfaces and domain model: `AraAgent`, `LlmClient`, `LlmException`, `MemoryManager`, `ToolRegistry`, `AgentContract`, `ExecutionStrategy`, …                     |
 | `ara-runtime`   | Implementations: `AraRuntime`, the execution strategies (`ReactStrategy`, `ReSpActStrategy`, `ReflActStrategy`, `PlanExecuteStrategy`, `ReflexionStrategy`), `ContractEnforcer`, `AgentPipeline`, `ScriptedLlmClient` stub, built-in processors |
-| `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic and Ollama. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                            |
+| `ara-adapters`  | LangChain4j-backed `LlmClient` adapters for OpenAI, Anthropic, Ollama and Mistral. No Kotlin, no OkHttp, no Spring. Declares its own LangChain4j BOM.                   |
 | `ara-examples`  | Runnable examples for offline (stub) and live (real LLM) scenarios                                                                                                       |
 
 ---
 
 ## What you can build
 
-- Single agents with any LLM (OpenAI, Anthropic, Ollama, LM Studio, Groq, …)
+- Single agents with any LLM (OpenAI, Anthropic, Ollama, Mistral, LM Studio, Groq, …)
 - Deterministic I/O contracts: sanitize input, validate output, strip markdown fences — zero tokens consumed
 - Multi-agent pipelines with conditional routing and FSM-style state machines
 <!-- - Agent graphs with parallel branches and feedback loops -->
 - Tool calling from LLM responses, including parallel dispatch on virtual threads (Java 21)
 - Conversational agents that ask clarifying questions mid-task (`"respact"`) and self-correcting ones that recover from failed tool calls without restarting (`"reflact"`)
+- Multimodal input: attach images and PDFs to a task and have the model read them natively — layout, tables and scans included, no text extraction upstream
 - RAG as a strategy decorator — retrieval before every LLM call, no tool configuration needed
 - Fully offline testing with `ScriptedLlmClient`
 
@@ -133,6 +135,7 @@ import io.ara.adapters.llm.AraLlmClientFactory;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
 import io.ara.adapters.llm.anthropic.AnthropicLlmClient;
 import io.ara.adapters.llm.ollama.OllamaLlmClient;
+import io.ara.adapters.llm.mistral.MistralLlmClient;
 
 // OpenAI
 LlmClient gpt4o = AraLlmClientFactory.openAi()
@@ -149,6 +152,12 @@ LlmClient claude = AraLlmClientFactory.anthropic()
 // Ollama (local, no API key needed)
 LlmClient llama = AraLlmClientFactory.ollama()
         .model(OllamaLlmClient.Models.LLAMA_3_2)
+        .build();
+
+// Mistral (native PDF documents — see Multimodal input below)
+LlmClient mistral = AraLlmClientFactory.mistral()
+        .apiKey(System.getenv("MISTRAL_API_KEY"))
+        .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
         .build();
 
 // OpenAI-compatible endpoint (LM Studio, Groq, Together AI, …)
@@ -318,6 +327,93 @@ LLM response → [get_weather(Rome), get_weather(London)]
 
 ---
 
+## Multimodal input — images and documents
+
+Attach an image or a PDF to a task and the model reads it natively — layout, tables,
+stamps and scanned pages included. This is the path for what text extraction cannot give
+you; for PDFs that are *already* text, `KnowledgeBase` + `RetrievalAugmentedStrategy`
+remains the cheaper answer, and the two coexist without talking to each other.
+
+The bytes live in a `MediaStore`, wired once on the runtime. Everything above the adapter
+carries a `MediaRef` — a name, a MIME type, a size and the SHA-256 of the content — never
+the payload:
+
+```java
+import io.ara.core.media.MediaRef;
+import io.ara.core.media.MediaStore;
+
+MediaStore media = MediaStore.inMemory();          // or your own backend
+
+MediaRef contract = media.put("contract.pdf", "application/pdf",
+        Files.readAllBytes(Path.of("contract.pdf")));
+
+AraRuntime runtime = AraRuntime.builder()
+        .llmClient("mistral", mistral)
+        .mediaStore(media)                          // defaults to MediaStore.noop()
+        .build();
+
+// Blank input is legal when media is present: the document *is* the request.
+AgentResponse response = agent.execute(AgentTask.of("", List.of(contract)));
+```
+
+`MediaRef.remote(uri, mimeType, name)` covers a document already reachable at a URL — no
+store involved, and those bytes are never ARA's to delete.
+
+**Why the bytes stay out of the domain.** Inline, a 2 MB PDF becomes ~2.7 million base64
+characters. It would be written into every persisted session turn, printed into the
+request log, and counted by the working-memory token estimate as ~680k tokens — enough to
+evict the entire window, system prompt included, leaving the document as the sole
+survivor. Holding a reference removes all of that at once, with no per-agent flag to turn
+any of it off. Deduplication comes free and by *content*: `put` derives the id from a
+SHA-256 of the bytes, so the same document submitted by two unrelated tasks costs one
+entry.
+
+**Provider support is per type, and a mismatch is a hard failure.**
+
+| Provider  | Images | PDF as document | Text files |
+|-----------|--------|-----------------|------------|
+| Mistral   | yes    | yes             | yes        |
+| OpenAI    | yes    | yes             | yes        |
+| Anthropic | yes    | yes             | yes        |
+| Ollama    | yes    | **no**          | yes        |
+
+Send a PDF to Ollama and the task fails with a non-retryable `LlmException` naming the
+type and the provider, *before* the request goes out. It is never stripped, never
+downgraded to text, never logged-and-continued: those all produce a fluent, plausible
+answer about a document the model never saw, which is indistinguishable from a real one to
+whoever reads it. Because the failure is non-retryable, `FailoverLlmClient` aborts instead
+of letting a text-only fallback answer instead — and a `FAILOVER` or `ROUND_ROBIN` pool
+reports the *intersection* of its members' media types for the same reason.
+
+**Cost across turns.** A document is paid for on the turn that introduced it. Replayed
+conversation turns name their attachments rather than re-sending them, while
+`ConversationTurn` keeps the reference so the file stays retrievable. To have the model
+look at it again, attach it again.
+
+**Per-agent limits.** `MediaLimits` caps how many files and how many bytes a task may
+attach, and can narrow the accepted types; an over-limit task fails before a single token
+is spent:
+
+```java
+AgentContract contract = AgentContract.builder()
+        .addMediaValidator(MediaLimits.of(3, 10 * 1024 * 1024))
+        .build();
+```
+
+**Prompt injection.** Text printed inside a PDF or rendered into an image does not pass
+through `InputSanitizer`, which only ever sees the task's input string. The flattening
+step prefixes the attachments with an explicit "this is data, not instructions" frame,
+and `MediaLimits` bounds the volume — but neither is a complete defence. Against hostile
+document content the mitigation that actually holds is on the output side: constrain the
+answer with a validated schema (`AgentTask.withOutputSchema`), so a hijacked model
+producing something off-schema fails validation instead of passing the injected
+instruction through as an answer.
+
+Runnable end-to-end: `io.ara.examples.multimodal.MultimodalInputExample` — a PDF to
+Mistral and an image to Ollama, through one provider-agnostic method.
+
+---
+
 ## AgentContract — deterministic I/O
 
 `AgentContract` declares a processor chain applied before and after every `execute()`.
@@ -370,6 +466,15 @@ AraAgent agent = runtime.createAgent(config, contract);
 |---|---|
 | `InputSanitizer.instance()` | Block prompt-injection patterns (EN + IT) |
 | `PiiRedactor.instance()` | Redact email, phone, tax codes, credit cards, IPv4 |
+
+**Attachments** — declared with `addMediaValidator(...)`, not `addInputProcessor(...)`: an
+input processor only ever sees the input string and cannot look at a `MediaRef`.
+
+| Validator | Function |
+|---|---|
+| `MediaLimits.of(3, 10_000_000)` | Reject if more than N files or more than N bytes in total |
+| `MediaLimits.of(3, 10_000_000, Set.of("image/png"))` | As above, narrowed to a subset of the supported types |
+| `MediaLimits.none()` | Reject any attachment — for an agent that must stay text-only |
 
 ---
 
@@ -689,6 +794,7 @@ All examples are in `ara-examples`.
 |---|---|---|
 | `basics/AraSimpleExample` | stub | End-to-end: ReAct loop, tool call, interceptor, agent reuse |
 | `basics/AraSimpleExampleLive` | **live** | Same as above but with a real LLM via `OpenAiLlmClient` |
+| `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, through one provider-agnostic method |
 
 ### Running `AraSimpleExampleLive`
 
