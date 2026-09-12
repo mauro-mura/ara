@@ -229,6 +229,50 @@ class WorkflowPatternsTest {
                 "the judge cannot be the source node");
     }
 
+    @Test
+    void tournament_ofJudgingSource_handsTheJudgeTheOriginalProblemAlongsideTheCandidates() {
+        List<String> seenBySourceJudge = new ArrayList<>();
+
+        Workflow workflow = Workflow.of()
+                .node("prepare", in -> "problem:" + in)
+                .pattern(Tournament.ofJudgingSource("prepare", "solve", 3, i -> input -> input + "/attempt-" + i)
+                        .judge("pick", (source, candidates) -> {
+                            seenBySourceJudge.add(source);
+                            seenBySourceJudge.addAll(candidates);
+                            // A judge that can check candidates against the source picks
+                            // by actually looking at it, not by comparing candidates alone.
+                            return source.equals("problem:go")
+                                    ? candidates.get(1) : candidates.get(0);
+                        }))
+                .terminal("pick")
+                .build();
+
+        WorkflowResult result = workflow.run("go", pool);
+
+        assertTrue(result.ok(), () -> "run failed: " + result.failureReason());
+        assertEquals(1, result.firedTimes("pick"));
+        // The source arrives first, then every candidate in contender order — the same
+        // edge-declaration-order contract the source-less judge already relies on.
+        assertEquals(List.of("problem:go",
+                "problem:go/attempt-0", "problem:go/attempt-1", "problem:go/attempt-2"), seenBySourceJudge);
+        assertEquals("problem:go/attempt-1", lastOutputOf(result, "pick"));
+    }
+
+    @Test
+    void tournament_ofJudgingSource_withFewerThanTwoContendersOrACollidingJudge_cannotBeBuilt() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Tournament.ofJudgingSource("prepare", "solve", 1, i -> in -> in),
+                "one contender is not a contest");
+        assertThrows(IllegalArgumentException.class,
+                () -> Tournament.ofJudgingSource("prepare", "solve", 3, i -> in -> in)
+                        .judge("solve#1", (source, cs) -> cs.get(0)),
+                "the judge id must not collide with a generated contender id");
+        assertThrows(IllegalArgumentException.class,
+                () -> Tournament.ofJudgingSource("prepare", "solve", 3, i -> in -> in)
+                        .judge("prepare", (source, cs) -> cs.get(0)),
+                "the judge cannot be the source node");
+    }
+
     private static String lastOutputOf(WorkflowResult result, String nodeId) {
         List<JournalEntry> entries = result.journal();
         for (int i = entries.size() - 1; i >= 0; i--) {

@@ -12,11 +12,11 @@ Questa classe implementa i pattern **Facade** e **Builder**. È il punto di ingr
 ### Critiche e Aree di Miglioramento (Bugs potenziali)
 
 1. **Race Condition su `start()`:** Il campo `started` è `volatile`, ma i metodi `start()` e `stop()` non sono sincronizzati. Se due thread chiamano `start()` contemporaneamente, potrebbero entrambi superare il check `if (started) return;` e creare due `ExecutorService` diversi, causando un leak del primo. *Soluzione:* Usare un `ReentrantLock` o un blocco `synchronized(this)` attorno ai metodi di lifecycle, oppure usare un `AtomicBoolean` con un confronto e scambio (CAS).
-   > **✅ Risolto.** `start()` e `stop()` ora sincronizzano su un `lifecycleLock` dedicato; il check-and-set di `started` avviene dentro la sezione critica.
+   > **✅ Risolto.** `start()` e `stop()` ora sincronizzano su un lock dedicato (incapsulato in `RuntimeLifecycle`); il check-and-set di `started` avviene dentro la sezione critica.
 2. **Bug nel Builder (`extraStrategies` e `interceptors`):** Nel metodo `extraStrategies(ExecutionStrategy... strategies)`, la lista viene sovrascritta (`this.extraStrategies = List.of(strategies)`). Se l'utente chiama il metodo due volte, la seconda chiamata cancella la prima. Dovrebbe essere un accumulo (es. usando una `List` mutabile interna che poi viene resa immutabile nel `build()`). Lo stesso problema si applica ad `interceptors`.
    > **✅ Risolto (parziale).** `extraStrategies(...)` ora accumula (`Collections.addAll` su una lista interna), coerentemente col javadoc che dichiara "call multiple times". La parte su `interceptors` era invece un falso positivo: è un setter di lista, la sostituzione è corretta.
 3. **Gestione dell'Executor nel `stop()`:** L'executor viene fermato con `es.shutdown()`, ma non c'è un `awaitTermination`. Se ci sono task in flight, il log dirà "stopped" ma i thread virtuali potrebbero ancora essere in esecuzione in background.
-   > **✅ Risolto.** `stop()` ora attende fino a 30s (`awaitTermination`) e poi forza `shutdownNow()`, con log di warning se il drain non completa.
+   > **✅ Risolto.** `stop()` ora attende fino a `shutdownTimeoutSec` secondi (`awaitTermination`) e poi forza `shutdownNow()`, con log di warning se il drain non completa — logica in `RuntimeLifecycle.shutdownExecutor()`.
 4. **Violazione della State Machine del Lifecycle (submit)**
 
 Il ciclo di vita di un runtime solitamente è uno state machine lineare: CREATED -> STARTED -> STOPPED. Il metodo submit() fa questo:
@@ -53,7 +53,7 @@ Gli agenti successivi nella lista non verranno distrutti.
 Le righe finali (es.shutdown(), started = false) non verranno mai eseguite. Il runtime rimarrà in uno stato zombie (crede di essere started, ma lo scheduler è stoppato e l'executor è chiuso).
 Soluzione: Wrappare la distruzione in un blocco try-catch, loggare l'errore per quell'agente specifico, e continuare con il prossimo. Assicurarsi che l'executor venga spento in un blocco finally
 
-> **✅ Risolto.** Ogni `destroyPermanently` è ora avvolto in try-catch (errore loggato, ciclo prosegue); `scheduler.stop()` è protetto allo stesso modo; `shutdownExecutor()` e `started = false` sono in un blocco `finally`, eliminando lo stato zombie.
+> **✅ Risolto.** Ogni `destroyPermanently` è ora avvolto in try-catch (errore loggato, ciclo prosegue); `scheduler.stop()` è protetto allo stesso modo; la chiusura dell'executor (`RuntimeLifecycle.stop()`, che porta la fase del lifecycle a `STOPPED`) è in un blocco `finally`, eliminando lo stato zombie.
 
 7. **Accoppiamento Temporale nel Builder (Validazione del Default LLM)**
 
