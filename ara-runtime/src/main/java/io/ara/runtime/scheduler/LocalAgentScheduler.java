@@ -43,11 +43,10 @@ public final class LocalAgentScheduler implements AgentScheduler {
     private final AgentRegistry            registry;
     private final ScheduledExecutorService executor;
 
-    /** Holds both the AgentSchedule definition and its active ScheduledFuture. */
-    private record Entry(AgentSchedule schedule, ScheduledFuture<?> future, boolean paused) {}
+    /** Holds the AgentSchedule definition and its active ScheduledFuture — a {@code null} future means paused. */
+    private record Entry(AgentSchedule schedule, ScheduledFuture<?> future) {}
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
-    private volatile boolean started = false;
 
     public LocalAgentScheduler(AgentRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry must not be null");
@@ -72,26 +71,26 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 ? scheduleJob(schedule)
                 : null;
 
-        entries.put(schedule.scheduleId(), new Entry(schedule, future, !schedule.active()));
+        entries.put(schedule.scheduleId(), new Entry(schedule, future));
         log.info("[Scheduler] registered '{}' trigger={} active={}",
-                schedule.scheduleId(), describetr(schedule.trigger()), schedule.active());
+                schedule.scheduleId(), describe(schedule.trigger()), schedule.active());
     }
 
     @Override
     public void pause(String scheduleId) {
         Entry entry = require(scheduleId);
-        if (entry.paused()) return;
+        if (entry.future() == null) return;
         entry.future().cancel(false);
-        entries.put(scheduleId, new Entry(entry.schedule(), null, true));
+        entries.put(scheduleId, new Entry(entry.schedule(), null));
         log.info("[Scheduler] paused '{}'", scheduleId);
     }
 
     @Override
     public void resume(String scheduleId) {
         Entry entry = require(scheduleId);
-        if (!entry.paused()) return;
+        if (entry.future() != null) return;
         ScheduledFuture<?> future = scheduleJob(entry.schedule());
-        entries.put(scheduleId, new Entry(entry.schedule(), future, false));
+        entries.put(scheduleId, new Entry(entry.schedule(), future));
         log.info("[Scheduler] resumed '{}'", scheduleId);
     }
 
@@ -119,7 +118,6 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
     @Override
     public void start() {
-        started = true;
         log.info("[Scheduler] started ({} schedule(s) registered)", entries.size());
     }
 
@@ -129,7 +127,6 @@ public final class LocalAgentScheduler implements AgentScheduler {
             if (e.future() != null) e.future().cancel(false);
         });
         executor.shutdownNow();
-        started = false;
         log.info("[Scheduler] stopped");
     }
 
@@ -157,9 +154,9 @@ public final class LocalAgentScheduler implements AgentScheduler {
             fire(schedule);
             // re-schedule for the next occurrence
             Entry current = entries.get(schedule.scheduleId());
-            if (current != null && !current.paused()) {
+            if (current != null && current.future() != null) {
                 ScheduledFuture<?> next = scheduleCron(schedule, expression);
-                entries.put(schedule.scheduleId(), new Entry(schedule, next, false));
+                entries.put(schedule.scheduleId(), new Entry(schedule, next));
             }
         }, delaySeconds, TimeUnit.SECONDS);
     }
@@ -199,7 +196,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
         return entry;
     }
 
-    private static String describetr(Trigger trigger) {
+    private static String describe(Trigger trigger) {
         return switch (trigger) {
             case Trigger.Interval i -> "every " + i.every();
             case Trigger.Cron c    -> "cron(" + c.expression() + ")";

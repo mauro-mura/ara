@@ -516,9 +516,7 @@ public final class AraRuntime implements AutoCloseable {
      * isn't registered or doesn't manage sessions ({@link SessionScoped}).
      */
     public void terminateSession(AgentId agentId, SessionId sessionId) {
-        registry.findById(agentId)
-                .filter(a -> a instanceof SessionScoped)
-                .ifPresent(a -> ((SessionScoped) a).terminate(sessionId));
+        sessionScoped(agentId).ifPresent(a -> a.terminate(sessionId));
     }
 
     /**
@@ -526,9 +524,7 @@ public final class AraRuntime implements AutoCloseable {
      * isn't registered or doesn't manage sessions ({@link SessionScoped}).
      */
     public void invalidateSession(AgentId agentId, SessionId sessionId) {
-        registry.findById(agentId)
-                .filter(a -> a instanceof SessionScoped)
-                .ifPresent(a -> ((SessionScoped) a).invalidateSession(sessionId));
+        sessionScoped(agentId).ifPresent(a -> a.invalidateSession(sessionId));
     }
 
     /**
@@ -551,9 +547,7 @@ public final class AraRuntime implements AutoCloseable {
      * sessions ({@link SessionScoped}).
      */
     public void emergencyStop(AgentId agentId) {
-        registry.findById(agentId)
-                .filter(a -> a instanceof SessionScoped)
-                .ifPresent(a -> ((SessionScoped) a).cancelAllSessions());
+        sessionScoped(agentId).ifPresent(SessionScoped::cancelAllSessions);
     }
 
     /**
@@ -561,10 +555,14 @@ public final class AraRuntime implements AutoCloseable {
      * if the agent isn't registered or doesn't manage sessions ({@link SessionScoped}).
      */
     public int activeSessionCount(AgentId agentId) {
+        return sessionScoped(agentId).map(SessionScoped::activeSessionCount).orElse(0);
+    }
+
+    /** The registered agent under {@code agentId} narrowed to {@link SessionScoped}, or empty if not applicable. */
+    private Optional<SessionScoped> sessionScoped(AgentId agentId) {
         return registry.findById(agentId)
                 .filter(a -> a instanceof SessionScoped)
-                .map(a -> ((SessionScoped) a).activeSessionCount())
-                .orElse(0);
+                .map(a -> (SessionScoped) a);
     }
 
     // ── accessors ─────────────────────────────────────────────────────────────
@@ -1372,30 +1370,8 @@ public final class AraRuntime implements AutoCloseable {
             if (traceStore != null) factoryBuilder.traceEmission(traceStore, traceBlobStore);   // ADR-0068 D1
 
             return factoryBuilder
-                    .toolRegistryFactory(agentCfg -> {
-                        // ADR-0077 D2's other declared gap, closed: ownGrantedScopes now
-                        // reflects this agent's own AgentConfig.grantedScopes() instead of
-                        // the implicit ScopeSet.EMPTY every caller got before — the
-                        // attenuation AgentDelegationTool already performs (incoming ∩
-                        // ownGrantedScopes) had a real ceiling to narrow against only when
-                        // constructed directly (e.g. the ara-private-examples delegation
-                        // example); every agent created through AraRuntime saw EMPTY
-                        // regardless of what it declared. agentView stays null (unchanged):
-                        // wiring registry.viewFor(...) here is a separate decision (ADR-033
-                        // Fase 3 §3.3's pre-check), not part of this fix.
-                        ToolRegistry base = new DelegatingToolRegistry(
-                                perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
-                                delegationTimeout, agentCfg.delegateStateAccess(), sessionStore,
-                                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
-                        // ADR-0067 D6: insert the approval decorator whenever a gate is
-                        // configured, and let it decide per call whether a gate is needed
-                        // (agent flag OR the tool's own ToolSpec.approvalRequired()) — so a
-                        // high-risk tool is gated even when the agent's flag is false.
-                        ToolRegistry withApproval = approvalGate != null
-                                ? new ApprovalToolRegistry(base, approvalGate, agentCfg)
-                                : base;
-                        return new TelemetryToolRegistry(withApproval, telemetry);
-                    })
+                    .toolRegistryFactory(agentCfg ->
+                            buildToolChain(agentCfg, perAgentToolRegistry, messageBus))
                     .memoryManagerFactory(memFactory)
                     .executionPlanner(planner)
                     .telemetry(telemetry)
@@ -1404,6 +1380,38 @@ public final class AraRuntime implements AutoCloseable {
                     .interceptors(interceptors)
                     .registry(registry)
                     .build();
+        }
+
+        /**
+         * Composes the full per-agent tool registry: the resolved base, wrapped for
+         * delegation (ADR-0077 D2), then gated for HITL when a gate is configured
+         * (ADR-0067 D6), then instrumented for OTel spans.
+         *
+         * <p>ADR-0077 D2's declared gap, closed: ownGrantedScopes now reflects this
+         * agent's own {@code AgentConfig.grantedScopes()} instead of the implicit
+         * {@code ScopeSet.EMPTY} every caller got before — the attenuation
+         * {@code AgentDelegationTool} already performs (incoming ∩ ownGrantedScopes) had
+         * a real ceiling to narrow against only when constructed directly; every agent
+         * created through AraRuntime saw EMPTY regardless of what it declared. agentView
+         * stays null (unchanged): wiring {@code registry.viewFor(...)} here is a separate
+         * decision (ADR-033 Fase 3 §3.3's pre-check), not part of this fix.
+         *
+         * <p>ADR-0067 D6: insert the approval decorator whenever a gate is configured, and
+         * let it decide per call whether a gate is needed (agent flag OR the tool's own
+         * {@code ToolSpec.approvalRequired()}) — so a high-risk tool is gated even when
+         * the agent's flag is false.
+         */
+        private ToolRegistry buildToolChain(AgentConfig agentCfg,
+                                            Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
+                                            LocalMessageBus messageBus) {
+            ToolRegistry base = new DelegatingToolRegistry(
+                    perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
+                    delegationTimeout, agentCfg.delegateStateAccess(), sessionStore,
+                    io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
+            ToolRegistry withApproval = approvalGate != null
+                    ? new ApprovalToolRegistry(base, approvalGate, agentCfg)
+                    : base;
+            return new TelemetryToolRegistry(withApproval, telemetry);
         }
     }
 }

@@ -3,6 +3,7 @@ package io.ara.core.internal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 /**
  * SHA-256 as lowercase hex — the content-addressing primitive shared across the
@@ -24,12 +25,7 @@ public final class Sha256 {
             throw new IllegalStateException("SHA-256 not available", e);   // never on a compliant JRE
         }
         byte[] hashed = digest.digest(content);
-        StringBuilder out = new StringBuilder(hashed.length * 2);
-        for (byte b : hashed) {
-            out.append(Character.forDigit((b >> 4) & 0xF, 16));
-            out.append(Character.forDigit(b & 0xF, 16));
-        }
-        return out.toString();
+        return HexFormat.of().formatHex(hashed);
     }
 
     /** Lowercase hex SHA-256 of {@code text}, UTF-8 encoded. */

@@ -24,9 +24,7 @@ import java.util.List;
 public final class ChunkUtil {
 
     /** Maximum characters per chunk before forcing a further split. */
-    /** Maximum characters per chunk before forcing a further split. */
     public static final int CHUNK_SIZE = 600;
-    /** Number of characters that overlap between adjacent chunks. */
     /** Number of characters that overlap between adjacent chunks. */
     public static final int CHUNK_OVERLAP = 80;
 

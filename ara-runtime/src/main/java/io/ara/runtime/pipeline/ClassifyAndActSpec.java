@@ -276,20 +276,15 @@ public record ClassifyAndActSpec(
         if (classifiersNode == null || !classifiersNode.isArray() || classifiersNode.isEmpty()) {
             throw new IllegalArgumentException("'classifiers' must be a non-empty array");
         }
-        List<ClassifierSpec> classifiers = new ArrayList<>();
-        Set<String> names = new LinkedHashSet<>();
-        for (int i = 0; i < classifiersNode.size(); i++) {
-            ClassifierSpec spec = readClassifier(classifiersNode.get(i), "classifiers[" + i + "]");
-            if (!names.add(spec.name())) {
-                throw new IllegalArgumentException("duplicate classifier name: '" + spec.name() + "'");
-            }
-            classifiers.add(spec);
-        }
+        List<ClassifierSpec> classifiers = readClassifiers(classifiersNode, "classifiers");
 
         Map<String, String> workers = readStringMap(root.get("workers"), "workers");
         if (workers.isEmpty()) throw new IllegalArgumentException("'workers' must be a non-empty object");
+        Set<String> classifierNames = classifiers.stream()
+                .map(ClassifierSpec::name)
+                .collect(java.util.stream.Collectors.toSet());
         for (String worker : workers.keySet()) {
-            if (names.contains(worker)) {
+            if (classifierNames.contains(worker)) {
                 throw new IllegalArgumentException(
                         "'" + worker + "' is declared both as a classifier and as a worker");
             }
@@ -300,6 +295,19 @@ public record ClassifyAndActSpec(
         int maxSteps = root.hasNonNull("maxSteps") ? root.get("maxSteps").asInt() : classifiers.size() + 1;
 
         return new ClassifyAndActSpec(classifiers, workers, maxSteps);
+    }
+
+    private static List<ClassifierSpec> readClassifiers(JsonNode node, String path) {
+        List<ClassifierSpec> classifiers = new ArrayList<>(node.size());
+        Set<String> names = new LinkedHashSet<>();
+        for (int i = 0; i < node.size(); i++) {
+            ClassifierSpec spec = readClassifier(node.get(i), path + "[" + i + "]");
+            if (!names.add(spec.name())) {
+                throw new IllegalArgumentException("duplicate classifier name: '" + spec.name() + "'");
+            }
+            classifiers.add(spec);
+        }
+        return classifiers;
     }
 
     private static ClassifierSpec readClassifier(JsonNode node, String path) {
@@ -457,9 +465,8 @@ public record ClassifyAndActSpec(
 
     private IntentRouter routerFor(ClassifierSpec spec, Bindings bindings) {
         Routing routing = spec.routing();
-        IntentRouter.Builder builder = (routing.labelField() != null)
-                ? IntentRouter.onField(routing.labelField())
-                : IntentRouter.onField("intent");
+        IntentRouter.Builder builder = IntentRouter.onField(
+                routing.labelField() != null ? routing.labelField() : "intent");
         builder.routes(routing.routes()).telemetry(bindings.telemetry());
         if (routing.writeLabelTo()      != null) builder.writeLabelTo(routing.writeLabelTo());
         if (routing.writeConfidenceTo() != null) builder.writeConfidenceTo(routing.writeConfidenceTo());

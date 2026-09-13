@@ -181,10 +181,7 @@ public class ChatJimmyLlmClient implements LlmClient {
 
     @Override
     public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
-        ObjectNode body = buildRequestBody(messages, context);
-        HttpResponse<String> response = send(body);
-        ParsedResponse parsed = parseUpstreamText(response.body());
-        return toLlmCompletion(parsed);
+        return toLlmCompletion(requestParsed(messages, context));
     }
 
     /**
@@ -215,15 +212,19 @@ public class ChatJimmyLlmClient implements LlmClient {
      */
     public CompletionWithSpeed completeWithSpeed(List<LlmMessage> messages, LlmCallContext context)
             throws LlmException {
-        ObjectNode body = buildRequestBody(messages, context);
-        HttpResponse<String> response = send(body);
-        ParsedResponse parsed = parseUpstreamText(response.body());
+        ParsedResponse parsed = requestParsed(messages, context);
         JsonNode s = parsed.stats();
         return new CompletionWithSpeed(toLlmCompletion(parsed), new UpstreamSpeed(
                 doubleField(s, "prefill_rate"),
                 doubleField(s, "decode_rate"),
                 doubleField(s, "ttft"),
                 doubleField(s, "total_duration")));
+    }
+
+    private ParsedResponse requestParsed(List<LlmMessage> messages, LlmCallContext context) throws LlmException {
+        ObjectNode body = buildRequestBody(messages, context);
+        HttpResponse<String> response = send(body);
+        return parseUpstreamText(response.body());
     }
 
     @Override
@@ -776,49 +777,4 @@ public class ChatJimmyLlmClient implements LlmClient {
             return new ChatJimmyLlmClient(this);
         }
     }
-
-    private static final String PROXY_USER = "user";
-    private static final String PROXY_PASS = "password";
-    private static final String PROXY_URL= "proxy";
-    private static final int PROXY_PORT= 8012;
-
-    public static void main(String[] args) throws Exception {
-
-        System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
-
-        ChatJimmyLlmClient jimmy = ChatJimmyLlmClient.builder()
-                .baseUrl("https://chatjimmy.ai")
-                .modelName("llama3.1-8B")
-                // .proxy(PROXY_URL, PROXY_PORT, PROXY_USER, PROXY_PASS)
-                .build();
-
-        long startNanos = System.nanoTime();
-        CompletionWithSpeed result = jimmy.completeWithSpeed(
-                List.of(LlmMessage.user("What is the capital of Italy?")),
-                new LlmCallContext.Builder().agentType("demo").build());
-        double elapsedSeconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;
-
-        LlmCompletion completion = result.completion();
-        UpstreamSpeed speed = result.speed();
-        double wallClockTokensPerSecond =
-                elapsedSeconds > 0 ? completion.outputTokens() / elapsedSeconds : 0.0;
-
-        System.out.println();
-        System.out.println("=== LlmCompletion ===");
-        System.out.println("text:          " + completion.text());
-        System.out.println("finishReason:  " + completion.finishReason());
-        System.out.println("promptTokens:  " + completion.promptTokens());
-        System.out.println("outputTokens:  " + completion.outputTokens());
-        System.out.printf("prompt tok/s:  %.1f (upstream prefill_rate)%n", speed.promptTokensPerSecond());
-        System.out.printf("output tok/s:  %.1f (upstream decode_rate)%n", speed.outputTokensPerSecond());
-        System.out.printf("TTFT:          %.2f s (upstream ttft)%n", speed.timeToFirstTokenSeconds());
-        System.out.printf("gen time:      %.2f s (upstream total_duration)%n", speed.totalGenerationSeconds());
-        System.out.printf("elapsed:       %.2f s (client wall-clock, incl. network/proxy)%n", elapsedSeconds);
-        System.out.printf("output tok/s:  %.1f (client wall-clock)%n", wallClockTokensPerSecond);
-        System.out.println();
-        System.out.println("The request reached this text ONLY by going through the");
-        System.out.println("authenticated proxy — baseUrl itself does not resolve.");
-
-    }
-
 }

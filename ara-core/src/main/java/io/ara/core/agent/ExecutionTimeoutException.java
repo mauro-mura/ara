@@ -8,8 +8,8 @@ import java.time.Duration;
 public class ExecutionTimeoutException extends RuntimeException {
 
     private static final long serialVersionUID = -1662367909337347451L;
-    
-	private final Duration timeout;
+
+    private final Duration timeout;
 
     public ExecutionTimeoutException(Duration timeout) {
         super("Execution exceeded timeout of " + timeout.toSeconds() + "s");

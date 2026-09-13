@@ -70,7 +70,8 @@ public final class DefaultLlmRouter implements LlmRouter {
             }
 
             case ROUND_ROBIN -> {
-                int idx = roundRobinIndex.getAndIncrement() % all.size();
+                // floorMod keeps idx non-negative even after the AtomicInteger wraps at 2^31
+                int idx = Math.floorMod(roundRobinIndex.getAndIncrement(), all.size());
                 yield resolve(all.get(idx), config);
             }
 

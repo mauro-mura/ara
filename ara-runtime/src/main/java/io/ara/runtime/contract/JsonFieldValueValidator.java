@@ -75,12 +75,8 @@ public final class JsonFieldValueValidator implements InputProcessor, OutputProc
             return ProcessingResult.reject("Payload is not valid JSON: " + e.getMessage());
         }
 
-        JsonNode node = root;
-        for (String part : fieldPath.split("\\.")) {
-            if (node == null || node.isMissingNode()) break;
-            node = node.get(part);
-        }
-        if (node == null || node.isNull() || node.isMissingNode()) {
+        JsonNode node = JsonFieldNavigator.navigate(root, fieldPath);
+        if (node == null) {
             return ProcessingResult.reject("Field '" + fieldPath + "' not found in payload");
         }
 

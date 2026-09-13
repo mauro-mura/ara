@@ -29,20 +29,18 @@ public final class JsonFieldExtractor implements InputProcessor, OutputProcessor
 
     @Override
     public ProcessingResult process(String output) {
+        JsonNode root;
         try {
-            JsonNode root = MAPPER.readTree(output);
-            JsonNode node = root;
-            for (String part : fieldPath.split("\\.")) {
-                if (node == null || node.isMissingNode()) break;
-                node = node.get(part);
-            }
-            if (node == null || node.isNull() || node.isMissingNode()) {
-                return ProcessingResult.reject("Field '" + fieldPath + "' not found in output");
-            }
-            String value = node.isTextual() ? node.asText() : node.toString();
-            return ProcessingResult.pass(value);
+            root = MAPPER.readTree(output);
         } catch (Exception e) {
             return ProcessingResult.reject("Failed to parse output as JSON: " + e.getMessage());
         }
+
+        JsonNode node = JsonFieldNavigator.navigate(root, fieldPath);
+        if (node == null) {
+            return ProcessingResult.reject("Field '" + fieldPath + "' not found in output");
+        }
+        String value = node.isTextual() ? node.asText() : node.toString();
+        return ProcessingResult.pass(value);
     }
 }

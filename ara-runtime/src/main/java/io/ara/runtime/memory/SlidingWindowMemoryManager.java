@@ -234,12 +234,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     }
 
     private EvictionEvent evictOldest() {
-        if (working.isEmpty()) return new EvictionEvent(0, false);
-        int[] bounds = toolCallGroupBounds(0);
-        offloadBeforeDiscard(bounds[0], bounds[1]);
-        int evicted = bounds[1] - bounds[0];
-        removeRange(bounds[0], bounds[1]);
-        return new EvictionEvent(evicted, false);
+        return evictRange(0);
     }
 
     private EvictionEvent evictMiddle() {
@@ -247,7 +242,12 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         if (size <= ANCHOR_COUNT * 2) {
             return evictOldest();
         }
-        int[] bounds = toolCallGroupBounds(ANCHOR_COUNT);
+        return evictRange(ANCHOR_COUNT);
+    }
+
+    /** Evicts the tool-call-group safe range starting at {@code index}: offload, discharge, remove. */
+    private EvictionEvent evictRange(int index) {
+        int[] bounds = toolCallGroupBounds(index);
         offloadBeforeDiscard(bounds[0], bounds[1]);
         int evicted = bounds[1] - bounds[0];
         removeRange(bounds[0], bounds[1]);
