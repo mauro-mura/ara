@@ -16,16 +16,35 @@ host pipelines inside a real `AgentInstance`, makes that unit of work a first-cl
 | `PipelineStrategy` | Package-private `ExecutionStrategy` that adapts an `AgentPipeline` to run inside an `AgentInstance`. |
 | `PipelineAgents` | Public factory: `PipelineAgents.of(pipeline)` → an `AraAgent` backed by a real `AgentInstance` hosting a `PipelineStrategy`. The only class most callers ever touch directly besides `AgentPipeline` itself. |
 | `ParallelAgent` | Public `AraAgent` that fans a task out to N member agents concurrently and merges their responses — see "Fan-out within a step" below. |
-| `IntentRouter` | Public `Function<PipelineExecution, String>` for classify-and-act: reads a label (and optional confidence) out of a classifier step's output, writes it to `RunState`, emits the `pipeline.classify` span, and returns the one worker that handles it — with a mandatory else-arc. See "Classify-and-act" below. |
-| `RuleClassifier` | Public builder producing a **deterministic** classifier agent — keyword/regex/predicate rules over the task text, first match wins — that emits the same JSON an LLM classifier would. Built on `AraAgents.deterministic`: no LLM, no tokens, no round trip. |
-| `ApprovalClassifier` | Public builder producing a classifier agent that asks a **human**: registers an `ApprovalRequest` on an `ApprovalGate`, parks until an operator decides, emits the label in the same JSON shape. The escalation target for `IntentRouter.escalateBelow(...)`. |
-| `ClassifyAndActSpec` | The whole pattern as data: tiers, rules, label→worker table, thresholds. Parses from a `JsonNode` (JSON out of the box) and builds the pipeline, resolving agents by name through an `AgentResolver`. Adding a category becomes a document edit. |
+| `IntentRouter` | Public `Function<PipelineExecution, String>` for classify-and-act: reads a label (and optional confidence) out of a classifier step's output, writes it to `RunState`, emits the `pipeline.classify` span, and returns the one worker that handles it — with a mandatory else-arc. Exposes the `Decision` record and `Reason` enum via `classify(output)`. See "Classify-and-act" below. |
+| `RuleClassifier` | Public builder producing a **deterministic** classifier agent — keyword/regex/predicate rules over the task text, first match wins (`when`, `whenMatches`, `whenever`, with `labelField`/`confidenceField`/`config` knobs and `MATCHED_CONFIDENCE`/`UNMATCHED_CONFIDENCE` constants) — that emits the same JSON an LLM classifier would. Built on `AraAgents.deterministic`: no LLM, no tokens, no round trip. |
+| `ApprovalClassifier` | Public builder producing a classifier agent that asks a **human**: registers an `ApprovalRequest` on an `ApprovalGate`, parks until an operator decides, emits the label in the same JSON shape. The escalation target for `IntentRouter.escalateBelow(...)`. Exposes the `Outcome` enum (`recordOutcomeAs`) and the `PendingClassification` request payload. |
+| `RecipeCacheResolver` | A third `ClassifyAndActSpec.AgentResolver` — the recipe-cache fast-path (ADR-0072): resolves a `task_class` label to an agent built from the promoted variant a `SpecArchive` holds for that class. Cache hit → `MATCHED`, cache miss → `null` (falls to the router's else-arc). |
+| `ClassifyAndActSpec` | The whole pattern as data: tiers, rules, label→worker table, thresholds. Parses from a `JsonNode` (JSON out of the box) and builds the pipeline, resolving agents by name through an `AgentResolver`. Adding a category becomes a document edit. Its shapes are the sealed `Source` interface (`Rules`/`Agent`/`Approval`) plus the `Routing`/`ClassifierSpec`/`RuleSpec`/`Bindings` records. |
 
 `PipelineAgents` is deliberately plural, not `PipelineAgent` — a near-mirror of
 `AgentPipeline` (same two words, swapped) reads as an easy mix-up, and this class is a
 static factory, not an agent instance itself. The plural also matches this codebase's
 existing convention for that kind of utility class (`AraAgents`, used e.g. by
 `LocalAgentScheduler` for `executeAsync(...)`).
+
+## The ADRs behind the code
+
+Per-file references like "ADR-052 D2" or "ADR-0072 D5" point at the design documents of the ARA project. They record the origin story;
+the concepts are summarised here so the code stands on its own:
+
+| Reference | What it is, in one breath |
+|---|---|
+| ADR-016 | Agent sessions: per-session state/isolation and the `SessionBusyPolicy` that decides what happens to concurrent calls on the same session — inherited for free by any agent hosted in a real `AgentInstance`. |
+| ADR-033 | The authorization model implemented in `io.ara.runtime.auth`: OAuth-style scope checks + opt-in ABAC + a human approval gate. Because pipelines become plain `AraAgent`s, they inherit the scope protection automatically. |
+| ADR-041 | The run context: `RunContext`/`RunState` — the task-scoped shared state a step (or a tool it calls) writes and every later step reads. "Rev. 3" is this file's shape of it. |
+| ADR-048 | The human approval machinery: `ApprovalGate`/`ApprovalRequest`/`ApprovalDecision` — the HITL gate `ApprovalClassifier` parks on. |
+| ADR-050 | The classify-and-act shape: classifier label → router → worker, with the rule that a router must declare an else-arc (`orElse`) for everything it doesn't name. |
+| ADR-051 | The "don't re-derive the agent lifecycle" directive: documents the hand-rolled-`AraAgent` anti-pattern (the buggy `PipelineAgent` this package replaced) and the fix — host a strategy inside a real `AgentInstance`. |
+| ADR-052 | The workflow-graph engine (`io.ara.runtime.workflow`); its D-numbers (D1…D7) are a decision log of individual choices. D2 is the declared-router-targets rule `route(stepName, targets, router)` implements. |
+| ADR-0072 | Recipe cache: per-`task_class` worker built from a *promoted* archived variant instead of a fresh build — the fast-path `RecipeCacheResolver` implements. |
+| ADR-0075 | The full factory pass — build a fresh worker from scratch — that a recipe-cache miss falls back to. |
+| ADR-0082 | The evolution loop that would populate the recipe archive by detecting/fixing/promoting successful variants — deliberately not built yet. |
 
 ## `AgentPipeline`
 
@@ -39,6 +58,13 @@ Two ways to build one:
   `IllegalArgumentException` if `stepName` was never declared via `.step(...)` — it used
   to silently create an orphaned router entry that could never fire; a typo in a step
   name is now a build-time failure, not a pipeline that quietly runs sequentially forever.
+  There is also `route(stepName, targets, router)` (ADR-052 D2): declare the router's
+  *full* possible-return-value set up front so `build()` can reject a target that was
+  never declared as a step, the same way `classify(...)` already does via
+  `IntentRouter.targets()` — an empty set means "never continues", the shape `worker(...)`
+  uses. Prefer it over the single-arg router: a router whose targets the builder cannot
+  see is wired conservatively, which is always correct but gives up the build-time check
+  on its own return value.
 - **`AgentPipeline.fsmBuilder()`** — declarative FSM framing over the same builder:
   `.state(name, agent)`, `.initial(name)` (defaults to the first declared state),
   `.terminal(names...)` (ends the pipeline successfully), `.transition(from, to)` or
@@ -141,6 +167,13 @@ by construction is the correct default, not a simplification pending a future po
   `PipelineResult.totalInputTokens()` / `totalOutputTokens()` / `totalTokens()` /
   `totalCost()` sum across every step, not just the last one. `stepsExecuted()` is
   simply `stepHistory().stream().map(StepResult::stepName).toList()`.
+- `PipelineResult.success(...)` / `failure(...)` are the two static factories — the
+  sanctioned construction path, because a hand-built record instance would have to get
+  the invariants right itself: `completedAt` (stamped `Instant.now()` by both factories
+  — pass nothing, so it cannot be stale), a non-null `failureReason` *iff* `success` is
+  false, and a failed run's `finalOutput` (the *attempted* last response's content). The
+  factories capture exactly that; constructing the record directly is how those fields
+  quietly drift apart.
 
 ## `PipelineAgents` / `PipelineStrategy` — pipeline as a real agent
 
@@ -473,6 +506,32 @@ and it becomes load-bearing as soon as a second classifier is reached by escalat
 worker follows the first one. To classify a *transformed* input (normalised, enriched),
 use `step(name, agent, shaper)` with an explicit `route(...)` instead.
 
+#### The `IntentRouter` API
+
+The router is a plain `Function<PipelineExecution, String>`, and `orElse(...)` is the
+only way to build one. Beyond the fluent `route(...)` shown above:
+
+- **`onOutput()`** treats the classifier's whole (trimmed) output as the label — for a
+  classifier prompted to answer a bare word, or a deterministic one that returns one
+  directly. Incompatible with `confidenceField(...)`, which needs JSON to read from.
+- **`routes(Map)`** registers many label→step pairs at once; **`caseSensitive()`** (must
+  be called before `route(...)`, or it throws — the normalisation is applied as routes are
+  added) switches label matching from the default case-insensitive to exact.
+- **`classify(output)`** is the pure core of `apply(...)` — label read, threshold check,
+  route lookup — returning a **`Decision`** *without* the state write and the span, so the
+  mapping can be unit-tested directly without standing up a `PipelineExecution`.
+  `Decision(target, label, confidence, reason)` is what `apply(...)` reduces to the bare
+  step name; `Reason` is the same enum the span's `routing.reason` carries (`MATCHED`,
+  `UNKNOWN_LABEL`, `MISSING_LABEL`, `UNPARSEABLE_OUTPUT`, `LOW_CONFIDENCE`,
+  `MISSING_CONFIDENCE`).
+- **`targets()`** is the full set of step names the router can return — every declared
+  route plus the else-arc and the escalation arc — which `classify(...)` checks against
+  the pipeline's declared steps at `build()`.
+- **`recipeCacheLabels(...)`** (ADR-0072 D5) marks which routed labels resolve to a
+  recipe-cache hit, so the `pipeline.classify` span additionally carries
+  `routing.recipe_cache_hit` for them. `ClassifyAndActSpec` sets it automatically when a
+  `RecipeCacheResolver` is bound; unset, the attribute is never emitted.
+
 #### A deterministic classifier, and the cascade
 
 `RuleClassifier` builds the classify step out of rules instead of a model. A large share
@@ -492,7 +551,15 @@ Rules are evaluated **in declaration order, first match wins** — so a `TECH_UR
 must be declared before the `TECH` one that would also match it. That priority-ordered,
 mutually exclusive evaluation is precisely what a set of graph edge conditions cannot
 express. `when(...)` is plain case-insensitive substring matching, so `crash` fires inside
-`crashaggio`; use `whenMatches(...)` with `\b` when a whole word is meant.
+`crashaggio`; use `whenMatches(...)` with `\b` when a whole word is meant. `whenever(label,
+text -> ...)` is the general form the other two are sugar over — calling it directly gives
+a rule that decides on any predicate of the text, e.g. a length threshold or "contains a
+numeric order id". `labelField(name)`/`confidenceField(name)` rename the emitted fields
+(defaults `"intent"`/`"confidence"` — must match the router's `onField(...)` read path),
+and `config(AgentConfig)` replaces the default `FunctionAgent.defaultConfig(agentId)` for a
+classifier that needs its own `name()`/`description()`/`tags()` in the registry. The
+confidence values are exposed as `MATCHED_CONFIDENCE` (`1.0`) / `UNMATCHED_CONFIDENCE`
+(`0.0`).
 
 It emits the same shape a prompted classifier would, with `confidence` at `1.0` when a
 rule fired and `0.0` when none did. Those two values are what make the **cascade** work:
@@ -553,6 +620,18 @@ downstream; `recordOutcomeAs(...)` puts the `Outcome` enum in `RunState` for a l
 and every non-approval is logged. An unanswered escalation reaching the default queue —
 rather than falling back to the guess the model was unsure of — is the point of the whole
 arrangement, and is covered by a test.
+
+The exposed surface beyond what's shown: **`Outcome`** — the enum `recordOutcomeAs(...)`
+writes (`APPROVED`, `MODIFIED`, `REJECTED`, `TIMED_OUT`, `UNUSABLE_DECISION`) — and
+**`PendingClassification(text, proposedLabel, candidateLabels)`**, the
+`ApprovalRequest.payload()` every human step submits: exactly what an operator surface
+needs to render the question and offer the answers. Constants: `DECIDED_CONFIDENCE` (`1.0`)
+/ `UNRESOLVED_CONFIDENCE` (`0.0`), `DEFAULT_TIMEOUT` (15 minutes, `timeout(...)`'s
+fallback), `DEFAULT_ACTION` (`"classify-task"`, `action(...)`'s fallback), and
+`DEFAULT_PROPOSED_LABEL_KEY` (`"intent"`, what `proposedLabelFrom(...)` defaults to).
+Builder knobs mirroring `RuleClassifier`'s: `action(...)` sets `ApprovalRequest.action()`
+(`DEFAULT_ACTION`), `labelField(...)`/`confidenceField(...)` rename the emitted fields,
+and `config(...)` replaces the default `AgentConfig`.
 
 Two things to know before wiring it:
 
@@ -638,6 +717,59 @@ whatever YAML mapper you already have. `ara-runtime` does not grow a YAML depend
 this: `jackson-dataformat-yaml` is deliberately *excluded* elsewhere in this build, and
 the hand-rolled `AraYamlLoader` cannot serve — it does not support lists, and this schema
 is largely made of them.
+
+**The model.** The document parses into the same pieces the hand-written pipeline uses:
+`ClassifyAndActSpec(classifiers, workers, maxSteps)`; each tier is a `ClassifierSpec(name,
+source, routing)`; `source` is the sealed `Source` interface with exactly three permitted
+variants — `Source.Rules(rules, unmatchedLabel)` (built as a `RuleClassifier`),
+`Source.Agent(agentRef)` (an agent resolved by name), and `Source.Approval(labels,
+proposedLabelFrom, timeout, action, recordOutcomeAs, unmatchedLabel)` (built as an
+`ApprovalClassifier`) — and `Routing(labelField, confidenceField, routes, writeLabelTo,
+writeConfidenceTo, escalateBelow, escalateTo, orElse)` is the declarative face of
+`IntentRouter`. `RuleSpec(label, keywords, regex)` is one rule of a `Rules` tier.
+`build(Bindings)` feeds these into the same `classify(...)`/`worker(...)` builders the
+hand-written pipeline uses, and applies `labelField`/`confidenceField` to *both* the
+agent's emitted field names and the router's read paths, so the two sides of "read what
+was emitted" cannot drift apart. `AgentResolver` itself is a `@FunctionalInterface` — a
+lambda satisfies it, and the two static factories (`of(Map)`, `byId(registry)`) sit next
+to this package's third implementation, `RecipeCacheResolver`, shown next.
+
+#### The recipe-cache fast-path
+
+The idea behind the recipe cache stands without its ADRs: **don't rebuild an agent you
+have already proven.** Most agents spend their life solving the same small set of task
+classes, and a configuration that succeeded — the right steps, tools, prompt — is more
+valuable each time it is reused. A *recipe* is such a proven configuration, archived per
+`task_class`; a *variant* is a candidate configuration with a lifecycle of its own
+(`draft`/`shadow`/`canary` under evaluation, `Default` once promoted, `stale` when
+superseded); and `bestFor` maps a class to its **promoted (`Default`) variant** and
+nothing else — a fast-path that resolved an unvalidated variant would use production
+traffic as its test bed, defeating the promotion gate. `SpecArchive`
+(`io.ara.core.spec`) is the minimal slice of that archive `RecipeCacheResolver` needs:
+`bestFor(label) -> Optional<AgentConfig>`, elected *in the implementation, not the
+caller*. The full archive — quality-diversity selection, lineage, staleness — belongs to
+the evolution loop (ADR-0082) and does not exist yet.
+
+`RecipeCacheResolver` (ADR-0072) is a third `ClassifyAndActSpec.AgentResolver` — not a new
+mechanism. It treats a worker label as a `task_class` and resolves it to an agent built
+from the *promoted variant* `SpecArchive.bestFor` archives for that class, the recipe-cache
+fast-path. Workers built from the cache still get everything `worker(...)` already
+guarantees (state isolation, original input, pipeline termination) — the resolver only
+changes which agent backs the label:
+
+- **Cache hit** — `bestFor(ref)` yields a config: routing reports `Reason.MATCHED` and the
+  pipeline runs the built worker (ADR-0072 D2).
+- **Cache miss** — `bestFor(ref)` is empty, `resolve` returns `null`, and the label falls
+  to the router's mandatory else-arc, which the spec points at the full factory pass
+  (ADR-0075).
+
+Only *promoted* variants can resolve a hit — that is `SpecArchive.bestFor`'s contract
+(ADR-0072 D4), not a check enforced here. `isCacheHit(ref)` is the pure "is this label a
+hit" predicate — no agent is built; `ClassifyAndActSpec` calls it at bind time to populate
+`IntentRouter.recipeCacheLabels(...)`, which emits the `routing.recipe_cache_hit` attribute
+on the `pipeline.classify` span (ADR-0072 D5) only when such a resolver is bound. The
+archive is only populated once the evolution loop and ADR-0082 exist, so today a resolver
+is constructed with `SpecArchive.inMemory()`.
 
 ### Inspecting `PipelineResult` after a failure
 

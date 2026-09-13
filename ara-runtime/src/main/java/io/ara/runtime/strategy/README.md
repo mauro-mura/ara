@@ -56,8 +56,9 @@ only needs an `ExecutionStrategy` to wrap.
 
 Package-private home of everything the ReAct-shaped strategies do *identically*, so a
 fix lands once instead of drifting between near-copies. `ReactStrategy` and
-`ReflActStrategy` use all of it; `ReSpActStrategy` uses the dispatch/streaming half but
-brings its own three-branch decision (see below).
+`ReflActStrategy` use all of it; `ReSpActStrategy` uses the message building, dispatch,
+streaming and budget-charging utilities but brings its own three-branch decision (see
+below).
 
 - **Decision logic** — two sealed types instead of one type gated by a `forceFinal`
   boolean: `StepDecision` (`FinalAnswer` / `DispatchTools` / `Continue`) via
@@ -72,8 +73,24 @@ brings its own three-branch decision (see below).
   (loop again). `decideForcedFinal` only ever checks the final-answer condition, since
   there is no tool catalog to have produced a call from and nothing to dispatch even if
   the LLM emits one anyway.
-- **Message building** (`buildMessages`) and the `REACT_SYSTEM_SUFFIX` / tool-catalog
-  injection, both skipped when the client speaks native function-calling.
+- **Incremental message building** (`MessageBuffer`): working memory is materialised into
+  the LLM message list once, and each later iteration reuses the cached prefix and appends
+  only the newly added tail entries — the old whole-list rebuild was O(context) of object
+  and string allocation per loop turn, even though each turn only appends the assistant
+  message and its observation. The prefix is reused only when the tool-catalog variant is
+  unchanged (normal iterations vs. forced-final, where the catalog is empty) **and** the
+  working-memory prefix is identity-equal to what was materialised — eviction or recall
+  replace/remove entries mid-list, and later appends can regrow the list past the cached
+  size, so identity is verified rather than inferred from a size check. The
+  `REACT_SYSTEM_SUFFIX` / tool-catalog enhancement lands on the **first `"system"` entry
+  wherever it sits**, not unconditionally at index 0: episodic recall (ADR-0078 D4)
+  inserts entries at the head of the window, and index-0 enhancement would silently skip
+  the agent's real system prompt and run the iteration without catalog or format
+  instructions. When the client speaks native function-calling, `toolCatalog(...)` returns
+  the empty string and both enhancement and suffix are skipped. `materialize` also carries
+  each entry's media references — the only path from the task's attachments to the
+  outgoing request — so the ReAct family gets attachments "for free" while
+  `PlanExecuteStrategy` has to re-attach them explicitly (see below).
 - **Synthesis nudge** (`maybeInjectSynthesis`): fires once, `tail` iterations before the
   hard stop, where `tail = max(2, maxIterations / 4)` — proportional to loop length (the
   last ~25%), never fewer than the last 2 iterations, and skipped entirely when
@@ -102,6 +119,31 @@ brings its own three-branch decision (see below).
   interrupt the `Flow.Subscription` is **cancelled** before giving up — otherwise the
   publisher keeps streaming into a dead task, holding the provider connection open and
   firing the SSE callback for a task the caller was already told had failed.
+- **Deadline watchdog hygiene**: the watchdog that interrupts an LLM call on timeout runs
+  on a single virtual-thread scheduler built from a raw `ScheduledThreadPoolExecutor`
+  with `removeOnCancelPolicy(true)` — the `Executors` factory's default leaves every
+  cancelled watchdog parked in `DelayedWorkQueue` until its original deadline elapses,
+  holding the caller thread and gate arrays for up to the full execution timeout and
+  making every LLM call in the process contend on the one queue. The policy is not
+  settable through the factory wrapper, which is why the executor is constructed
+  directly.
+- **Run-budget charging** (`chargeRunBudget`) — when the task's `RunContext` carries a
+  `RunBudget`, every LLM call is charged `Spend.of(cost, tokens, 1)` and an over-cap on
+  any axis (including an ancestor `HierarchicalBudget`) fails the run with an
+  `ExecutionResult.failure(...)` naming the exceeded axis. This is the enforcement
+  ADR-0069 D2/D3 propagation left as a follow-up once the `RunBudget` type (ADR-054 D6)
+  existed: `DataflowScheduler` already charges a budget per node occurrence, but a leaf
+  agent running a ReAct loop outside a workflow never did. One charge per LLM call —
+  the reasoning call every iteration makes, plus each reflection call `ReflActStrategy`
+  adds — mirrors the workflow engine's "one journal entry = one activation" rule applied
+  to the unit a ReAct loop actually activates: a model call, not a tool dispatch.
+  Post-hoc by design, like `RunBudget.charge` itself: the call's tokens are already
+  spent by the time this runs, so a breach stops the run before its *next* call. When
+  the agent's per-1k rates are priced in a different currency than the budget's, the cost
+  axis is charged as `Money.zero` — an operator who wires a budget in one currency
+  against agents priced in another gets an under-counted cost axis, not a crashed run.
+  No `RunBudget` attached to the run context → no-op (the common case, since most agents
+  execute outside a governed workflow). Independent of the local `checkBudget` governor.
 - **Cost-budget arithmetic** (`checkBudget`) — projected spend + next-call estimate
   against `AgentConfig.costBudget()`.
 
@@ -111,6 +153,12 @@ The plain two-branch loop: think, optionally dispatch tools, repeat until a fina
 or `maxIterations`. All the mechanics above come from `ReactExecutionSupport`; this class
 is just the loop's control flow.
 
+- **Hoisted iteration state**: the two `LlmCallContext` variants (full tool set on normal
+  iterations, empty on forced-final ones) and the text tool catalog are precomputed once
+  before the loop — `stepCtx` only ever differs by which tools are exposed, and
+  re-serialising every tool schema per iteration produced a string that never changed.
+  `ReSpActStrategy` and `ReflActStrategy` do the same via the same `toolCatalog(...)`
+  helper.
 - **Forced-final iteration**: on the last iteration(s) (`iterations >= maxIterations - 1`)
   tools are withheld from the LLM entirely, so it cannot emit a tool call and *must*
   produce plain text — guaranteeing termination even for models that never self-report
@@ -204,6 +252,17 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
 - Internally structured around two carriers instead of long positional parameter lists:
   `Run` (immutable per-pass collaborators) and `Tally` (mutable iteration/token/step
   accumulators).
+- **Task media reaches the planner and every step.** Because this strategy re-serialises
+  the task into fresh per-step prompts instead of rebuilding the conversation from working
+  memory, it attaches `task.media()` explicitly on the planning call and on each step's
+  "Task: …" user message — the ReAct family gets attachments for free through
+  `MessageBuffer`'s media-carrying materialisation, and without the explicit re-attach
+  plan-execute would have been the one strategy that silently lost them (a model shown
+  only the words around a PDF cannot summarise it).
+- **Precomputed catalogs**: `plannerCatalog`/`stepCatalog` are computed once and carried
+  on `Run`, like `systemPrompt` — the prior code re-ran
+  `ToolCatalogFormatter.format(resolvedTools)` per step round, re-serialising every tool
+  schema for a string that never changes.
 
 ### `ReflexionStrategy`
 
@@ -237,11 +296,12 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
 
 - Retrieval happens **once per task**, not once per LLM call — the delegate strategy
   (and every iteration it runs) sees the same retrieved context.
-- Injection is via a private `AugmentingLlmClient` decorator that prepends the context
-  block to the first `"system"` message it sees (prepending a *new* system message if
-  none exists) on every `complete`/`stream` call — the wrapped delegate strategy is
-  completely unaware RAG is happening; it just receives an `LlmClient` that already
-  answers with context baked in.
+- Injection is via a private `AugmentingLlmClient` decorator — a `DelegatingLlmClient`
+  subclass, so the delegated capabilities (`providerId()`, `supportsNativeTools()`) flow
+  through without being re-copied per decorator — that prepends the context block to the
+  first `"system"` message it sees (prepending a *new* system message if none exists) on
+  every `complete`/`stream` call. The wrapped delegate strategy is completely unaware RAG
+  is happening; it just receives an `LlmClient` that already answers with context baked in.
 - If retrieval returns zero chunks, the delegate runs against the plain, un-augmented
   `llm` — no empty context block is ever injected.
 
@@ -261,8 +321,9 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
 ## Helpers
 
 - **`ReactExecutionSupport`** — the shared loop internals described in its own section
-  above (decision logic, message building, synthesis nudge, tool dispatch, streaming,
-  budget check). Package-private, stateless, all-static. When adding a ReAct-shaped
+  above (decision logic, incremental `MessageBuffer` message building, synthesis nudge,
+  tool dispatch, streaming, local cost-budget check and run-budget charging).
+  Package-private, stateless, all-static. When adding a ReAct-shaped
   strategy, reuse it rather than copying: the parallel-dispatch interrupt propagation and
   the streaming-subscription-cancel-on-timeout were both real bugs, and a hand-copied
   second implementation is exactly what drifts out of sync on the next fix.
@@ -277,6 +338,10 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
   calling), preserving each call's own `toolCallId`. Also strips namespace prefixes some
   models add (`functions.get_current_time` → `get_current_time`) and unwraps
   double-wrapped `{"arguments":{"arguments":{...}}}` payloads some providers produce.
+  `extractNameAndArgs` hands back the tool id (already stripped of any namespace prefix)
+  and the argument JSON from a single `readTree`, for the hot path that needs both fields
+  together (`recordAssistantOutput`) — the two separate accessors previously parsed the
+  same JSON twice.
 - **`ToolCatalogFormatter`** — the one place that renders the tool list into the system
   prompt (`- toolId: description\n  Arguments: <schema>`). Centralized specifically to
   kill a prior inconsistency where `ReactStrategy` rendered an empty string for zero
@@ -319,9 +384,10 @@ their knobs (`maxIterations`, `maxTokensPerStep`, cost budget) live directly on
 - **Every strategy is stateless and safe to share** across concurrent tasks/agents — all
   per-task state (iteration counters, accumulated tokens, `stepResults`) lives in local
   variables inside `execute(...)`, never in a field.
-- **Cost-budget and timeout checks are the strategy's own responsibility**, checked
-  inline at iteration/step boundaries (`ExecutionTimeoutException` on deadline overrun,
-  an early `ExecutionResult.failure(...)` on projected cost-budget overrun) — there is no
+- **Cost-budget, run-budget and timeout checks are the strategy's own responsibility**,
+  checked inline at iteration/step boundaries (`ExecutionTimeoutException` on deadline
+  overrun, an early `ExecutionResult.failure(...)` on projected cost-budget overrun, the
+  same failure shape on a run-budget breach via `chargeRunBudget`) — there is no
   external watchdog thread; a strategy that doesn't check its deadline can run past it.
 - **Thread-hop + tracing context**: any code in this package that spawns a new thread
   mid-execution (currently only `ReactExecutionSupport.dispatchParallel`) must wrap the
@@ -330,6 +396,10 @@ their knobs (`maxIterations`, `maxTokensPerStep`, cost budget) live directly on
   silently: the span will still be created and exported, just as a disconnected root span
   instead of a child, with no compile-time or obvious runtime signal that anything is
   wrong.
+- **Guard every DEBUG log that allocates.** SLF4J evaluates arguments eagerly, so an
+  unguarded `log.debug(...)` that extracts a tool name, truncates an observation, or
+  stream-serialises tool ids allocates (and JSON-parses) on every call even with DEBUG
+  off — guard the whole body with `if (log.isDebugEnabled()) { ... }`.
 - **Every strategy records an execution trace.** `ExecutionResult.steps()` must reach the
   caller populated — including on failure paths, where the *partial* trace is often the
   only diagnostic available. `StepType` is the shared vocabulary (`thought`, `tool_call`,
