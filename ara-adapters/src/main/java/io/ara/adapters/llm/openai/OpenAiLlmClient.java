@@ -1,6 +1,7 @@
 package io.ara.adapters.llm.openai;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -70,6 +71,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     private final Duration timeout;
     private final boolean logRequests;
     private final boolean logResponses;
+    private final Map<String, String> customHeaders;
     private final boolean documentSupport;
     /**
      * Forces HTTP/1.1 on the streaming model's underlying JDK {@code HttpClient}.
@@ -101,6 +103,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         this.timeout = s.timeout();
         this.logRequests = s.logRequests();
         this.logResponses = s.logResponses();
+        this.customHeaders = builder.customHeaders;
         // Unset by the caller ⇒ derive it: hosted OpenAI (no custom base URL) accepts `file`
         // parts, an arbitrary OpenAI-compatible endpoint usually does not. See
         // supportedMediaTypes().
@@ -120,6 +123,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .topP(builder.topP)
                 .maxTokens(s.maxTokens())
                 .timeout(s.timeout())
+                .customHeaders(customHeaders)
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
                 .build();
@@ -191,6 +195,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .topP(defaultTopP)
                                     .maxTokens(defaultMaxTokens)
                                     .timeout(timeout)
+                                    .customHeaders(customHeaders)
                                     .logRequests(logRequests)
                                     .logResponses(logResponses);
 
@@ -251,6 +256,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         /** Nullable on purpose: null means "derive from baseUrl" — see supportedMediaTypes(). */
         private Boolean documentSupport;
         private boolean forceHttp1 = false;
+        private Map<String, String> customHeaders = Map.of();
 
         /**
          * Nucleus sampling threshold. Unset by default (OpenAI applies its own default,
@@ -258,6 +264,19 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
          * {@code topP}, not both.
          */
         public Builder topP(double topP)          { this.topP = topP; return this; }
+
+        /**
+         * Extra HTTP headers applied to every request (chat and streaming) sent to the
+         * OpenAI-compatible endpoint.
+         *
+         * <p>Useful for endpoints behind a gateway that keys quota or routing off a
+         * header — e.g. opencode's {@code X-Session-ID}. Values should stay stable for
+         * the duration of the conversation the client serves.
+         */
+        public Builder customHeaders(Map<String, String> headers) {
+            this.customHeaders = headers != null ? headers : Map.of();
+            return this;
+        }
 
         /**
          * Declares whether this endpoint accepts PDFs as {@code file} content parts.
