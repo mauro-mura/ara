@@ -10,6 +10,7 @@ import io.ara.core.mcp.McpClient;
 import io.ara.core.media.MediaStore;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.runtime.factory.CircuitBreakerLlmClient;
 import io.ara.runtime.factory.FailoverLlmClient;
 import io.ara.runtime.llm.LoggingLlmClient;
 import io.ara.runtime.llm.MediaResolvingLlmClient;
@@ -115,9 +116,20 @@ public final class DefaultWiringFactory implements WiringFactory {
             }
 
             LlmClient llm = switch (policy) {
+                // Every candidate gets its own circuit breaker, so an endpoint that keeps failing
+                // is skipped on subsequent calls without paying its per-request timeout again and
+                // is re-probed by a single trial after a cooldown. State lives on the wrapper, and
+                // the wrapper on the session-pinned wiring (ADR-039): a session that outlives an
+                // outage keeps the open circuit across calls; a fresh session rebuilds the pool
+                // and the breaker from scratch. The reflection-only router (DefaultLlmRouter)
+                // deliberately stays on a plain FailoverLlmClient: it rebuilds the pool per call,
+                // so a breaker there would lose its circuit state — applying it would be worse
+                // than not applying it.
                 case FAILOVER -> resolvedClients.size() == 1
                         ? resolvedClients.get(0)
-                        : new FailoverLlmClient(resolvedClients);
+                        : new FailoverLlmClient(resolvedClients.stream()
+                                .<LlmClient>map(CircuitBreakerLlmClient::new)
+                                .toList());
                 case ROUND_ROBIN -> new RoundRobinLlmClient(resolvedClients);
                 default -> resolvedClients.get(0);
             };
