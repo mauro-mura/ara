@@ -6,15 +6,20 @@
 
 [![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Maven-3.9%2B-blue.svg)](https://maven.apache.org/)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.xmor/ara-runtime.svg?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
+[![Last update](https://img.shields.io/maven-central/last-update/io.github.xmor/ara-runtime.svg?label=Last%20update)](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-ara.open--solutions.it-2b2d42.svg)](http://ara.open-solutions.it)
 
 <!-- *[README in italiano](README.it.md)* -->
 
-ARA is a JVM framework for building autonomous agents and multi-agent systems on Java 21.
-It combines LLM integration, tool calling, deterministic I/O contracts, and multi-agent
-orchestration in a clean, interface-first architecture — no annotation magic, no reflection,
-no framework lock-in.
+**ARA — Agent Runtime Architecture** is a Java 21 framework for building autonomous AI agents
+and multi-agent systems on the JVM. It combines LLM integration, tool calling, deterministic
+I/O contracts, multi-agent orchestration, RAG and human-in-the-loop flows in a clean,
+interface-first architecture: no annotation magic, no reflection, no Spring, no Kotlin, no
+framework lock-in. Published to **Maven Central** as
+[`io.github.xmor:ara-runtime`](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
+(plus `ara-core`, `ara-adapters`, `ara-examples`).
 
 ---
 
