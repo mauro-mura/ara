@@ -15,8 +15,10 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * similarity (O(n·d)). Suitable for development, testing, and small knowledge
  * bases (up to ~10 k chunks). For production use {@link DocumentStore} (Qdrant).
  *
- * <p>All state is lost when the JVM stops — documents are re-indexed from H2
- * on startup via {@code KnowledgeBaseService#init()}.
+ * <p>All state is lost when the JVM stops: this store keeps no durable copy of the
+ * documents it indexes, so whoever owns the corpus must re-index it on every start
+ * (see {@link #indexDocument}). {@link DocumentStore} is the one to reach for when
+ * the index has to outlive the process.
  */
 public final class InMemoryDocumentStore implements KbStore {
 

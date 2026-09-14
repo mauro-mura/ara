@@ -346,8 +346,9 @@ LLM response → [get_weather(Rome), get_weather(London)]
 
 Attach an image or a PDF to a task and the model reads it natively — layout, tables,
 stamps and scanned pages included. This is the path for what text extraction cannot give
-you; for PDFs that are *already* text, `KnowledgeBase` + `RetrievalAugmentedStrategy`
-remains the cheaper answer, and the two coexist without talking to each other.
+you; for PDFs that are *already* text, indexing them into a `DocumentStore` and letting
+`RetrievalAugmentedStrategy` retrieve the relevant chunks remains the cheaper answer, and
+the two coexist without talking to each other.
 
 The bytes live in a `MediaStore`, wired once on the runtime. Everything above the adapter
 carries a `MediaRef` — a name, a MIME type, a size and the SHA-256 of the content — never
