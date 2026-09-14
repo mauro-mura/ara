@@ -20,7 +20,7 @@ import java.util.Objects;
  *
  * <p>For one-off/scripted use, {@link #tools()} gives the server's current
  * {@code List<AraTool>}. The list is fetched lazily on the first {@link #tools()} call and
- * from then on served by {@link McpToolRegistry}'s 60 s TTL cache, so {@link #connect()}
+ * from then on served by {@link McpToolRegistry}'s 60 s TTL cache, so {@link #connect(String)}
  * itself never blocks on {@code tools/list}. To wire graphify into
  * {@code io.ara.runtime.AraRuntime} with ADR-039's lazy, shared/ref-counted MCP connection
  * lifecycle instead (recommended for long-lived agents), skip this class and register

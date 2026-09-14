@@ -42,8 +42,11 @@ without depending on a specific SDK. Concrete adapters live in `ara-adapters`.
 
 Three layers, increasing in specificity — later layers win:
 
-1. **`LlmProfile`** — static per-model config (modelId, temperature, topP, cost, base
-   URL/API key, streaming/JSON-schema support). One profile per model.
+1. **`LlmProfile`** — static per-model config, itself split by concern (ADR-039 §3): which
+   `LlmTransport` to call (`transportId`/`inlineTransport` — base URL, API key, model
+   name; shared, ref-counted, resolved once per session), per-call parameters
+   (temperature, topP, maxTokens, streaming/JSON-schema support), and per-agent
+   governance (cost budget, currency, tariffs). One profile per model.
 2. **`LlmConfig`** — an agent's `primary` profile plus `fallbacks` and the
    `LlmSelectionPolicy` used to choose between them. Part of `AgentConfig`.
 3. **`LlmCallContext`** — per-call overrides (output JSON schema, temperature, stop

@@ -6,9 +6,11 @@ import io.ara.core.common.ErrorCategory;
  * Exception thrown during embedding operations.
  *
  * <p>Mirrors {@code LlmException}'s shape — a typed {@link ErrorCategory}, provider,
- * status code, retryability — so that a caller composing both chat and embedding clients
- * (e.g. {@code FailoverEmbeddingClient}) can reason about failures from either the same
- * way. Kept as its own type rather than reusing {@code LlmException} because the two ports
+ * status code, retryability — so that a caller reasoning about both stacks (logging,
+ * telemetry, a shared retry-policy reader) can treat failures from either exception type
+ * uniformly via {@link ErrorCategory}, even though each failover decorator
+ * ({@code io.ara.runtime.factory.FailoverLlmClient}, {@code io.ara.adapters.embedding.EmbeddingEndpointPool})
+ * only ever sees its own. Kept as its own type rather than reusing {@code LlmException} because the two ports
  * are otherwise independent ({@link EmbeddingClient} knows nothing about {@code LlmClient})
  * and a shared exception type would create a compile-time dependency between them for no
  * behavioural gain — the categories, not the class, are what needs to be shared.
