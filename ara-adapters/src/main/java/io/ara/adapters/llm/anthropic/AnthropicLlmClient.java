@@ -110,6 +110,7 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
                 .timeout(s.timeout())
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
+                .maxRetries(0)
                 .build();
         this.streamingModel = AnthropicStreamingChatModel.builder()
                 .apiKey(s.apiKey())

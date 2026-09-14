@@ -129,6 +129,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
                 .timeout(builder.timeout)
                 .logRequests(builder.logRequests)
                 .logResponses(builder.logResponses)
+                .maxRetries(0)
                 .build();
         this.streamingModel = OllamaStreamingChatModel.builder()
                 .baseUrl(builder.baseUrl)
@@ -182,7 +183,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
     protected LlmException mapException(Throwable ex) {
         String msg = errorMessage(ex);
         if (msg.contains("Connection refused") || msg.contains("connect")) {
-            return LlmException.networkError(PROVIDER,
+            return LlmException.connectionError(PROVIDER,
                     "Cannot reach Ollama at the configured base URL. Is Ollama running?", ex);
         }
         if (msg.contains("404") || msg.contains("model not found") || msg.contains("pull model")) {

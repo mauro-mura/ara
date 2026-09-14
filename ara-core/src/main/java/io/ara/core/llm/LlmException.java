@@ -1,10 +1,15 @@
 package io.ara.core.llm;
 
+import io.ara.core.common.ErrorCategory;
+
 /**
  * Exception thrown during LLM operations.
  *
  * <p>Carries a typed {@link ErrorType} so that callers (e.g. {@code FailoverLlmClient})
- * can decide whether to retry or propagate immediately.
+ * can decide whether to retry or propagate immediately. {@link #shouldFailover()} reduces
+ * {@link ErrorType} to the provider-agnostic {@link ErrorCategory} shared with
+ * {@code EmbeddingException}, so both exception types and both failover decorators agree
+ * on what a network error or a rate limit means.
  */
 public class LlmException extends RuntimeException {
 
@@ -121,6 +126,20 @@ public class LlmException extends RuntimeException {
                 null, ErrorType.MODEL_NOT_FOUND, provider, 404, false);
     }
 
+    /**
+     * A connection failure — the transport could not reach the provider endpoint.
+     *
+     * <p>Non-retryable on the same client: a connection problem (DNS failure, connection
+     * refused, broken pipe, connect timeout) indicates the endpoint is unreachable, and
+     * retrying immediately would hit the same failure again. But — unlike an
+     * {@link #shouldFailover() auth/invalid-request} failure — it is still worth
+     * {@link #shouldFailover() failing over} to a different provider, which may well be
+     * reachable: retrying the same host wastes time, switching models may work.
+     */
+    public static LlmException connectionError(String provider, String message, Throwable cause) {
+        return new LlmException(message, cause, ErrorType.NETWORK, provider, null, false);
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────────────
 
     public ErrorType errorType()  { return errorType; }
@@ -133,4 +152,49 @@ public class LlmException extends RuntimeException {
     public boolean isContextLengthExceeded() { return errorType == ErrorType.CONTEXT_LENGTH_EXCEEDED; }
     public boolean isNetworkError()          { return errorType == ErrorType.NETWORK; }
     public boolean isServerError()           { return errorType == ErrorType.SERVER_ERROR; }
+
+    /**
+     * Whether trying a <em>different</em> {@code LlmClient} (failover) could plausibly
+     * succeed after this failure.
+     *
+     * <p>Distinct from {@link #isRetryable()}, which governs retrying the <em>same</em>
+     * client: the two are independent decisions. A connection error is not worth retrying
+     * locally — the endpoint is unreachable and every attempt hits the same wall — but a
+     * different provider may well be reachable, so failover is still worth attempting.
+     * An {@code AUTHENTICATION}, {@code INVALID_REQUEST} or {@code UNSUPPORTED_OPERATION}
+     * failure, by contrast, would recur on every candidate in the pool and must abort the
+     * whole chain.
+     *
+     * <p>{@code FailoverLlmClient} acts on this, while {@code ReactExecutionSupport} acts on
+     * {@link #isRetryable()}.
+     *
+     * @return {@code true} if the pool should advance to its next candidate
+     */
+    public boolean shouldFailover() {
+        return errorCategory().shouldFailover();
+    }
+
+    /**
+     * Reduces {@link #errorType} to the provider-agnostic {@link ErrorCategory} shared with
+     * {@code EmbeddingException}. {@link #errorType} keeps chat-specific variants
+     * ({@code CONTEXT_LENGTH_EXCEEDED}) that have no embedding equivalent; this mapping is
+     * what lets {@link #shouldFailover()} and a future cross-cutting caller reason about
+     * both exception types identically.
+     */
+    public ErrorCategory errorCategory() {
+        return switch (errorType) {
+            case NETWORK                  -> ErrorCategory.NETWORK;
+            case SERVER_ERROR             -> ErrorCategory.SERVER_ERROR;
+            case RATE_LIMIT               -> ErrorCategory.RATE_LIMIT;
+            case QUOTA_EXCEEDED           -> ErrorCategory.QUOTA_EXCEEDED;
+            case AUTHENTICATION          -> ErrorCategory.AUTHENTICATION;
+            case INVALID_REQUEST,
+                 CONTEXT_LENGTH_EXCEEDED -> ErrorCategory.INVALID_REQUEST;
+            case CONTENT_FILTERED        -> ErrorCategory.CONTENT_FILTERED;
+            case MODEL_NOT_FOUND         -> ErrorCategory.MODEL_NOT_FOUND;
+            case UNSUPPORTED_OPERATION   -> ErrorCategory.UNSUPPORTED_OPERATION;
+            case PARSE_ERROR             -> ErrorCategory.PARSE_ERROR;
+            case UNKNOWN                 -> ErrorCategory.UNKNOWN;
+        };
+    }
 }

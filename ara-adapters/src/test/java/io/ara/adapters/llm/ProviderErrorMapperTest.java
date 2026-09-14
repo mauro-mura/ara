@@ -68,13 +68,21 @@ class ProviderErrorMapperTest {
     }
 
     @Test
-    void retryable_failures_stay_retryable() {
+    void server_and_rate_limit_failures_stay_retryable() {
         assertTrue(ProviderErrorMapper.fromTypedException(PROVIDER,
                 new RateLimitException("slow down")).isRetryable());
         assertTrue(ProviderErrorMapper.fromTypedException(PROVIDER,
                 new InternalServerException("boom")).isRetryable());
-        assertTrue(ProviderErrorMapper.fromTypedException(PROVIDER,
-                new dev.langchain4j.exception.TimeoutException("too slow")).isRetryable());
+    }
+
+    @Test
+    void connection_failures_are_non_retryable() {
+        assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER,
+                new dev.langchain4j.exception.TimeoutException("too slow")).isRetryable(),
+                "connection timeout is a transport failure, not worth retrying");
+        assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER,
+                new RetriableException("connection reset")).isRetryable(),
+                "connection problems are non-retryable");
     }
 
     @Test
@@ -97,7 +105,8 @@ class ProviderErrorMapperTest {
         }
 
         assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER, new FutureNonRetriable()).isRetryable());
-        assertTrue(ProviderErrorMapper.fromTypedException(PROVIDER, new FutureRetriable()).isRetryable());
+        assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER, new FutureRetriable()).isRetryable(),
+                "RetriableException subclasses are connection errors — non-retryable");
     }
 
     @Test

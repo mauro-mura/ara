@@ -20,11 +20,18 @@ import java.util.stream.Collectors;
  * {@link LlmClient} decorator that implements ordered failover across multiple clients.
  *
  * <p>On each call to {@link #complete}, it tries clients in declaration order.
- * {@link LlmException}s with {@link LlmException#isRetryable()} {@code false} (e.g.
+ * {@link LlmException}s with {@link LlmException#shouldFailover()} {@code false} (e.g.
  * authentication errors, invalid requests) are re-thrown immediately without attempting
- * further fallbacks. Retryable errors (rate-limits, network, 5xx) and generic
+ * further fallbacks — the same failure would recur on every candidate in the pool. Failures
+ * where another provider could plausibly succeed ({@code shouldFailover()} {@code true}:
+ * rate-limits, server errors, network and connection problems) and generic
  * {@link RuntimeException}s advance to the next client in the list.
  * Only when all clients are exhausted is the last exception re-thrown.
+ *
+ * <p>Failover is deliberately decoupled from {@link LlmException#isRetryable()}: a
+ * connection error must not be retried against the <em>same</em> endpoint, but the pool
+ * should still advance to a <em>different</em> one. {@code shouldFailover()} is what the
+ * pool consults.
  */
 public final class FailoverLlmClient implements LlmClient {
 
@@ -58,8 +65,8 @@ public final class FailoverLlmClient implements LlmClient {
                 lastSuccessfulProviderId = candidate.providerId();
                 return result;
             } catch (LlmException ex) {
-                if (!ex.isRetryable()) {
-                    log.error("LLM client '{}' returned non-retryable error [{}] — aborting failover: {}",
+                if (!ex.shouldFailover()) {
+                    log.error("LLM client '{}' returned non-failover error [{}] — aborting failover: {}",
                             candidate.providerId(), ex.errorType(), ex.getMessage());
                     throw ex;
                 }
@@ -97,8 +104,9 @@ public final class FailoverLlmClient implements LlmClient {
      * <p>Once any token has been delivered, switching candidates would replay the response
      * from the beginning and duplicate everything already emitted — and {@code ReactStrategy}
      * deliberately never retries a streaming call for exactly that reason. So a failure after
-     * the first {@code onNext} propagates as-is; a failure before it, if retryable and a
-     * fallback remains, transparently re-subscribes to the next client. Non-retryable
+     * the first {@code onNext} propagates as-is; a failure before it, if
+     * {@link LlmException#shouldFailover() failover-able} and a fallback remains,
+     * transparently re-subscribes to the next client. Non-failover
      * {@link LlmException}s abort immediately, as in {@link #complete}.
      *
      * <p>Demand is not honoured ({@code request(n)} is a no-op): the provider pushes
@@ -195,8 +203,8 @@ public final class FailoverLlmClient implements LlmClient {
         private void handleError(Throwable t, int idx, LlmClient candidate, boolean hasNext) {
             if (terminated.get() || cancelled.get()) return;
 
-            boolean nonRetryable = (t instanceof LlmException le) && !le.isRetryable();
-            boolean canFailover  = hasNext && !nonRetryable && !delivered.get();
+            boolean nonFailover  = (t instanceof LlmException le) && !le.shouldFailover();
+            boolean canFailover  = hasNext && !nonFailover && !delivered.get();
 
             if (canFailover) {
                 log.warn("LLM streaming client '{}' failed{} — switching to next fallback. Reason: {}",
@@ -209,8 +217,8 @@ public final class FailoverLlmClient implements LlmClient {
             }
 
             if (terminated.compareAndSet(false, true)) {
-                if (nonRetryable) {
-                    log.error("LLM streaming client '{}' returned non-retryable error [{}] — "
+                if (nonFailover) {
+                    log.error("LLM streaming client '{}' returned non-failover error [{}] — "
                             + "aborting failover: {}", candidate.providerId(),
                             ((LlmException) t).errorType(), t.getMessage());
                 } else if (delivered.get()) {

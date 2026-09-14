@@ -1,5 +1,6 @@
 package io.ara.adapters.llm;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.Flow;
 
@@ -246,7 +247,8 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
 
     /**
      * Final fallback classification: reads the LC4j typed exception hierarchy first,
-     * and reports a retryable network error otherwise.
+     * then reports a non-retryable connection error for {@link IOException}s, and a
+     * retryable network error otherwise.
      *
      * <p>Why a shared tail: langchain4j already maps HTTP failures to its retriable /
      * non-retriable hierarchy (verified against 1.17+), and reading that is both more
@@ -254,11 +256,28 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
      * Without it a malformed request (400) was reported as a network error — retryable —
      * so the strategy retried it and every fallback in a failover pool was tried in turn,
      * for a request that could not succeed on any of them.
+     *
+     * <p>{@link IOException}s are connection failures (DNS, refused, reset, broken pipe) and
+     * are non-retryable: the endpoint is unreachable and retrying would hit the same failure.
      */
     protected final LlmException fallbackClassify(
             String provider, String msg, Throwable ex) {
         LlmException typed = ProviderErrorMapper.fromTypedException(provider, ex);
         if (typed != null) return typed;
+        if (ex instanceof IOException || isCausedByIOException(ex)) {
+            return LlmException.connectionError(provider, msg, ex);
+        }
         return LlmException.networkError(provider, msg, ex);
+    }
+
+    /**
+     * Checks whether the cause chain contains an {@link IOException}.
+     */
+    private static boolean isCausedByIOException(Throwable ex) {
+        Throwable c = ex.getCause();
+        for (int depth = 0; c != null && depth < 8; c = c.getCause(), depth++) {
+            if (c instanceof IOException) return true;
+        }
+        return false;
     }
 }

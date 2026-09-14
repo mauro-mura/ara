@@ -3,3 +3,5 @@
 /.DS_Store
 **/.DS_Store
 /graphify-out/
+/.idea/compiler.xml
+/.idea/encodings.xml

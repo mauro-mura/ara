@@ -32,6 +32,11 @@ import io.ara.core.llm.LlmException;
  * a {@code HttpException}. Reading that classification is both more accurate than a substring
  * match and immune to a provider rewording its error bodies.
  *
+ * <p>Connection problems ({@link RetriableException} and its subclasses) are non-retryable:
+ * a connection failure means the endpoint is unreachable and retrying immediately would hit
+ * the same failure. Server errors ({@link InternalServerException}) and rate limits
+ * ({@link RateLimitException}) remain retryable as transient server-side states.
+ *
  * <h2>How adapters use it</h2>
  * <p>Adapters call this <em>after</em> their own provider-specific checks (which can be more
  * specific than the type — a context-length overflow arrives as a plain
@@ -47,9 +52,9 @@ import io.ara.core.llm.LlmException;
  * }
  * }</pre>
  *
- * <p>With this in place the retryable fallback is reached only when langchain4j itself could
- * not classify the failure — that is, for a genuine transport error, which is exactly the case
- * worth retrying.
+     * <p>With this in place the retryable fallback is reached only when langchain4j itself could
+     * not classify the failure and the cause is not an {@link java.io.IOException} — that is,
+     * for a genuine unknown transport error, not a connection problem.
  */
 public final class ProviderErrorMapper {
 
@@ -99,14 +104,14 @@ public final class ProviderErrorMapper {
             case ModelNotFoundException e    -> LlmException.modelNotFound(provider, msg);
             case RateLimitException e        -> LlmException.rateLimit(provider, msg);
             case InternalServerException e   -> LlmException.serverError(provider, msg, 500);
-            case TimeoutException e          -> LlmException.networkError(provider, msg, c);
+            case TimeoutException e          -> LlmException.connectionError(provider, msg, c);
             // Before InvalidRequestException, which it extends: a filtered response is a
             // refusal to answer, not a malformed request, and reporting it as the latter would
             // send whoever reads the error looking for a bug in their own payload.
             case ContentFilteredException e  -> LlmException.contentFiltered(provider, msg);
             case InvalidRequestException e   -> LlmException.invalidRequest(provider, msg);
             case NonRetriableException e     -> LlmException.invalidRequest(provider, msg);
-            case RetriableException e        -> LlmException.networkError(provider, msg, c);
+            case RetriableException e        -> LlmException.connectionError(provider, msg, c);
             default -> null;
         };
     }

@@ -30,4 +30,18 @@ public interface EmbeddingClient {
      *         1536 for text-embedding-3-small, 3072 for text-embedding-3-large)
      */
     int dimensions();
+
+    /**
+     * Identifies this client for logging and diagnostics — e.g. {@code "openai-text-embedding-3-small"}.
+     *
+     * <p>Defaulted rather than required so every existing implementation (demo clients,
+     * test doubles) keeps compiling; a real adapter should override it the same way
+     * {@code LlmClient#providerId()} adapters do, and {@code FailoverEmbeddingClient} uses
+     * it to name which candidate served a call or failed.
+     *
+     * @return a short, human-readable identifier for this client
+     */
+    default String providerId() {
+        return "embedding";
+    }
 }

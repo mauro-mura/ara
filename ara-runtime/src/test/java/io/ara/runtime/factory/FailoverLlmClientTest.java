@@ -103,6 +103,59 @@ class FailoverLlmClientTest {
         assertNotNull(c.error());
     }
 
+    // ── failover on connection errors (non-retryable but failover-able) ─────────
+
+    @Test
+    void complete_failsOverToNextClient_onConnectionError() {
+        LlmClient primary = new LlmClient() {
+            @Override
+            public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+                throw LlmException.connectionError("openai", "HTTP connect timed out", null);
+            }
+            @Override public String providerId() { return "primary"; }
+        };
+
+        FailoverLlmClient failover = new FailoverLlmClient(List.of(primary, client(true)));
+        LlmCompletion result = failover.complete(List.of(LlmMessage.user("hi")), (LlmCallContext) null);
+
+        assertEquals("ok", result.text());
+        assertEquals("native", failover.lastUsedProviderId());
+    }
+
+    @Test
+    void stream_failsOverToNextClient_onConnectionError() {
+        LlmClient primary   = streamingClient("p",
+                stream -> stream.error(LlmException.connectionError("openai", "HTTP connect timed out", null)));
+        LlmClient secondary = streamingClient("s", stream -> { stream.token("from-fallback"); stream.complete(); });
+
+        FailoverLlmClient failover = new FailoverLlmClient(List.of(primary, secondary));
+        Collected c = collect(failover);
+
+        assertEquals("from-fallback", c.text());
+        assertTrue(c.completed());
+        assertNull(c.error());
+        assertEquals("s", failover.lastUsedProviderId());
+    }
+
+    @Test
+    void complete_abortsImmediately_onNonFailoverError() {
+        LlmClient primary = new LlmClient() {
+            @Override
+            public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+                throw LlmException.authenticationError("openai", "invalid api key");
+            }
+            @Override public String providerId() { return "primary"; }
+        };
+
+        LlmClient secondary = client(true);
+        FailoverLlmClient failover = new FailoverLlmClient(List.of(primary, secondary));
+
+        LlmException ex = assertThrows(LlmException.class,
+                () -> failover.complete(List.of(LlmMessage.user("hi")), (LlmCallContext) null));
+        assertEquals("AUTHENTICATION", ex.errorType().name());
+        assertEquals("openai", ex.provider());
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     /** Drives a scripted, synchronous token stream toward a subscriber. */

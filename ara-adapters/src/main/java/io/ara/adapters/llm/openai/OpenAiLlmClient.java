@@ -126,6 +126,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .customHeaders(customHeaders)
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
+                .maxRetries(0)
                 .build();
     }
 

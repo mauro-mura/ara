@@ -132,6 +132,7 @@ public class MistralLlmClient extends AbstractLangChain4jLlmClient {
                 .timeout(s.timeout())
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
+                .maxRetries(0)
                 .build();
     }
 
