@@ -18,10 +18,12 @@
 
     <name>ARA — Agent Runtime Architecture</name>
     <description>
-        ARA is a JVM framework for building autonomous agents and multi-agent systems on Java 21.
-        It combines LLM integration, tool calling, deterministic I/O contracts, and multi-agent
-        orchestration in a clean,
-        interface-first architecture — no annotation magic, no reflection, no framework lock-in.
+        ARA is a Java 21 framework for building autonomous AI agents and multi-agent systems
+        on the JVM. It combines LLM integration, tool calling, deterministic I/O contracts,
+        multi-agent orchestration, RAG and human-in-the-loop flows in a clean, interface-first
+        architecture — no annotation magic, no reflection, no Spring, no Kotlin, no framework
+        lock-in. Published to Maven Central as io.github.xmor:ara-core, ara-runtime and
+        ara-adapters.
     </description>
     <!--
     Maven appends a child module's artifactId to the inherited <url> and <scm> values,
