@@ -9,9 +9,9 @@ package io.ara.core.common;
  * same two decisions any caller needs: is this worth retrying against the very endpoint
  * that just failed ({@link #isRetryable()}), and is it worth trying a <em>different</em>
  * endpoint instead ({@link #shouldFailover()})? Centralising that reduction here means both
- * exception types — and both failover decorators, {@code FailoverLlmClient} and
- * {@code FailoverEmbeddingClient} — agree on what a network error or a rate limit means,
- * without one copying the other's switch statement.
+ * exception types — and both failover decorators, {@code io.ara.runtime.factory.FailoverLlmClient}
+ * and {@code io.ara.adapters.embedding.EmbeddingEndpointPool} — agree on what a network error or
+ * a rate limit means, without one copying the other's switch statement.
  */
 public enum ErrorCategory {
     /** Transport could not reach the endpoint (DNS, connection refused, broken pipe, connect timeout). */

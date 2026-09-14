@@ -36,8 +36,8 @@ public interface EmbeddingClient {
      *
      * <p>Defaulted rather than required so every existing implementation (demo clients,
      * test doubles) keeps compiling; a real adapter should override it the same way
-     * {@code LlmClient#providerId()} adapters do, and {@code FailoverEmbeddingClient} uses
-     * it to name which candidate served a call or failed.
+     * {@code LlmClient#providerId()} adapters do, and {@code io.ara.adapters.embedding.EmbeddingEndpointPool}
+     * uses it to name which endpoint served a call or failed.
      *
      * @return a short, human-readable identifier for this client
      */

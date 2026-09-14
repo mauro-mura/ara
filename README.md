@@ -346,8 +346,9 @@ LLM response → [get_weather(Rome), get_weather(London)]
 
 Attach an image or a PDF to a task and the model reads it natively — layout, tables,
 stamps and scanned pages included. This is the path for what text extraction cannot give
-you; for PDFs that are *already* text, `KnowledgeBase` + `RetrievalAugmentedStrategy`
-remains the cheaper answer, and the two coexist without talking to each other.
+you; for PDFs that are *already* text, indexing them into a `DocumentStore` and letting
+`RetrievalAugmentedStrategy` retrieve the relevant chunks remains the cheaper answer, and
+the two coexist without talking to each other.
 
 The bytes live in a `MediaStore`, wired once on the runtime. Everything above the adapter
 carries a `MediaRef` — a name, a MIME type, a size and the SHA-256 of the content — never
@@ -1008,7 +1009,11 @@ chunks); `DocumentStore` is the Qdrant-backed equivalent, behind the same contra
 also implement `KbStore`, which adds indexing and document management on top of `retrieve`.
 
 ```java
-EmbeddingClient embeddings = /* your embedding model */;
+EmbeddingClient embeddings = AraEmbeddingClientFactory.openAi()
+        .modelName("text-embedding-3-small")
+        .dimensions(1536)
+        .endpoint(System.getenv("OPENAI_API_KEY"))
+        .build();
 
 InMemoryDocumentStore kb = new InMemoryDocumentStore("ara-docs", embeddings);
 kb.ensureCollection();
@@ -1033,6 +1038,31 @@ DocumentStore kb = new DocumentStore(qdrant, embeddings);
 
 (`QdrantSemanticStore` is a different thing — agent *episodic memory*, a separate
 collection — and is not a `Retriever`.)
+
+**Resilience across endpoints of the same model.** Chaining more than one
+`.endpoint(...)` call on an embedding builder fails over across them in declaration
+order:
+
+```java
+EmbeddingClient embeddings = AraEmbeddingClientFactory.openAi()
+        .modelName("text-embedding-3-small")
+        .dimensions(1536)
+        .endpoint(System.getenv("OPENAI_API_KEY"))                          // primary
+        .endpoint("https://my-gateway.internal/v1", System.getenv("GW_KEY"))// failover
+        .build();
+```
+
+Every endpoint on one builder must reach the *same* model — that is what the API
+structurally enforces by only ever giving you an endpoint list, never a list of separately
+built clients. Two embedding vectors from different models are not comparable even at
+equal `dimensions()`, because they live in different latent spaces; a pool that could mix
+models would silently corrupt whatever vector store it feeds the moment it failed over.
+
+The stores themselves can be pooled too, for a primary/replica setup:
+`io.ara.adapters.resilience.FailoverRetriever` wraps several `Retriever`s (read-only,
+ordered failover), and `FailoverSemanticStore` wraps several `SemanticStore`s (writes fan
+out to every replica, reads fail over in order). Both fail over only on an exception, never
+on an empty result — a healthy store with no hits is a correct answer, not a failure.
 
 Registering at least one retriever makes `AraRuntime` auto-register the RAG-wrapped
 strategies — `"rag+react"`, `"rag+respact"`, `"rag+plan_execute"` and `"rag+reflact"` —
