@@ -26,6 +26,7 @@ no framework lock-in.
 - [Quick start — fully offline](#quick-start--fully-offline-no-llm-needed)
 - [Connecting a real LLM](#connecting-a-real-llm)
 - [LlmException — typed error handling](#llmexception--typed-error-handling)
+- [LLM failover & circuit breaker](#llm-failover--circuit-breaker)
 - [Tool calling](#tool-calling)
 - [Multimodal input — images and documents](#multimodal-input--images-and-documents)
 - [AgentContract — deterministic I/O](#agentcontract--deterministic-io)
@@ -246,9 +247,10 @@ try {
     AgentResponse resp = agent.execute(task);
 } catch (LlmException ex) {
     if (ex.isRetryable()) {
-        // rate limit, network error, server 5xx → safe to retry
+        // rate limit, transient 5xx → worth a local retry on the SAME client
     } else {
-        // auth error, invalid request, context length exceeded → fail fast
+        // auth error, invalid request, connect error → no local retry;
+        // the strategy's retry loop (ReactExecutionSupport) acts on this flag
     }
     System.out.println(ex.errorType());   // RATE_LIMIT, AUTHENTICATION, NETWORK, …
     System.out.println(ex.provider());    // "OpenAI", "Anthropic", "Ollama"
@@ -256,8 +258,54 @@ try {
 }
 ```
 
-`FailoverLlmClient` in `ara-runtime` uses `isRetryable()` automatically to decide whether
-to try the next provider in the chain or abort immediately.
+`isRetryable()` is the *"try the same client again"* signal, and it is distinct from
+`shouldFailover()` — *"could a different provider plausibly succeed?"* The two decisions are
+independent. A `connectionError` is deliberately non-retryable locally (the endpoint is
+unreachable, retrying hits the same wall) yet worth failing over to another model that may
+well be reachable. An `AUTHENTICATION` / `INVALID_REQUEST` failure, by contrast, is neither:
+it would recur on every candidate in the pool, so there is nothing to gain by switching.
+
+`FailoverLlmClient` in `ara-runtime` acts on `shouldFailover()` to decide whether to try the
+next provider in the chain or abort immediately — see
+[LLM failover & circuit breaker](#llm-failover--circuit-breaker).
+
+---
+
+## LLM failover & circuit breaker
+
+`FAILOVER` gives the agent an ordered chain of models: try the primary, and on a
+`shouldFailover()` failure (network error, 5xx, rate limit) advance to the next fallback in
+declaration order. A deterministic error (401, invalid request, content filter) aborts the
+whole chain instead — it would recur on every candidate, so switching models would change
+nothing but the log noise.
+
+```java
+AgentConfig config = AgentConfig.defaults()
+        .agentType("resilient")
+        .primaryLlm(LlmProfile.of("smart"))
+        .fallbackLlms(List.of(LlmProfile.of("local"), LlmProfile.of("cheap")))
+        .llmSelectionPolicy(LlmSelectionPolicy.FAILOVER)
+        .build();
+```
+
+Every candidate hides behind a small passive circuit breaker (`CircuitBreakerLlmClient`).
+After the first few consecutive failures (3 by default) the endpoint is *open*: later
+calls skip it entirely — an outage stops being charged a connect/read timeout *per
+request*, and the fallback serves the pool straight away. Once the 30-second cooldown
+elapses, a single trial call re-probes the endpoint; success closes the circuit, another
+failure reopens it for a fresh cooldown. Health always comes from real traffic, never from
+background probe calls: probes bill like a call, can trip the very rate limit they are meant
+to absorb, and judge an endpoint against a probe-specific timeout that real calls would have
+survived.
+
+Circuit state lives on the session's wiring (ADR-039), so a conversation that keeps its
+session alive accumulates the diagnosis across calls, while a fresh ephemeral session starts
+a clean breaker.
+
+Runnable: `io.ara.examples.failover.FailoverExample` — the same 503 against `FAILOVER`
+(survives via the fallback), against `PRIMARY_ONLY` (dies), a 401 (aborts without touching
+the fallback), and a fourth agent driven repeatedly to watch the circuit open and skip the
+dead primary. The same pattern for embedding calls is `EmbeddingEndpointPool`, below.
 
 ---
 
@@ -397,8 +445,9 @@ Send a PDF to Ollama and the task fails with a non-retryable `LlmException` nami
 type and the provider, *before* the request goes out. It is never stripped, never
 downgraded to text, never logged-and-continued: those all produce a fluent, plausible
 answer about a document the model never saw, which is indistinguishable from a real one to
-whoever reads it. Because the failure is non-retryable, `FailoverLlmClient` aborts instead
-of letting a text-only fallback answer instead — and a `FAILOVER` or `ROUND_ROBIN` pool
+whoever reads it. Because the failure has `shouldFailover() == false` (the mismatch would
+recur on every candidate), `FailoverLlmClient` aborts instead of letting a text-only fallback
+answer instead — and a `FAILOVER` or `ROUND_ROBIN` pool
 reports the *intersection* of its members' media types for the same reason.
 
 **Media support belongs to the endpoint, not the vendor.** `OpenAiLlmClient` is meant to be
@@ -750,7 +799,7 @@ always build it through the flat builder: `AgentConfig.defaults()...build()`.
 |---|---|---|
 | `primaryLlm(LlmProfile)` | empty profile | Primary LLM profile (see table below); its `modelId` must match a client registered on the runtime |
 | `fallbackLlm(LlmProfile)` / `fallbackLlms(List)` | empty | Fallback profiles used according to the selection policy |
-| `llmSelectionPolicy(LlmSelectionPolicy)` | `PRIMARY_ONLY` | `PRIMARY_ONLY` — never use fallbacks · `FAILOVER` — on any retryable failure, try the next fallback in declaration order · `ROUND_ROBIN` — distribute calls sequentially across all profiles |
+| `llmSelectionPolicy(LlmSelectionPolicy)` | `PRIMARY_ONLY` | `PRIMARY_ONLY` — never use fallbacks · `FAILOVER` — on any `shouldFailover()` failure, try the next fallback in declaration order; each candidate carries a circuit breaker (see [LLM failover & circuit breaker](#llm-failover--circuit-breaker)) · `ROUND_ROBIN` — distribute calls sequentially across all profiles |
 | `logLlmIo(boolean)` | `false` | Log every LLM request/response and each tool call/result at `INFO` (see [LLM I/O logging](#llm-io-logging)) |
 | `logLlmIoMaxChars(int)` | `1500` | Truncation limit for logged payloads; `0` = no truncation |
 
@@ -1058,6 +1107,18 @@ structurally enforces by only ever giving you an endpoint list, never a list of 
 built clients. Two embedding vectors from different models are not comparable even at
 equal `dimensions()`, because they live in different latent spaces; a pool that could mix
 models would silently corrupt whatever vector store it feeds the moment it failed over.
+
+**Embedding endpoint failover.** `EmbeddingEndpointPool` wraps several embedding clients of
+the *same* model and applies the same rule as the [LLM chain](#llm-failover--circuit-breaker):
+on a `shouldFailover()` failure (network, 5xx, rate limit) it advances to the next endpoint
+in declaration order, and `lastUsedEndpoint()` names the one that served the call. A
+deterministic error (401, invalid request) aborts without touching the fallbacks, for the
+same reason it aborts the LLM chain — it would recur on every endpoint. Same-model-only for
+the same reason the single builder enforces above: failover never mixes latent spaces.
+(`EmbeddingException` mirrors `LlmException`: both reduce to the same provider-agnostic
+`ErrorCategory`, so `shouldFailover()` reasons about the two identically.) Both
+`EmbeddingEndpointPool` and the failover behaviours above are exercised end-to-end in
+`io.ara.examples.failover.FailoverExample`.
 
 The stores themselves can be pooled too, for a primary/replica setup:
 `io.ara.adapters.resilience.FailoverRetriever` wraps several `Retriever`s (read-only,
