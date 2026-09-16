@@ -2,8 +2,6 @@ package io.ara.runtime.strategy;
 
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.ExecutionStrategy;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -14,9 +12,9 @@ import java.util.Objects;
  *
  * <p>The planner holds an immutable registry of named strategies built at startup.
  * Selection is O(1) via a hash map lookup on {@link AgentConfig#plannerStrategy()}.
- * If the requested strategy is not registered, the planner falls back to the
- * {@value #DEFAULT_STRATEGY} strategy and logs a warning. If even the default is
- * absent, an {@link IllegalStateException} is thrown at selection time.
+ * An unknown strategy name is fail-fast: {@link #select} throws {@link
+ * IllegalStateException} listing the registered names, so a configuration typo
+ * surfaces loudly at task time instead of silently degrading to another strategy.
  *
  * <p>New strategies are registered at startup through the {@link Builder}. There is
  * no runtime re-registration — hot-swapping strategies is a Meta-Agent concern that
@@ -24,8 +22,13 @@ import java.util.Objects;
  */
 public final class ExecutionPlanner {
 
-    private static final Logger log = LoggerFactory.getLogger(ExecutionPlanner.class);
-
+    /**
+     * The stack's default strategy name — what {@link AgentConfig} itself defaults
+     * its {@code plannerStrategy} to. Retained purely as documentation: {@link
+     * #select} plays no fallback role for it anymore, but an {@code AgentConfig}
+     * left at its own default only resolves if a strategy registered under this
+     * name actually exists.
+     */
     static final String DEFAULT_STRATEGY = "react";
 
     private final Map<String, ExecutionStrategy> strategies;
@@ -37,23 +40,26 @@ public final class ExecutionPlanner {
     /**
      * Selects the strategy indicated by {@code config.plannerStrategy()}.
      *
+     * <p>Fail-fast by design: an unregistered name is an error, not a silent degrade.
+     * A fallback to the default "react" strategy would make a config mismatch
+     * invisible — the agent would run ReAct while logs and telemetry claimed another
+     * strategy, and the mismatch would only surface as confusing behavior. (This
+     * planner used to warn-and-fall-back; the guardrail was removed, see the
+     * {@code strategy/README.md}.)
+     *
      * @param config the agent configuration containing the strategy name
      * @return the matching {@link ExecutionStrategy}; never {@code null}
-     * @throws IllegalStateException if neither the requested strategy nor the
-     *                               default fallback is registered
+     * @throws IllegalStateException if {@code config.plannerStrategy()} names a
+     *                               strategy that is not registered
      */
     public ExecutionStrategy select(AgentConfig config) {
         String name = Objects.requireNonNull(config, "config must not be null").plannerStrategy();
         ExecutionStrategy strategy = strategies.get(name);
 
         if (strategy == null) {
-            log.warn("Strategy [{}] not registered; falling back to default [{}]", name, DEFAULT_STRATEGY);
-            strategy = strategies.get(DEFAULT_STRATEGY);
-        }
-        if (strategy == null) {
             throw new IllegalStateException(
-                    "No strategy [%s] registered and default [%s] is also absent. Registered: %s"
-                            .formatted(name, DEFAULT_STRATEGY, strategies.keySet()));
+                    "No strategy [%s] registered. Registered: %s"
+                            .formatted(name, strategies.keySet()));
         }
         return strategy;
     }
@@ -85,8 +91,8 @@ public final class ExecutionPlanner {
      * Fluent builder for {@link ExecutionPlanner}.
      *
      * <p>At least one strategy must be registered before {@link #build()} is called.
-     * The first registered strategy is NOT automatically the default; the default
-     * fallback is always {@value ExecutionPlanner#DEFAULT_STRATEGY}.
+     * The name an instance resolves under is exactly {@link
+     * ExecutionStrategy#strategyName()} — there is no implicit alias to a default.
      */
     public static final class Builder {
 

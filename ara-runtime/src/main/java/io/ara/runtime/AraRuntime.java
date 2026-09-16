@@ -65,6 +65,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -170,23 +171,46 @@ public final class AraRuntime implements AutoCloseable {
      * (if any) and marks the runtime as running.
      *
      * <p>Agents are created synchronously. If the provider throws, startup fails fast.
+     * Provider-driven startup is additionally bounded by {@link
+     * AraRuntimeConfig#startupTimeoutSec()}: once the deadline elapses while the
+     * provider supplies configs or {@code factory.create} produces an agent, start()
+     * aborts with an {@link IllegalStateException}. The bound is cooperative — it
+     * catches slow-but-returning work, it cannot preempt a call that blocks forever.
      */
     public void start() {
         synchronized (lifecycle.getLock()) {
             if (lifecycle.isStarted()) return;
-            log.info("AraRuntime [{}] starting", config.name());
+            log.info("AraRuntime [{}]{} starting", config.name(), identitySuffix());
             lifecycle.start();
 
             if (agentProvider != null) {
+                Instant deadline = Instant.now().plusSeconds(config.startupTimeoutSec());
                 for (AgentConfig cfg : agentProvider.configs()) {
+                    ensureWithinStartupDeadline(deadline);
                     factory.create(cfg);
+                    ensureWithinStartupDeadline(deadline);
                     log.info("  + agent [{}] type=[{}]", cfg.agentId().value(), cfg.agentType());
                 }
             }
 
             scheduler.start();
-            log.info("AraRuntime [{}] started — {} agent(s) registered",
-                    config.name(), registry.count());
+            log.info("AraRuntime [{}] started — {} agent(s) registered{}",
+                    config.name(), registry.count(), identitySuffix());
+        }
+    }
+
+    /** Non-blank {@link AraRuntimeConfig#description()} rendered as a log suffix for runtime identity. */
+    private String identitySuffix() {
+        String description = config.description();
+        return description.isBlank() ? "" : " — " + description;
+    }
+
+    /** Fails startup loudly once the configured startup timeout has elapsed. */
+    private void ensureWithinStartupDeadline(Instant deadline) {
+        if (Instant.now().isAfter(deadline)) {
+            throw new IllegalStateException(
+                    "AraRuntime [%s] startup exceeded the configured startupTimeoutSec=%ss while creating provider agents"
+                            .formatted(config.name(), config.startupTimeoutSec()));
         }
     }
 

@@ -77,12 +77,13 @@ before registering it:
 
 ### Gotchas
 
-- **Silent fallback on a name mismatch.** `ExecutionPlanner.select(...)` does
-  not throw when `plannerStrategy()` doesn't match anything registered — it
-  logs a `WARN` ("Strategy [...] not registered; falling back to default
-  [react]") and runs `react` instead. If your strategy appears to be ignored,
-  check the logs for that line before suspecting the loop logic itself — it's
-  almost always a typo between `strategyName()` and the value passed to
+- **Name mismatch is now fail-fast.** `ExecutionPlanner.select(...)` throws
+  `IllegalStateException` when `plannerStrategy()` doesn't match anything
+  registered, listing the registered names. (It used to log a `WARN` and fall
+  back to `react` — that silent swap made a config typo behave as if the wrong
+  strategy had been chosen on purpose, and was removed.) The failure surfaces when
+  the agent's *first task* selects its strategy, not at `AgentConfig.build()` time.
+  It is almost always a typo between `strategyName()` and the value passed to
   `plannerStrategy(...)`.
 
 - **`StrategyConfig` is sealed** (`React` / `PlanExecute` / `Reflexion` /

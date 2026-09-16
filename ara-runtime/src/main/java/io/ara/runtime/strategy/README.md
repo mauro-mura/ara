@@ -349,9 +349,12 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
   the canonical behavior is now the empty string in both — the LLM infers "no tools" from
   the section's absence.
 - **`ExecutionPlanner`** — O(1) name → strategy lookup (`AgentConfig.plannerStrategy()`).
-  Falls back to `"react"` with a warning if the requested name isn't registered; throws
-  `IllegalStateException` at *selection* time (not build time) if even `"react"` is
-  missing. Immutable once built — there is no runtime re-registration; hot-swapping is a
+  Fail-fast: an unregistered name throws `IllegalStateException` at *selection* time
+  (not build time) listing the registered names — a typo between `strategyName()` and
+  the value passed to `plannerStrategy(...)` is an error, not a quiet degrade to
+  another strategy. (It used to fall back to `"react"` with a WARN; that guardrail was
+  removed because it silently swapped what an agent actually ran — see `docs/ADVANCED.md`.)
+  Immutable once built — there is no runtime re-registration; hot-swapping is a
   "build a new planner and re-wire the factory" operation, not a planner API.
 
 ## `StrategyConfig` (companion, defined in `ara-core`)
