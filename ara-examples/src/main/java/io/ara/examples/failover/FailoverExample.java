@@ -16,10 +16,10 @@ import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
 import io.ara.core.memory.EmbeddingClient;
 import io.ara.core.memory.EmbeddingException;
+import io.ara.examples.support.DemoEmbeddingClient;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.memory.InMemoryDocumentStore;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -77,7 +77,7 @@ import java.util.List;
 public class FailoverExample {
 
     public static void main(String[] args) {
-        System.out.println("=== ARA - LLM and embedding failover ===\n");
+        System.out.println("=== ARA — LLM and embedding failover ===\n");
 
         runLlmFailover();
         runEmbeddingFailover();
@@ -94,67 +94,67 @@ public class FailoverExample {
                 LlmException.authenticationError("llm-primary-401", "HTTP 401 - invalid API key"));
         LlmClient fallback      = new ScriptedLlmClient("llm-fallback",
                 "Sono il modello di riserva: il provider primario non era disponibile, "
-                + "ma il task e' comunque stato portato a termine.");
+                + "ma il task è comunque stato portato a termine.");
         // A second always-503 primary for the breaker scenario: its own attempt counter
         // (and its own circuit breaker) must not share history with `resilient`/`bare`.
         FailingLlmClient breakerPrimary = new FailingLlmClient("llm-breaker-primary",
                 LlmException.serverError("llm-breaker-primary", "HTTP 503 - service unavailable", 503));
 
-        AraRuntime runtime = AraRuntime.builder()
+        try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("llm-primary-503",    outagePrimary)
                 .llmClient("llm-primary-401",    authPrimary)
                 .llmClient("llm-fallback",       fallback)
                 .llmClient("llm-breaker-primary", breakerPrimary)
-                .build();
-        runtime.start();
+                .build()) {
 
-        AgentConfig resilientConfig = agent("resilient",
-                "llm-primary-503", "llm-fallback", LlmSelectionPolicy.FAILOVER);
-        AgentConfig bareConfig       = agent("bare",
-                "llm-primary-503", null,            LlmSelectionPolicy.PRIMARY_ONLY);
-        AgentConfig blindConfig      = agent("blind",
-                "llm-primary-401", "llm-fallback",  LlmSelectionPolicy.FAILOVER);
-        AgentConfig breakerConfig    = agent("breaker",
-                "llm-breaker-primary", "llm-fallback", LlmSelectionPolicy.FAILOVER);
+            runtime.start();
 
-        AraAgent resilient = runtime.createAgent(resilientConfig);
-        AraAgent bare      = runtime.createAgent(bareConfig);
-        AraAgent blind     = runtime.createAgent(blindConfig);
-        AraAgent breaker   = runtime.createAgent(breakerConfig);
+            AgentConfig resilientConfig = agent("resilient",
+                    "llm-primary-503", "llm-fallback", LlmSelectionPolicy.FAILOVER);
+            AgentConfig bareConfig       = agent("bare",
+                    "llm-primary-503", null,            LlmSelectionPolicy.PRIMARY_ONLY);
+            AgentConfig blindConfig      = agent("blind",
+                    "llm-primary-401", "llm-fallback",  LlmSelectionPolicy.FAILOVER);
+            AgentConfig breakerConfig    = agent("breaker",
+                    "llm-breaker-primary", "llm-fallback", LlmSelectionPolicy.FAILOVER);
 
-        System.out.println("[scenario] PRIMARY 503 + healthy fallback, policy FAILOVER");
-        report("resilient", resilient.execute(AgentTask.of("Che cos'e' ARA?")));
+            AraAgent resilient = runtime.createAgent(resilientConfig);
+            AraAgent bare      = runtime.createAgent(bareConfig);
+            AraAgent blind     = runtime.createAgent(blindConfig);
+            AraAgent breaker   = runtime.createAgent(breakerConfig);
 
-        System.out.println("[scenario] same PRIMARY 503, no fallback (PRIMARY_ONLY)");
-        report("bare",      bare.execute(AgentTask.of("Che cos'e' ARA?")));
+            System.out.println("[scenario] PRIMARY 503 + healthy fallback, policy FAILOVER");
+            report("resilient", resilient.execute(AgentTask.of("Che cos'è ARA?")));
 
-        System.out.println("[scenario] PRIMARY 401 + healthy fallback, policy FAILOVER");
-        report("blind",     blind.execute(AgentTask.of("Che cos'e' ARA?")));
+            System.out.println("[scenario] same PRIMARY 503, no fallback (PRIMARY_ONLY)");
+            report("bare",      bare.execute(AgentTask.of("Che cos'è ARA?")));
 
-        System.out.println("[scenario] PRIMARY 503 + healthy fallback, FAILOVER, agent kept alive");
-        for (int run = 1; run <= 6; run++) {
-            // Fixed sessionId so all six runs share one session — and therefore one wiring,
-            // one pool, one circuit breaker (ADR-039 pins the wiring to the session).
-            AgentTask breakerTask = AgentTask.of("Che cos'e' ARA?")
-                    .withSessionId(SessionId.of("breaker-demo"));
-            int triedBefore = breakerPrimary.attempts();
-            AgentResponse outcome = breaker.execute(breakerTask);
-            boolean primaryTried = breakerPrimary.attempts() > triedBefore;
-            String verdict = primaryTried
-                    ? (breakerPrimary.attempts() >= 3
-                            ? "primary failed — third strike, circuit opens"
-                            : "primary failed, fallback answered")
-                    : "circuit OPEN — primary skipped, fallback answered";
-            System.out.println("  run #" + run + " -> " + (outcome.isSuccess() ? "SUCCESS" : "FAILED")
-                    + " (" + verdict + ")");
+            System.out.println("[scenario] PRIMARY 401 + healthy fallback, policy FAILOVER");
+            report("blind",     blind.execute(AgentTask.of("Che cos'è ARA?")));
+
+            System.out.println("[scenario] PRIMARY 503 + healthy fallback, FAILOVER, agent kept alive");
+            for (int run = 1; run <= 6; run++) {
+                // Fixed sessionId so all six runs share one session — and therefore one wiring,
+                // one pool, one circuit breaker (ADR-039 pins the wiring to the session).
+                AgentTask breakerTask = AgentTask.of("Che cos'è ARA?")
+                        .withSessionId(SessionId.of("breaker-demo"));
+                int triedBefore = breakerPrimary.attempts();
+                AgentResponse outcome = breaker.execute(breakerTask);
+                boolean primaryTried = breakerPrimary.attempts() > triedBefore;
+                String verdict = primaryTried
+                        ? (breakerPrimary.attempts() >= 3
+                                ? "primary failed — third strike, circuit opens"
+                                : "primary failed, fallback answered")
+                        : "circuit OPEN — primary skipped, fallback answered";
+                System.out.println("  run #" + run + " -> " + (outcome.isSuccess() ? "SUCCESS" : "FAILED")
+                        + " (" + verdict + ")");
+            }
+            int hits = breakerPrimary.attempts();
+            System.out.println("  breaker    : primary hit " + hits + " time(s), then skipped on the last "
+                    + (6 - hits) + " run(s) — a dead endpoint is never paid a timeout per request.");
+            System.out.println("                a single trial after the 30s cooldown would re-probe it;"
+                    + " success closes the circuit. (Not waited for here — the demo must stay deterministic.)");
         }
-        int hits = breakerPrimary.attempts();
-        System.out.println("  breaker    : primary hit " + hits + " time(s), then skipped on the last "
-                + (6 - hits) + " run(s) — a dead endpoint is never paid a timeout per request.");
-        System.out.println("                a single trial after the 30s cooldown would re-probe it;"
-                + " success closes the circuit. (Not waited for here — the demo must stay deterministic.)");
-
-        runtime.stop();
         System.out.println();
     }
 
@@ -187,7 +187,8 @@ public class FailoverExample {
                 EmbeddingException.serverError("emb-primary-503", "HTTP 503 - service unavailable", 503));
         EmbeddingClient authPrimary   = new FailingEmbeddingClient("emb-primary-401",
                 EmbeddingException.authenticationError("emb-primary-401", "HTTP 401 - invalid API key"));
-        EmbeddingClient fallback      = new BagOfWordsEmbeddingClient("emb-fallback");
+        // Verbose on purpose: the pool prints which endpoint actually served each call.
+        EmbeddingClient fallback = new DemoEmbeddingClient("emb-fallback", true);
 
         EmbeddingEndpointPool failoverPool = new EmbeddingEndpointPool(List.of(outagePrimary, fallback));
         InMemoryDocumentStore kb = new InMemoryDocumentStore("failover-kb", failoverPool);
@@ -216,9 +217,9 @@ public class FailoverExample {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Demo-only stand-ins — sostituire con client reali (ara-adapters) in
-    // produzione: ogni scripted client e' un provider vero dietro la stessa
-    // interfaccia, quindi il failover qui dimostrato resta identico.
+    // Demo-only stand-ins — replace with real clients (ara-adapters) in
+    // production: each scripted client stands in for a real provider behind the
+    // same interface, so the failover shown here stays identical.
     // ══════════════════════════════════════════════════════════════════════════
 
     /** LLM that always throws the same {@code LlmException} on every call. */
@@ -284,44 +285,6 @@ public class FailoverExample {
 
         @Override
         public int dimensions() { return 64; }
-
-        @Override
-        public String providerId() { return provider; }
-    }
-
-    /**
-     * Deterministic off-line embedder: L2-normalised bag-of-words hash projected
-     * onto a fixed-size vector. Good enough for cosine similarity in the demo —
-     * NOT for production. Swapping it for a real {@link EmbeddingClient} (OpenAI,
-     * Cohere, a local sentence-embedding model) changes nothing but the vectors,
-     * because the failover mechanism sits in front of the interface, not behind it.
-     */
-    static final class BagOfWordsEmbeddingClient implements EmbeddingClient {
-        private static final int DIM = 64;
-        private final String provider;
-
-        BagOfWordsEmbeddingClient(String provider) {
-            this.provider = provider;
-        }
-
-        @Override
-        public List<Float> embed(String text) {
-            System.out.printf("  [%s] embed -> answering%n", provider);
-            float[] v = new float[DIM];
-            for (String token : text.toLowerCase().split("\\W+")) {
-                if (token.isBlank()) continue;
-                v[Math.floorMod(token.hashCode(), DIM)] += 1f;
-            }
-            float norm = 0f;
-            for (float f : v) norm += f * f;
-            norm = (float) Math.sqrt(norm);
-            List<Float> out = new ArrayList<>(DIM);
-            for (float f : v) out.add(norm > 0 ? f / norm : 0f);
-            return out;
-        }
-
-        @Override
-        public int dimensions() { return DIM; }
 
         @Override
         public String providerId() { return provider; }

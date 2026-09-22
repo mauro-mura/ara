@@ -106,23 +106,23 @@ public class MultimodalInputExample {
                     .build());
 
             System.out.printf("%n=== %s → %s ===%n", attachment.name(), llm.providerId());
-            System.out.printf("Attachment : %s (%s, %d bytes, id=%s…)%n",
+            System.out.printf("%-13s : %s (%s, %d bytes, id=%s…)%n", "Attachment",
                     attachment.name(), attachment.mimeType(), attachment.sizeBytes(),
                     attachment.mediaId().substring(0, 12));
-            System.out.printf("Question   : %s%n",
+            System.out.printf("%-13s : %s%n", "Question",
                     question.isBlank() ? "(none — the document is the request)" : question);
 
             AgentResponse response = agent.execute(AgentTask.of(question, List.of(attachment)));
 
-            System.out.printf("Success    : %s%n", response.isSuccess());
+            System.out.printf("%-13s : %s%n", "Success", response.isSuccess());
             if (response.isSuccess()) {
-                System.out.printf("Answer     : %s%n", response.content());
+                System.out.printf("%-13s : %s%n", "Answer", response.content());
             } else {
                 // What an unsupported media type looks like: named, and never a fluent answer
                 // about a document the model was not sent.
-                System.out.printf("Failed     : %s%n", response.failureReason());
+                System.out.printf("%-13s : %s%n", "Failed", response.failureReason());
             }
-            System.out.printf("Tokens     : %d%n", response.totalTokens());
+            System.out.printf("%-13s : %d%n", "Tokens", response.totalTokens());
         }
     }
 

@@ -11,10 +11,10 @@ import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.memory.EmbeddingClient;
+import io.ara.examples.support.DemoEmbeddingClient;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.memory.InMemoryDocumentStore;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -47,11 +47,16 @@ import java.util.List;
  *   <li>for a production-scale knowledge base swap {@link InMemoryDocumentStore}
  *       for {@code DocumentStore} (Qdrant-backed) — same {@code Retriever} contract.</li>
  * </ul>
+ *
+ * <p>{@link DemoEmbeddingClient} is shared with {@code MemoryAgentExample}, which uses
+ * the same vectorisation technique for its episodic recall.
+ *
+ * @see io.ara.examples.memory.MemoryAgentExample — shares DemoEmbeddingClient for episodic recall
  */
 public class RagAgentExample {
 
     public static void main(String[] args) {
-        System.out.println("=== ARA - RAG agent inside a multi-agent architecture ===\n");
+        System.out.println("=== ARA — RAG agent inside a multi-agent architecture ===\n");
 
         // ── 1. Knowledge base — no external vector DB required for this demo ────
         EmbeddingClient embeddings = new DemoEmbeddingClient();
@@ -62,116 +67,84 @@ public class RagAgentExample {
                 + "Sessioni concorrenti sullo stesso agente sono isolate tramite un "
                 + "ReentrantLock dedicato; la SessionBusyPolicy (REJECT o ENQUEUE) decide "
                 + "cosa succede quando un secondo task arriva sulla stessa sessione mentre "
-                + "la precedente e' ancora in esecuzione.");
+                + "la precedente è ancora in esecuzione.");
         kb.indexDocument("adr-030", "LLM routing (ADR-030)",
                 "Il LlmRouter risolve il LlmClient da usare in base alla LlmSelectionPolicy "
                 + "dell'agente: PRIMARY_ONLY, FAILOVER o ROUND_ROBIN, con fallback su un "
                 + "override inline (baseUrl+modelName) o sul client di default registrato.");
         kb.indexDocument("rag", "Retrieval-Augmented Generation in ARA",
                 "RetrievalAugmentedStrategy avvolge qualsiasi ExecutionStrategy: recupera i "
-                + "passaggi piu' rilevanti una sola volta per task e li inietta nel messaggio "
-                + "di sistema tramite un LlmClient decorator, cosi' la strategia sottostante "
+                + "passaggi più rilevanti una sola volta per task e li inietta nel messaggio "
+                + "di sistema tramite un LlmClient decorator, così la strategia sottostante "
                 + "(ReAct o Plan-Execute) resta ignara del retrieval.");
 
-        System.out.printf("Knowledge base indicizzata: %d documenti%n%n", kb.listDocuments().size());
+        System.out.printf("Knowledge base indexed: %d documents%n%n", kb.listDocuments().size());
 
-        // ── 2. Runtime — .retriever(kb) auto-registra "rag+react"/"rag+plan-execute" ─
-        AraRuntime runtime = AraRuntime.builder()
+        // ── 2. Runtime — .retriever(kb) auto-registers "rag+react"/"rag+plan-execute" ─
+        try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("kb-llm",           new KbAgentScript())
                 .llmClient("orchestrator-llm", new OrchestratorScript())
                 .retriever(kb)
-                .build();
-        runtime.start();
+                .build()) {
 
-        // ── 3. L'agente RAG ──────────────────────────────────────────────────────
-        AgentConfig kbAgentConfig = AgentConfig.defaults()
-                .agentId(AgentId.of("kb-agent"))
-                .agentType("knowledge-base")
-                .systemPrompt("Sei l'agente di knowledge-base di ARA. Rispondi solo sulla base "
-                        + "del contesto recuperato (## Retrieved Context).")
-                .primaryLlm(LlmProfile.of("kb-llm"))
-                .plannerStrategy("rag+react")   // ReactStrategy avvolta da RAG
-                .enabledTools(List.of())        // niente tool: solo retrieval + LLM
-                .maxIterations(3)
-                .build();
-        runtime.createAgent(kbAgentConfig);
-        System.out.println("Agente creato: kb-agent (strategia rag+react)");
+            runtime.start();
 
-        // ── 4. L'orchestratore — delega a kb-agent via delegate_task ─────────────
-        AgentConfig orchestratorConfig = AgentConfig.defaults()
-                .agentId(AgentId.of("orchestrator"))
-                .agentType("orchestrator")
-                .systemPrompt("Coordini una squadra di agenti. Per domande sull'architettura "
-                        + "di ARA, delega a 'kb-agent' con il tool delegate_task.")
-                .primaryLlm(LlmProfile.of("orchestrator-llm"))
-                .plannerStrategy("react")
-                .enabledTools(List.of("delegate_task"))
-                .maxIterations(5)
-                .build();
-        AraAgent orchestrator = runtime.createAgent(orchestratorConfig);
-        System.out.println("Agente creato: orchestrator (strategia react + delegate_task)\n");
+            // ── 3. The RAG agent ────────────────────────────────────────────────
+            AgentConfig kbAgentConfig = AgentConfig.defaults()
+                    .agentId(AgentId.of("kb-agent"))
+                    .agentType("knowledge-base")
+                    .systemPrompt("Sei l'agente di knowledge-base di ARA. Rispondi solo sulla base "
+                            + "del contesto recuperato (## Retrieved Context).")
+                    .primaryLlm(LlmProfile.of("kb-llm"))
+                    .plannerStrategy("rag+react")   // ReactStrategy avvolta da RAG
+                    .enabledTools(List.of())        // niente tool: solo retrieval + LLM
+                    .maxIterations(3)
+                    .build();
+            runtime.createAgent(kbAgentConfig);
+            System.out.println("Agent created: kb-agent (strategy rag+react)");
 
-        // ── 5. Esecuzione ─────────────────────────────────────────────────────────
-        AgentTask task = AgentTask.of(
-                "Come gestisce ARA la concorrenza tra sessioni sullo stesso agente?");
-        System.out.printf("Task all'orchestrator: %s%n%n", task.input());
+            // ── 4. The orchestrator — delegates to kb-agent via delegate_task ────
+            AgentConfig orchestratorConfig = AgentConfig.defaults()
+                    .agentId(AgentId.of("orchestrator"))
+                    .agentType("orchestrator")
+                    .systemPrompt("Coordini una squadra di agenti. Per domande sull'architettura "
+                            + "di ARA, delega a 'kb-agent' con il tool delegate_task.")
+                    .primaryLlm(LlmProfile.of("orchestrator-llm"))
+                    .plannerStrategy("react")
+                    .enabledTools(List.of("delegate_task"))
+                    .maxIterations(5)
+                    .build();
+            AraAgent orchestrator = runtime.createAgent(orchestratorConfig);
+            System.out.println("Agent created: orchestrator (strategy react + delegate_task)\n");
 
-        AgentResponse response = orchestrator.execute(task);
+            // ── 5. Execution ─────────────────────────────────────────────────────
+            AgentTask task = AgentTask.of(
+                    "Come gestisce ARA la concorrenza tra sessioni sullo stesso agente?");
+            System.out.printf("Task to the orchestrator: %s%n%n", task.input());
 
-        System.out.println("\n=== Risultato ===");
-        System.out.printf("Success    : %s%n", response.isSuccess());
-        System.out.printf("Answer     : %s%n", response.content());
-        System.out.printf("Iterations : %d%n", response.iterationsUsed());
-        System.out.printf("Tokens     : %d%n", response.totalTokens());
+            AgentResponse response = orchestrator.execute(task);
 
-        runtime.stop();
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // Demo-only stand-ins — sostituire con implementazioni reali in produzione
-    // ══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Embedding deterministico, senza dipendenze esterne: hash bag-of-words
-     * proiettato su un vettore a dimensione fissa, poi normalizzato L2. Sufficiente
-     * a far funzionare la cosine similarity per la demo — NON adatto alla
-     * produzione (usare un vero {@link EmbeddingClient}: OpenAI, Cohere, un modello
-     * locale di sentence-embedding, ecc., tutti intercambiabili dietro la stessa
-     * interfaccia).
-     */
-    static final class DemoEmbeddingClient implements EmbeddingClient {
-        private static final int DIM = 64;
-
-        @Override
-        public List<Float> embed(String text) {
-            float[] v = new float[DIM];
-            for (String token : text.toLowerCase().split("\\W+")) {
-                if (token.isBlank()) continue;
-                int bucket = Math.floorMod(token.hashCode(), DIM);
-                v[bucket] += 1f;
-            }
-            float norm = 0f;
-            for (float f : v) norm += f * f;
-            norm = (float) Math.sqrt(norm);
-            List<Float> out = new ArrayList<>(DIM);
-            for (float f : v) out.add(norm > 0 ? f / norm : 0f);
-            return out;
+            System.out.println("\n=== Result ===");
+            System.out.printf("%-13s : %s%n", "Success", response.isSuccess());
+            System.out.printf("%-13s : %s%n", "Answer", response.content());
+            System.out.printf("%-13s : %d%n", "Iterations", response.iterationsUsed());
+            System.out.printf("%-13s : %d%n", "Tokens", response.totalTokens());
         }
-
-        @Override
-        public int dimensions() { return DIM; }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // Demo-only stand-ins — replace with real implementations in production
+    // ══════════════════════════════════════════════════════════════════════════
+
     /**
-     * Risposte scriptate per kb-agent: risponde sempre sulla base del blocco
-     * "## Retrieved Context" iniettato da RetrievalAugmentedStrategy nel primo
-     * messaggio di sistema.
+     * Scripted replies for kb-agent: always answers from the "## Retrieved Context"
+     * block injected by RetrievalAugmentedStrategy into the first system message.
      */
     static final class KbAgentScript implements LlmClient {
         @Override
         public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext ctx) {
             String systemMsg = messages.get(0).content();
-            System.out.println("  [kb-agent] contesto recuperato e iniettato nel system prompt:");
+            System.out.println("  [kb-agent] context retrieved and injected into the system prompt:");
             int shown = Math.min(systemMsg.length(), 260);
             System.out.println("  " + systemMsg.substring(0, shown).replace("\n", "\n  ") + "...\n");
 
@@ -188,9 +161,9 @@ public class RagAgentExample {
     }
 
     /**
-     * Risposte scriptate per l'orchestrator: alla prima chiamata delega a
-     * kb-agent, alla seconda (dopo l'Observation con la risposta delegata)
-     * restituisce FINAL_ANSWER.
+     * Scripted replies for the orchestrator: the first call delegates to
+     * kb-agent, the second (after the Observation carrying the delegated answer)
+     * returns FINAL_ANSWER.
      */
     static final class OrchestratorScript implements LlmClient {
         @Override

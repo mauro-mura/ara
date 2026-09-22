@@ -84,11 +84,10 @@ public final class ClassifyAndActExample {
         PipelineResult result = triage.run(ticket);
 
         System.out.println();
-        System.out.println("Ticket     : " + ticket);
-        System.out.println("Path taken : " + result.stepsExecuted());
-        System.out.println("Outcome    : " + (result.success()
-                ? result.finalOutput()
-                : "FAILED — " + result.failureReason()));
+        System.out.printf("%-13s : %s%n", "Ticket", ticket);
+        System.out.printf("%-13s : %s%n", "Path taken", result.stepsExecuted());
+        System.out.printf("%-13s : %s%n", "Outcome",
+                result.success() ? result.finalOutput() : "FAILED — " + result.failureReason());
     }
 
     /**

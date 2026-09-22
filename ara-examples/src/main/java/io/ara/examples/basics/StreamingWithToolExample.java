@@ -1,31 +1,29 @@
 package io.ara.examples.basics;
 
+import io.ara.adapters.llm.openai.OpenAiLlmClient;
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentExecutionContext;
 import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
-import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
-import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
-import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
-import io.ara.adapters.llm.openai.OpenAiLlmClient;
+import io.ara.examples.support.Live;
+import io.ara.examples.support.StreamingLlmStub;
+import io.ara.examples.support.Tools;
 import io.ara.runtime.AraRuntime;
 
 import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.Flow;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Token streaming through a full ReAct loop that also calls a tool.
+ *
+ * @see SimpleStreamingExample — the minimal one-turn streaming agent
+ * @see io.ara.examples.web.StreamingChatWebExample — the same streaming pattern in a browser
  *
  * <p>Runs offline by default with a stub LLM. Pass {@code live} as the first argument (or
  * {@code -Dara.example.live=true}) to point it at a real OpenAI-compatible endpoint instead
@@ -85,34 +83,24 @@ public class StreamingWithToolExample {
 
     // ── Live endpoint (used only with the "live" arg or -Dara.example.live=true) ──────────
     /** OpenAI-compatible base URL. {@code /v1} suffix included, as LM Studio / vLLM expect. */
-    private static final String LIVE_BASE_URL = "http://192.168.1.114:1234/v1";
+    private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
     // private static final String LIVE_MODEL = "llama-3.1-8b-instruct";
     private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
     /** LM Studio ignores the key but langchain4j requires a non-blank string. Override with
      *  {@code -Dara.api.key=...} or {@code ARA_API_KEY} if your gateway does check it. */
-    private static final String LIVE_API_KEY  = firstNonBlank(
-            System.getProperty("ara.api.key"), System.getenv("ARA_API_KEY"), "not-required");
-
-    private static boolean liveRequested(String[] args) {
-        return Boolean.getBoolean("ara.example.live")
-                || (args.length > 0 && args[0].equalsIgnoreCase("live"));
-    }
-
-    private static String firstNonBlank(String... values) {
-        for (String v : values) if (v != null && !v.isBlank()) return v;
-        return "";
-    }
+    private static final String LIVE_API_KEY  = Live.apiKey("not-required");
 
     public static void main(String[] args) {
 
-        boolean live = liveRequested(args);
+        boolean live = Live.requested(args);
         LlmClient llmClient = live
                 ? OpenAiLlmClient.builder()
                         .baseUrl(LIVE_BASE_URL)
                         .apiKey(LIVE_API_KEY)
                         .modelName(LIVE_MODEL)
                         .build()
-                : new WordByWordLlmClient(TOKEN_DELAY_MILLIS);
+                : new StreamingLlmStub(StreamingWithToolExample::scriptFor,
+                        TOKEN_DELAY_MILLIS, "word-by-word-stub");
 
         System.out.println("=== ARA — token streaming through a tool-using agent ===");
         System.out.printf("LLM: %s%n%n", live
@@ -121,7 +109,7 @@ public class StreamingWithToolExample {
 
         try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("weather-model", llmClient)
-                .toolRegistry(new WeatherToolRegistry())
+                .toolRegistry(Tools.registry(getWeatherTool()))
                 .interceptors(List.of(new ObservationInterceptor()))
                 .build()) {
 
@@ -284,80 +272,30 @@ public class StreamingWithToolExample {
     // Stub LLM that streams natively, word by word
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Replays a two-turn script. {@link #complete} returns the whole turn at once (used on
-     * the blocking path, and as {@code streamAndCollect}'s blank-stream fallback); {@link
-     * #stream} emits the same text one word-plus-whitespace chunk at a time.
-     */
-    static final class WordByWordLlmClient implements LlmClient {
-
-        private static final Pattern CHUNK = Pattern.compile("\\S+\\s*|\\s+");
-
-        private final long tokenDelayMillis;
-
-        WordByWordLlmClient(long tokenDelayMillis) {
-            this.tokenDelayMillis = tokenDelayMillis;
+    /** Turn 1 until an observation is in context, turn 2 afterwards. Streamed word by
+     *  word by {@link StreamingLlmStub} — the {@code complete}/{@code stream} split of the
+     *  stub returns this same text either all at once or chunked. */
+    private static String scriptFor(List<LlmMessage> messages) {
+        boolean hasObservation = messages.stream()
+                .anyMatch(m -> m.content() != null && m.content().contains("Observation:"));
+        if (!hasObservation) {
+            return "Per rispondere devo conoscere le condizioni attuali della città. "
+                 + "Interrogo lo strumento dedicato con la città richiesta.\n"
+                 + "{\"tool_id\":\"get_weather\",\"arguments\":{\"city\":\"Roma\"}}";
         }
-
-        /** Turn 1 until an observation is in context, turn 2 afterwards. */
-        private static String scriptFor(List<LlmMessage> messages) {
-            boolean hasObservation = messages.stream()
-                    .anyMatch(m -> m.content() != null && m.content().contains("Observation:"));
-            if (!hasObservation) {
-                return "Per rispondere devo conoscere le condizioni attuali della città. "
-                     + "Interrogo lo strumento dedicato con la città richiesta.\n"
-                     + "{\"tool_id\":\"get_weather\",\"arguments\":{\"city\":\"Roma\"}}";
-            }
-            return "Action: FINAL_ANSWER\n"
-                 + "Answer: A Roma ci sono 24 gradi con cielo sereno e vento debole da nord-ovest. "
-                 + "Non sono previste precipitazioni nelle prossime ore, quindi l'ombrello non serve: "
-                 + "è una buona giornata per stare all'aperto.";
-        }
-
-        @Override
-        public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
-            return new LlmCompletion(scriptFor(messages), 40, 30, "stop", null);
-        }
-
-        @Override
-        public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-            String text = scriptFor(messages);
-            return subscriber -> {
-                AtomicBoolean cancelled = new AtomicBoolean(false);
-                subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override public void request(long n) { /* push-based, like TokenStreamPublisher */ }
-                    @Override public void cancel() { cancelled.set(true); }
-                });
-                try {
-                    Matcher m = CHUNK.matcher(text);
-                    while (m.find()) {
-                        if (cancelled.get()) return;
-                        subscriber.onNext(m.group());
-                        if (tokenDelayMillis > 0) Thread.sleep(tokenDelayMillis);
-                    }
-                    subscriber.onComplete();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    subscriber.onError(e);
-                } catch (RuntimeException e) {
-                    subscriber.onError(e);
-                }
-            };
-        }
-
-        @Override
-        public String providerId() {
-            return "word-by-word-stub";
-        }
+        return "Action: FINAL_ANSWER\n"
+             + "Answer: A Roma ci sono 24 gradi con cielo sereno e vento debole da nord-ovest. "
+             + "Non sono previste precipitazioni nelle prossime ore, quindi l'ombrello non serve: "
+             + "è una buona giornata per stare all'aperto.";
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // A single get_weather tool
     // ═══════════════════════════════════════════════════════════════════════════
 
-    static final class WeatherToolRegistry implements ToolRegistry {
-
-        private final AraTool weather = new AraTool() {
+    /** The single {@code get_weather} tool, wrapped by {@code Tools.registry(...)} above. */
+    private static AraTool getWeatherTool() {
+        return new AraTool() {
             @Override public String toolId()      { return "get_weather"; }
             @Override public String description() { return "Restituisce le condizioni meteo attuali per una città."; }
             @Override public String argumentSchema() {
@@ -372,22 +310,5 @@ public class StreamingWithToolExample {
                         city + ": 24°C, sereno, vento 8 km/h NO, nessuna precipitazione prevista");
             }
         };
-
-        @Override
-        public List<AraTool> resolveEnabled(List<String> ids) {
-            return ids.contains("get_weather") ? List.of(weather) : List.of();
-        }
-
-        @Override
-        public Optional<AraTool> findById(String toolId) {
-            return "get_weather".equals(toolId) ? Optional.of(weather) : Optional.empty();
-        }
-
-        @Override
-        public ToolResult execute(String toolId, String argumentJson) {
-            return findById(toolId)
-                    .map(t -> t.execute(argumentJson))
-                    .orElseGet(() -> ToolResult.failure(toolId, "Tool not found: " + toolId));
-        }
     }
 }

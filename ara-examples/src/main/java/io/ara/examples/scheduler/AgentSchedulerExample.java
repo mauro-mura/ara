@@ -57,68 +57,69 @@ public final class AgentSchedulerExample {
         // ── 2. Build the runtime and register the agent so the scheduler can find it ─
         // The runtime requires at least one LlmClient even when nothing uses it: the
         // scheduled agent is deterministic, so this scripted stub is never actually called.
-        AraRuntime runtime = AraRuntime.builder()
+        try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("unused", ScriptedLlmClient.script().build())
-                .build();
-        runtime.start();
-        runtime.registry().register(heartbeat);
+                .build()) {
 
-        AgentScheduler scheduler = runtime.scheduler();
+            runtime.start();
+            runtime.registry().register(heartbeat);
 
-        // ── 3. A fixed-interval schedule — fires once per second ─────────────────
-        scheduler.register(AgentSchedule.builder()
-                .scheduleId("heartbeat-1s")
-                .agentId(heartbeatId)
-                .every(Duration.ofSeconds(1))
-                .withInput("tick")
-                .build());
-        System.out.println("Registered 'heartbeat-1s' (every 1s). Letting it fire ~3 times:\n");
-        Thread.sleep(3_200);
+            AgentScheduler scheduler = runtime.scheduler();
 
-        // ── 4. Inspect what is registered ────────────────────────────────────────
-        System.out.println("\nRegistered schedules:");
-        scheduler.list().forEach(s ->
-                System.out.printf("  - %s → agent %s%n", s.scheduleId(), s.agentId().value()));
+            // ── 3. A fixed-interval schedule — fires once per second ─────────────────
+            scheduler.register(AgentSchedule.builder()
+                    .scheduleId("heartbeat-1s")
+                    .agentId(heartbeatId)
+                    .every(Duration.ofSeconds(1))
+                    .withInput("tick")
+                    .build());
+            System.out.println("Registered 'heartbeat-1s' (every 1s). Letting it fire ~3 times:\n");
+            Thread.sleep(3_200);
 
-        // ── 5. Fire once, immediately, regardless of the next scheduled instant ──
-        System.out.println("\ntriggerNow('heartbeat-1s') — one immediate off-cycle run:");
-        scheduler.triggerNow("heartbeat-1s").get();   // block until this one-shot completes
+            // ── 4. Inspect what is registered ────────────────────────────────────────
+            System.out.println("\nRegistered schedules:");
+            scheduler.list().forEach(s ->
+                    System.out.printf("  - %s → agent %s%n", s.scheduleId(), s.agentId().value()));
 
-        // ── 6. Pause, prove it stops firing, then resume ─────────────────────────
-        System.out.println("\nPausing 'heartbeat-1s' for ~2s (no heartbeats expected):");
-        scheduler.pause("heartbeat-1s");
-        int before = fireCount.get();
-        Thread.sleep(2_000);
-        System.out.printf("  fires during pause: %d (expected 0)%n", fireCount.get() - before);
+            // ── 5. Fire once, immediately, regardless of the next scheduled instant ──
+            System.out.println("\ntriggerNow('heartbeat-1s') — one immediate off-cycle run:");
+            scheduler.triggerNow("heartbeat-1s").get();   // block until this one-shot completes
 
-        System.out.println("Resuming 'heartbeat-1s' for ~2s:\n");
-        scheduler.resume("heartbeat-1s");
-        Thread.sleep(2_200);
+            // ── 6. Pause, prove it stops firing, then resume ─────────────────────────
+            System.out.println("\nPausing 'heartbeat-1s' for ~2s (no heartbeats expected):");
+            scheduler.pause("heartbeat-1s");
+            int before = fireCount.get();
+            Thread.sleep(2_000);
+            System.out.printf("  fires during pause: %d (expected 0)%n", fireCount.get() - before);
 
-        // ── 7. Cancel it — it is gone from the registry ──────────────────────────
-        scheduler.cancel("heartbeat-1s");
-        System.out.printf("%nCancelled 'heartbeat-1s'. Schedules now registered: %d%n",
-                scheduler.list().size());
+            System.out.println("Resuming 'heartbeat-1s' for ~2s:\n");
+            scheduler.resume("heartbeat-1s");
+            Thread.sleep(2_200);
 
-        // ── 8. A cron schedule — registered but not awaited (fires weekdays 09:00) ─
-        scheduler.register(AgentSchedule.builder()
-                .scheduleId("morning-report")
-                .agentId(heartbeatId)
-                .cron("0 9 * * MON-FRI")   // minute hour day-of-month month day-of-week
-                .withInput("Generate the daily report")
-                .build());
-        System.out.println("""
+            // ── 7. Cancel it — it is gone from the registry ──────────────────────────
+            scheduler.cancel("heartbeat-1s");
+            System.out.printf("%nCancelled 'heartbeat-1s'. Schedules now registered: %d%n",
+                    scheduler.list().size());
 
-                Registered 'morning-report' with cron "0 9 * * MON-FRI"
-                (every weekday at 09:00 — not awaited here). Cron fields support
-                lists, ranges and steps too, e.g.:
-                  "*/15 * * * *"      every 15 minutes
-                  "0 9,13,17 * * *"   at 09:00, 13:00 and 17:00
-                  "0 0 1,15 * *"      at midnight on the 1st and the 15th""");
+            // ── 8. A cron schedule — registered but not awaited (fires weekdays 09:00) ─
+            scheduler.register(AgentSchedule.builder()
+                    .scheduleId("morning-report")
+                    .agentId(heartbeatId)
+                    .cron("0 9 * * MON-FRI")   // minute hour day-of-month month day-of-week
+                    .withInput("Generate the daily report")
+                    .build());
+            System.out.println("""
 
-        // ── 9. Cleanup — stop() cancels every schedule and shuts the runtime down ─
+                    Registered 'morning-report' with cron "0 9 * * MON-FRI"
+                    (every weekday at 09:00 — not awaited here). Cron fields support
+                    lists, ranges and steps too, e.g.:
+                      "*/15 * * * *"      every 15 minutes
+                      "0 9,13,17 * * *"   at 09:00, 13:00 and 17:00
+                      "0 0 1,15 * *"      at midnight on the 1st and the 15th""");
+        }
+
+        // ── 9. Cleanup — closing the runtime cancels every schedule and shuts it down ─
         System.out.printf("%nTotal heartbeats fired: %d%n", fireCount.get());
-        runtime.stop();
         System.out.println("Runtime stopped — all schedules cancelled.");
     }
 }

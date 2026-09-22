@@ -4,6 +4,7 @@ import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.SessionId;
 import io.ara.core.common.AgentId;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
@@ -13,6 +14,7 @@ import io.ara.core.llm.LlmProfile;
 import io.ara.core.memory.EmbeddingClient;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticStore;
+import io.ara.examples.support.DemoEmbeddingClient;
 import io.ara.runtime.AraRuntime;
 
 import java.util.ArrayList;
@@ -47,11 +49,12 @@ import java.util.Map;
  *       — vague on purpose, so this demo cannot cheat by having the summary accidentally repeat
  *       the one keyword ("Nimbus") the final question needs.</li>
  *   <li>Before anything is summarised away, its original text is offloaded into a
- *       {@link SemanticStore} (D3). It is that store — not the summary — that makes the fact
- *       recoverable.</li>
+ *       {@link SemanticStore} (the episodic-offload step). It is that store — not the
+ *       summary — that makes the fact recoverable.</li>
  *   <li>Turn 7 asks a question about the project. By then turn 2 is long gone from the raw
  *       window (summarised away like everything else in the middle). The only way the agent
- *       still answers correctly is {@code recallRelevant} (D4): it embeds the question, searches
+ *       still answers correctly is {@code recallRelevant} (the episodic-recall step): it
+ *       embeds the question, searches
  *       the episodic store, and re-injects the original turn-2 text at the head of the window
  *       — this run prints the exact message list the LLM receives, so you can see it happen.</li>
  * </ol>
@@ -60,12 +63,16 @@ import java.util.Map;
  * deterministic and needs no API key. To use this for real:
  * <ul>
  *   <li>replace {@link DemoEmbeddingClient} with a real {@link EmbeddingClient}
- *       (e.g. an OpenAI {@code text-embedding-3-small} wrapper);</li>
+ *       (e.g. an OpenAI {@code text-embedding-3-small} wrapper); the bag-of-words stand-in
+ *       below is shared with {@code RagAgentExample}, which uses the identical technique;</li>
  *   <li>replace {@link DemoSemanticStore} with {@code QdrantSemanticStore} (same interface —
  *       nothing else in this example would need to change);</li>
  *   <li>replace {@code AssistantScript}/{@code SummarizerScript} with real {@code LlmClient}s
  *       from {@code ara-adapters}.</li>
  * </ul>
+ *
+ * @see io.ara.examples.rag.RagAgentExample — shares DemoEmbeddingClient and the vectorisation
+ *     technique
  */
 public class MemoryAgentExample {
 
@@ -75,132 +82,104 @@ public class MemoryAgentExample {
             + "AI con memoria a lungo termine.";
 
     public static void main(String[] args) {
-        System.out.println("=== ARA - Gestione avanzata della memoria di un agente (ADR-0086) ===\n");
+        System.out.println("=== ARA — advanced working-memory management (ADR-0086) ===\n");
 
-        // ── 1. Collaboratori dell'offload episodico — nessun servizio esterno richiesto ──
+        // ── 1. Episodic-offload collaborators — no external service required ────────
         EmbeddingClient embeddings = new DemoEmbeddingClient();
         DemoSemanticStore episodicStore = new DemoSemanticStore();
 
-        // ── 2. Runtime — .embeddingClient/.semanticStore alimentano il manager di default ──
-        // Nessuna delle due chiamate è obbligatoria: senza, l'agente con budget avrebbe
-        // comunque sfratto/riassunto, ma senza offload né recall (ADR-0086, "ignorato se
-        // l'altro collaboratore non è impostato").
-        AraRuntime runtime = AraRuntime.builder()
+        // ── 2. Runtime — .embeddingClient/.semanticStore feed the default manager ──
+        // Neither call is mandatory: without them, a budgeted agent would still get
+        // eviction/summarisation, but no offload and no recall (ADR-0086: "ignored when
+        // the other collaborator is not set").
+        try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("assistant-llm",  new AssistantScript())
                 .llmClient("summarizer-llm", new SummarizerScript())
                 .embeddingClient(embeddings)
                 .semanticStore(episodicStore)
-                .build();
-        runtime.start();
+                .build()) {
 
-        // ── 3. L'agente riassuntore — un AraAgent qualunque, non un componente speciale ──
-        AgentConfig summarizerConfig = AgentConfig.defaults()
-                .agentId(AgentId.of("summarizer"))
-                .agentType("summarizer")
-                .systemPrompt("Riassumi il testo ricevuto in una riga, in modo generico.")
-                .primaryLlm(LlmProfile.of("summarizer-llm"))
-                .plannerStrategy("react")
-                .enabledTools(List.of())
-                .maxIterations(1)
-                .build();
-        runtime.createAgent(summarizerConfig);
-        System.out.println("Agente creato: summarizer (userà solo l'agente riassuntore in eviction)\n");
+            runtime.start();
 
-        // ── 4. L'agente principale — budget piccolo, SUMMARIZE, riassuntore nominato per id ──
-        AgentId assistantId = AgentId.of("assistant");
-        AgentConfig assistantConfig = AgentConfig.defaults()
-                .agentId(assistantId)
-                .agentType("assistant")
-                .systemPrompt("Sei un assistente personale. Rispondi in una frase.")
-                .primaryLlm(LlmProfile.of("assistant-llm"))
-                .plannerStrategy("react")
-                .enabledTools(List.of())
-                .maxIterations(2)
-                .maxConversationTurns(20)          // rigioca l'intera storia ogni turno
-                .workingMemoryTokenBudget(60)       // piccolo di proposito: forza lo sfratto presto
-                .workingMemoryEviction("summarize") // invece di scartare, riassumi
-                .contextSummarizerAgentId("summarizer")   // risolto da AgentRegistry a wiring-time
-                .build();
-        AraAgent assistant = runtime.createAgent(assistantConfig);
-        System.out.printf("Agente creato: assistant (budget=%d token, eviction=summarize)%n%n",
-                assistantConfig.workingMemoryTokenBudget());
+            // ── 3. The summariser agent — an ordinary AraAgent, not a special component ──
+            AgentConfig summarizerConfig = AgentConfig.defaults()
+                    .agentId(AgentId.of("summarizer"))
+                    .agentType("summarizer")
+                    .systemPrompt("Riassumi il testo ricevuto in una riga, in modo generico.")
+                    .primaryLlm(LlmProfile.of("summarizer-llm"))
+                    .plannerStrategy("react")
+                    .enabledTools(List.of())
+                    .maxIterations(1)
+                    .build();
+            runtime.createAgent(summarizerConfig);
+            System.out.println("Agent created: summarizer (used only by the assistant's eviction)\n");
 
-        io.ara.core.agent.SessionId session = io.ara.core.agent.SessionId.of("conversazione-1");
+            // ── 4. The main agent — small budget, SUMMARIZE, summariser named by id ────
+            AgentId assistantId = AgentId.of("assistant");
+            AgentConfig assistantConfig = AgentConfig.defaults()
+                    .agentId(assistantId)
+                    .agentType("assistant")
+                    .systemPrompt("Sei un assistente personale. Rispondi in una frase.")
+                    .primaryLlm(LlmProfile.of("assistant-llm"))
+                    .plannerStrategy("react")
+                    .enabledTools(List.of())
+                    .maxIterations(2)
+                    .maxConversationTurns(20)          // replays the whole history on every turn
+                    .workingMemoryTokenBudget(60)       // small on purpose: forces eviction early
+                    .workingMemoryEviction("summarize") // instead of dropping, summarise
+                    .contextSummarizerAgentId("summarizer")   // resolved from AgentRegistry at wiring-time
+                    .build();
+            AraAgent assistant = runtime.createAgent(assistantConfig);
+            System.out.printf("Agent created: assistant (budget=%d tokens, eviction=summarize)%n%n",
+                    assistantConfig.workingMemoryTokenBudget());
 
-        // ── 5. La conversazione — un fatto importante, poi solo rumore ──────────────────
-        String[] turns = {
-                "Mi chiamo Marco, lavoro come ingegnere del software a Torino.",
-                KEY_FACT,
-                "Il mio gatto si chiama Pixel ed è nero.",
-                "Oggi ho bevuto tre caffè, forse troppi.",
-                "Il weekend scorso sono andato in montagna con degli amici.",
-                "Sto imparando a suonare la chitarra da qualche mese.",
-        };
-        for (int i = 0; i < turns.length; i++) {
-            say(assistant, session, turns[i], "turno " + (i + 1));
+            SessionId session = SessionId.of("conversation-1");
+
+            // ── 5. The conversation — one important fact, then mostly noise ────────────
+            String[] turns = {
+                    "Mi chiamo Marco, lavoro come ingegnere del software a Torino.",
+                    KEY_FACT,
+                    "Il mio gatto si chiama Pixel ed è nero.",
+                    "Oggi ho bevuto tre caffè, forse troppi.",
+                    "Il weekend scorso sono andato in montagna con degli amici.",
+                    "Sto imparando a suonare la chitarra da qualche mese.",
+            };
+            for (int i = 0; i < turns.length; i++) {
+                say(assistant, session, turns[i], "turn " + (i + 1));
+            }
+
+            // ── 6. The question — the correct answer is no longer in the raw window ────
+            System.out.println("── Question that needs the fact now out of the raw window ──");
+            AgentResponse answer = say(assistant, session,
+                    "Come si chiama il progetto di cui ti ho parlato e cosa deve supportare?", "final question");
+
+            System.out.println("\n=== Verification ===");
+            boolean recalled = answer.content() != null && answer.content().contains("Nimbus");
+            System.out.printf("%-13s : %s%n", "Answer cites 'Nimbus'", recalled);
+            System.out.printf("%-13s : %d%n", "Offloaded entries",
+                    episodicStore.countFor(assistantId.value()));
+            System.out.println("(a high number is expected: the window is rebuilt from scratch on every "
+                    + "turn from the full history, so the same old turns are re-evaluated and "
+                    + "re-offloaded on every round — offload is best-effort, with no deduplication, "
+                    + "in this increment of ADR-0086/ADR-0078)");
+            System.out.println(recalled
+                    ? "→ the episodic store recalled the fact that was no longer in the raw window."
+                    : "→ something went wrong: try raising workingMemoryTokenBudget or the number of turns.");
         }
-
-        // ── 6. La domanda — la risposta corretta non è più nella finestra grezza ────────
-        System.out.println("--- Domanda che richiede il fatto ormai fuori dalla finestra ---");
-        AgentResponse answer = say(assistant, session,
-                "Come si chiama il progetto di cui ti ho parlato e cosa deve supportare?", "domanda finale");
-
-        System.out.println("\n=== Verifica ===");
-        boolean recalled = answer.content() != null && answer.content().contains("Nimbus");
-        System.out.printf("Risposta cita 'Nimbus' : %s%n", recalled);
-        System.out.printf("Voci offloaded per l'agente : %d%n",
-                episodicStore.byAgent.getOrDefault(assistantId.value(), List.of()).size());
-        System.out.println("(un numero alto è atteso: la finestra si ricostruisce da zero a ogni "
-                + "turno dalla storia completa, quindi gli stessi turni vecchi vengono rivalutati "
-                + "e ri-offloaded a ogni giro — l'offload è best-effort, senza deduplicazione, "
-                + "in questo incremento di ADR-0086/ADR-0078)");
-        System.out.println(recalled
-                ? "-> la memoria episodica ha recuperato il fatto che non era più nella finestra grezza."
-                : "-> qualcosa non ha funzionato: prova ad aumentare workingMemoryTokenBudget o i turni.");
-
-        runtime.stop();
     }
 
-    /** Esegue un turno stampando cosa l'assistente ha ricevuto e risposto. */
-    private static AgentResponse say(AraAgent agent, io.ara.core.agent.SessionId session,
+    /** Runs one turn, printing what the assistant received and replied. */
+    private static AgentResponse say(AraAgent agent, SessionId session,
                                       String userInput, String label) {
-        System.out.printf("[%s] utente: %s%n", label, userInput);
+        System.out.printf("[%s] user: %s%n", label, userInput);
         AgentResponse response = agent.execute(AgentTask.of(userInput).withSessionId(session));
         System.out.printf("[%s] assistant: %s%n%n", label, response.content());
         return response;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Demo-only stand-ins — sostituire con implementazioni reali in produzione
+    // Demo-only stand-ins — replace with real implementations in production
     // ══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Embedding deterministico senza dipendenze esterne: hash bag-of-words su un vettore a
-     * dimensione fissa, poi normalizzato L2 — la stessa tecnica di {@code RagAgentExample},
-     * sufficiente a far funzionare la similarità coseno per la demo. In produzione: un vero
-     * {@link EmbeddingClient} (OpenAI, Cohere, un modello locale di sentence-embedding...).
-     */
-    static final class DemoEmbeddingClient implements EmbeddingClient {
-        private static final int DIM = 64;
-
-        @Override
-        public List<Float> embed(String text) {
-            float[] v = new float[DIM];
-            for (String token : text.toLowerCase().split("\\W+")) {
-                if (token.isBlank()) continue;
-                v[Math.floorMod(token.hashCode(), DIM)] += 1f;
-            }
-            float norm = 0f;
-            for (float f : v) norm += f * f;
-            norm = (float) Math.sqrt(norm);
-            List<Float> out = new ArrayList<>(DIM);
-            for (float f : v) out.add(norm > 0 ? f / norm : 0f);
-            return out;
-        }
-
-        @Override
-        public int dimensions() { return DIM; }
-    }
 
     /**
      * In-process {@link SemanticStore}: ranks by cosine similarity instead of {@code
@@ -213,6 +192,11 @@ public class MemoryAgentExample {
         record Entry(MemoryEntry entry, List<Float> vector) {}
 
         final Map<String, List<Entry>> byAgent = new HashMap<>();
+
+        /** How many entries this agent has offloaded so far — for the verification output. */
+        int countFor(String agentId) {
+            return byAgent.getOrDefault(agentId, List.of()).size();
+        }
 
         @Override
         public void upsert(String agentId, String role, String type, String content, List<Float> vector) {

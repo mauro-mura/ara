@@ -15,12 +15,12 @@ import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.examples.support.Tools;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Runnable tour of every {@link AgentInterceptor} hook, in one file, with no network access.
@@ -63,15 +63,7 @@ public final class InterceptorEventsExample {
             @Override public String argumentSchema() { return "{\"type\":\"object\",\"properties\":{}}"; }
             @Override public ToolResult execute(String argumentJson) { return ToolResult.success(toolId(), "echoed"); }
         };
-        ToolRegistry workerTools = new ToolRegistry() {
-            @Override public List<AraTool> resolveEnabled(List<String> ids) { return List.of(echoTool); }
-            @Override public Optional<AraTool> findById(String id) {
-                return echoTool.toolId().equals(id) ? Optional.of(echoTool) : Optional.empty();
-            }
-            @Override public ToolResult execute(String toolId, String argumentJson) {
-                return echoTool.toolId().equals(toolId) ? echoTool.execute(argumentJson) : ToolResult.failure(toolId, "not found");
-            }
-        };
+        ToolRegistry workerTools = Tools.registry(echoTool);
 
         // AraRuntime wires delegate_task automatically for every agent it creates (via its
         // internal LocalMessageBus + DelegatingToolRegistry) — no manual registry assembly
@@ -106,7 +98,7 @@ public final class InterceptorEventsExample {
                 .build());
 
         AgentResponse response = coordinator.execute(AgentTask.of("please delegate to worker"));
-        System.out.printf("  => success=%s output=%s%n", response.isSuccess(), response.content());
+        System.out.printf("  → success=%s output=%s%n", response.isSuccess(), response.content());
     }
 
     // ── Scenario 2: cost budget ───────────────────────────────────────────────────
@@ -141,7 +133,7 @@ public final class InterceptorEventsExample {
                 .build());
 
         AgentResponse response = agent.execute(AgentTask.of("q"));
-        System.out.printf("  => success=%s reason=%s%n", response.isSuccess(), response.failureReason());
+        System.out.printf("  → success=%s reason=%s%n", response.isSuccess(), response.failureReason());
     }
 
     // ── Scenario 3: execution timeout ─────────────────────────────────────────────
@@ -166,7 +158,7 @@ public final class InterceptorEventsExample {
                 .build());
 
         AgentResponse response = agent.execute(AgentTask.of("q"));
-        System.out.printf("  => success=%s reason=%s%n", response.isSuccess(), response.failureReason());
+        System.out.printf("  → success=%s reason=%s%n", response.isSuccess(), response.failureReason());
     }
 
     // ── Scenario 4: cancellation ──────────────────────────────────────────────────
@@ -187,7 +179,7 @@ public final class InterceptorEventsExample {
 
         SessionId sessionId = SessionId.of("s1");
         AgentResponse first = agent.execute(AgentTask.of("hi").withSessionId(sessionId));
-        System.out.printf("  first task  => success=%s%n", first.isSuccess());
+        System.out.printf("  first task  → success=%s%n", first.isSuccess());
 
         // Cancel the (still-alive) session before the next task on it ever starts.
         // terminate(SessionId) lives on SessionScoped, not AraAgent itself — session
@@ -195,13 +187,13 @@ public final class InterceptorEventsExample {
         // a runtime-level convenience that no-ops for agents that don't support it.
         runtime.terminateSession(agent.agentId(), sessionId);
         AgentResponse second = agent.execute(AgentTask.of("hi again").withSessionId(sessionId));
-        System.out.printf("  second task => success=%s reason=%s%n", second.isSuccess(), second.failureReason());
+        System.out.printf("  second task → success=%s reason=%s%n", second.isSuccess(), second.failureReason());
     }
 
     // ── Scenario 5: generic failure (still onError) ───────────────────────────────
 
     private static void scenarioGenericError(AgentInterceptor interceptor) {
-        header("Scenario 5 — max iterations reached (unclassified stop -> onError)");
+        header("Scenario 5 — max iterations reached (unclassified stop → onError)");
 
         AraRuntime runtime = AraRuntime.builder()
                 // "length" with no tool call and no FINAL_ANSWER: the loop never
@@ -224,7 +216,7 @@ public final class InterceptorEventsExample {
                 .build());
 
         AgentResponse response = agent.execute(AgentTask.of("q"));
-        System.out.printf("  => success=%s reason=%s%n", response.isSuccess(), response.failureReason());
+        System.out.printf("  → success=%s reason=%s%n", response.isSuccess(), response.failureReason());
     }
 
     private static void header(String title) {
@@ -291,7 +283,7 @@ public final class InterceptorEventsExample {
 
         @Override
         public void onDelegate(AgentExecutionContext ctx, String recipientAgentId, String delegatedTask) {
-            System.out.printf("  [onDelegate]        -> %-10s task=%s%n", recipientAgentId, delegatedTask);
+            System.out.printf("  [onDelegate]        → %-10s task=%s%n", recipientAgentId, delegatedTask);
         }
 
         @Override

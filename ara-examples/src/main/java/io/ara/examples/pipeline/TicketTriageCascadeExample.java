@@ -53,8 +53,8 @@ import java.util.concurrent.TimeUnit;
  * "the model said so".
  *
  * <p>Two wiring details this example exists to make visible, because they are easy to get
- * wrong by hand (see {@code ADR-050} in the private ARA corpus for why each is a
- * deliberate design choice, not an accident of this one class):
+ * wrong by hand. Both are deliberate design choices of the pattern, not accidents of this
+ * one class — the two bullets below carry the reasoning for each:
  *
  * <ul>
  *   <li><b>Intent routing is exclusive by construction.</b> Every tier declares an
@@ -267,18 +267,21 @@ public final class TicketTriageCascadeExample {
         PipelineResult result = triage.run(task);
 
         System.out.println();
-        System.out.println("Ticket      : " + ticketText);
-        System.out.println("Path taken  : " + result.stepsExecuted());
-        System.out.println("Outcome     : " + (result.success() ? result.finalOutput() : "FAILED — " + result.failureReason()));
+        System.out.printf("%-13s : %s%n", "Ticket", ticketText);
+        System.out.printf("%-13s : %s%n", "Path taken", result.stepsExecuted());
+        System.out.printf("%-13s : %s%n", "Outcome",
+                result.success() ? result.finalOutput() : "FAILED — " + result.failureReason());
 
         RunState state = task.runContext().state();
-        System.out.println("Intent      : " + state.get("intent", String.class).orElse("(never classified)"));
+        System.out.printf("%-13s : %s%n", "Intent",
+                state.get("intent", String.class).orElse("(never classified)"));
         // "The last confidence any tier recorded", not "how sure the deciding tier was":
         // the human tier never writes this key, so once a ticket escalates all the way to
         // a person, what prints here is still the model's own (overruled) guess.
-        System.out.println("Confidence  : " + state.get("confidence", Double.class)
-                .map(String::valueOf)
-                .orElse("(no confidence recorded — the deciding tier was rules-only)"));
+        System.out.printf("%-13s : %s%n", "Confidence",
+                state.get("confidence", Double.class)
+                        .map(String::valueOf)
+                        .orElse("(no confidence recorded — the deciding tier was rules-only)"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

@@ -14,8 +14,8 @@ import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
-import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.examples.support.Tools;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.hitl.InMemoryApprovalGate;
 import io.ara.runtime.hitl.LoggingApprovalNotifier;
@@ -133,7 +133,7 @@ public final class HumanInTheLoopExample {
 
         try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("stub", new RefundLlmClient(requestedEur))
-                .toolRegistry(new RefundToolRegistry(ledger))
+                .toolRegistry(Tools.registry(refundTools(ledger)))
                 // Without this the gate is never consulted, even with
                 // humanApprovalRequired(true) on the agent below.
                 .approvalGate(gate)
@@ -165,9 +165,9 @@ public final class HumanInTheLoopExample {
 
             if (console != null) console.join();
 
-            System.out.printf("%n  Agent answer : %s%n", response.content());
-            System.out.printf("  Ledger       : %s%n", ledger.describe());
-            System.out.printf("  Still pending: %d%n", gate.getPendingRequests().size());
+            System.out.printf("%n  %-13s : %s%n", "Agent answer", response.content());
+            System.out.printf("  %-13s : %s%n", "Ledger", ledger.describe());
+            System.out.printf("  %-13s : %d%n", "Still pending", gate.getPendingRequests().size());
 
             runtime.destroyAgent(agent);
         }
@@ -349,76 +349,49 @@ public final class HumanInTheLoopExample {
         }
     }
 
-    /** {@code lookup_order} (read-only) and {@code issue_refund} (moves money). */
-    static final class RefundToolRegistry implements ToolRegistry {
+    /** {@code lookup_order} (read-only) and {@code issue_refund} (moves money);
+     *  wrapped by {@code Tools.registry(...)} in {@code main}. */
+    private static List<AraTool> refundTools(RefundLedger ledger) {
+        AraTool lookupOrder = new AraTool() {
+            @Override public String toolId()         { return "lookup_order"; }
+            @Override public String description()    { return "Returns order details by id."; }
+            @Override public String argumentSchema() {
+                return """
+                        {"type":"object","properties":{"orderId":{"type":"string"}},"required":["orderId"]}""";
+            }
 
-        private final List<AraTool> tools;
+            @Override
+            public ToolResult execute(String argumentJson) {
+                System.out.println("  [Tool]     lookup_order  " + argumentJson);
+                return ToolResult.success("lookup_order", json(
+                        """
+                        {"orderId":"%s","customer":"M. Rossi","item":"Espresso machine",\
+                        "totalEur":%.2f,"deliveredDaysAgo":34}""",
+                        ORDER_ID, ORDER_TOTAL));
+            }
+        };
 
-        RefundToolRegistry(RefundLedger ledger) {
-            AraTool lookupOrder = new AraTool() {
-                @Override public String toolId()         { return "lookup_order"; }
-                @Override public String description()    { return "Returns order details by id."; }
-                @Override public String argumentSchema() {
-                    return """
-                            {"type":"object","properties":{"orderId":{"type":"string"}},"required":["orderId"]}""";
-                }
+        AraTool issueRefund = new AraTool() {
+            @Override public String toolId()         { return "issue_refund"; }
+            @Override public String description()    { return "Refunds an amount against an order."; }
+            @Override public String argumentSchema() {
+                return """
+                        {"type":"object","properties":{"orderId":{"type":"string"},\
+                        "amountEur":{"type":"number"}},"required":["orderId","amountEur"]}""";
+            }
 
-                @Override
-                public ToolResult execute(String argumentJson) {
-                    System.out.println("  [Tool]     lookup_order  " + argumentJson);
-                    return ToolResult.success("lookup_order", json(
-                            """
-                            {"orderId":"%s","customer":"M. Rossi","item":"Espresso machine",\
-                            "totalEur":%.2f,"deliveredDaysAgo":34}""",
-                            ORDER_ID, ORDER_TOTAL));
-                }
-            };
-
-            AraTool issueRefund = new AraTool() {
-                @Override public String toolId()         { return "issue_refund"; }
-                @Override public String description()    { return "Refunds an amount against an order."; }
-                @Override public String argumentSchema() {
-                    return """
-                            {"type":"object","properties":{"orderId":{"type":"string"},\
-                            "amountEur":{"type":"number"}},"required":["orderId","amountEur"]}""";
-                }
-
-                @Override
-                public ToolResult execute(String argumentJson) {
-                    // Reached only for calls the gate let through — approved as requested,
-                    // approved under the limit, or approved with the reviewer's payload.
-                    double amount = amountOf(argumentJson);
-                    System.out.println("  [Tool]     issue_refund  " + argumentJson + "  ← money moves here");
-                    ledger.record(ORDER_ID, amount);
-                    return ToolResult.success("issue_refund",
-                            "refund of €%.2f confirmed on order %s".formatted(amount, ORDER_ID));
-                }
-            };
-
-            this.tools = List.of(lookupOrder, issueRefund);
-        }
-
-        @Override
-        public List<AraTool> resolveEnabled(List<String> enabledToolIds) {
-            return tools.stream().filter(t -> enabledToolIds.contains(t.toolId())).toList();
-        }
-
-        @Override
-        public List<AraTool> all() {
-            return tools;
-        }
-
-        @Override
-        public Optional<AraTool> findById(String toolId) {
-            return tools.stream().filter(t -> t.toolId().equals(toolId)).findFirst();
-        }
-
-        @Override
-        public ToolResult execute(String toolId, String argumentJson) {
-            return findById(toolId)
-                    .map(t -> t.execute(argumentJson))
-                    .orElseGet(() -> ToolResult.failure(toolId, "Tool not found: " + toolId));
-        }
+            @Override
+            public ToolResult execute(String argumentJson) {
+                // Reached only for calls the gate let through — approved as requested,
+                // approved under the limit, or approved with the reviewer's payload.
+                double amount = amountOf(argumentJson);
+                System.out.println("  [Tool]     issue_refund  " + argumentJson + "  ← money moves here");
+                ledger.record(ORDER_ID, amount);
+                return ToolResult.success("issue_refund",
+                        "refund of €%.2f confirmed on order %s".formatted(amount, ORDER_ID));
+            }
+        };
+        return List.of(lookupOrder, issueRefund);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

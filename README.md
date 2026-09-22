@@ -308,12 +308,13 @@ Everything below lives in `ara-examples` and runs with `main()`.
 |---|---|---|
 | `basics/AraSimpleExample` | stub | End-to-end: ReAct loop, tool call, interceptor, agent reuse |
 | `basics/AraSimpleExampleLive` | **live** | The same run against a real model |
-| `basics/SimpleStreamingExample` | stub | The smallest streaming agent, tokens printed as they arrive |
+| `basics/SimpleStreamingExample` | stub / **live** | The smallest streaming agent, tokens printed as they arrive |
 | `basics/StreamingWithToolExample` | stub / **live** | Token streaming through a ReAct loop that calls a tool |
 | `basics/InterceptorEventsExample` | stub | Every `AgentInterceptor` event in order, around one run |
 | `pipeline/ClassifyAndActExample` | none | Classify-and-act at its smallest — no model, no API key |
 | `pipeline/TicketTriageCascadeExample` | stub | The three-tier cascade: rules → model → human |
 | `hitl/HumanInTheLoopExample` | stub | A tool call parked on an `ApprovalGate` until an operator decides |
+| `memory/MemoryAgentExample` | stub | Token-budgeted working memory: summarise, offload, and recall |
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus delegation |
 | `failover/FailoverExample` | stub | Failover and circuit breaking across LLM and embedding endpoints |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, one provider-agnostic method |

@@ -1,9 +1,16 @@
 package io.ara.examples.basics;
 
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
-import io.ara.core.agent.*;
+import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AraAgent;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmProfile;
+import io.ara.examples.support.DemoTools;
+import io.ara.examples.support.Live;
+import io.ara.examples.support.LoggingInterceptor;
+import io.ara.examples.support.Tools;
 import io.ara.runtime.AraRuntime;
 
 import java.util.List;
@@ -18,43 +25,30 @@ import java.util.List;
 public class AraSimpleExampleLive {
 
     private static final String BASE_URL = "http://127.0.0.1:1234/v1";  // local server for example LM Studio
-    private static final String API_KEY  = resolveApiKey();
+    private static final String API_KEY  = Live.apiKeyRequired();
     private static final String MODEL    = "openai/gpt-oss-20b"; // local model
-
-    private static String resolveApiKey() {
-        String property = System.getProperty("ara.api.key");
-        if (property != null && !property.isBlank()) {
-            return property;
-        }
-        String env = System.getenv("ARA_API_KEY");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        throw new IllegalStateException(
-                "Missing API key: set -Dara.api.key=... or the ARA_API_KEY environment variable");
-    }
 
     public static void main(String[] args) {
 
         System.out.println("=== ARA Agent Runtime — Live Demo ===\n");
 
-        // Create local model
+        // ── 1. The model client — a real endpoint behind the same LlmClient ─────
         LlmClient local = OpenAiLlmClient.builder()
                 .baseUrl(BASE_URL)
                 .apiKey(API_KEY)
                 .modelName(MODEL)
                 .build();
 
-        // Create runtime
+        // ── 2. Build runtime — same wiring as the stub sibling, real client ─────
         try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("local", local)
-                .toolRegistry(new AraSimpleExample.StubToolRegistry())
-                .interceptors(List.of(new AraSimpleExample.LoggingInterceptor()))
+                .toolRegistry(Tools.registry(DemoTools.echo()))
+                .interceptors(List.of(new LoggingInterceptor()))
                 .build()) {
 
             runtime.start();
 
-            // Create agent config
+            // ── 3. Create agent config — echo enabled, react loop, like the sibling stub ──
             AgentConfig config = AgentConfig.defaults()
                     .agentType("demo-agent")
                     .systemPrompt("You are a helpful demo agent.")
@@ -64,19 +58,19 @@ public class AraSimpleExampleLive {
                     .maxIterations(5)
                     .build();
 
-            // Create agent
+            // ── 4. Create agent ──────────────────────────────────────────────────
             AraAgent agent = runtime.createAgent(config);
             System.out.printf("Agent created  : %s%n", agent.agentId().value());
             System.out.printf("Initial state  : %s%n%n", agent.currentState());
 
-            // Create task
+            // ── 5. Create task ───────────────────────────────────────────────────
             AgentTask task = AgentTask.of("What does the echo tool say about 'Hello ARA'?");
             System.out.printf("Submitting task: %s%n%n", task.input());
 
-            // Execute task
+            // ── 6. Execute task ──────────────────────────────────────────────────
             AgentResponse response = agent.execute(task);
 
-            // Print results
+            // ── 7. Print results ─────────────────────────────────────────────────
             System.out.println("\n=== Result ===");
             System.out.printf("Success        : %s%n", response.isSuccess());
             System.out.printf("Final state    : %s%n", response.finalState());
@@ -88,7 +82,7 @@ public class AraSimpleExampleLive {
             System.out.printf("Elapsed        : %dms%n", response.elapsedTime().toMillis());
             System.out.printf("Agent state    : %s (back to IDLE, ready for reuse)%n", agent.currentState());
 
-            // Cleanup
+            // ── 8. Cleanup — destroy the agent, registry back to empty ─────────────────
             runtime.destroyAgent(agent);
             System.out.printf("%nRegistry count after destroy: %d%n", runtime.registry().count());
         }

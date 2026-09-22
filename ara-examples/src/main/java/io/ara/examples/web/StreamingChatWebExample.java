@@ -8,11 +8,10 @@ import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
-import io.ara.core.llm.LlmCallContext;
-import io.ara.core.llm.LlmClient;
-import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
+import io.ara.examples.support.Live;
+import io.ara.examples.support.StreamingLlmStub;
 import io.ara.runtime.AraRuntime;
 
 import java.io.IOException;
@@ -22,11 +21,13 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Flow;
 
 /**
  * A tiny web front-end for ARA token streaming — the browser equivalent of
  * {@code io.ara.examples.basics.SimpleStreamingExample}.
+ *
+ * @see io.ara.examples.basics.SimpleStreamingExample — the minimal one-turn streaming agent
+ * @see io.ara.examples.basics.StreamingWithToolExample — streaming through a ReAct loop with a tool
  *
  * <p>Serves an ARA-styled chat page and one Server-Sent-Events endpoint. A single
  * long-lived agent handles every request, each one running a one-turn streaming task
@@ -43,7 +44,7 @@ import java.util.concurrent.Flow;
  * sweep cleans them up, instead of paying create/destroy agent machinery per request.
  *
  * <p>The chat page keeps a stable per-browser session id and sends it along, so a
- * conversation lives<b> inside the agent's working memory</b> across messages instead of
+ * conversation lives <b>inside the agent's working memory</b> across messages instead of
  * being forgotten after one turn: this is what actually exercises the example's
  * {@link io.ara.runtime.memory.SlidingWindowMemoryManager} budget — past the threshold the
  * oldest turns are evicted (drop_middle) rather than replayed and re-sent on every call.
@@ -63,10 +64,9 @@ import java.util.concurrent.Flow;
 public final class StreamingChatWebExample {
 
     private static final int    PORT          = Integer.getInteger("ara.web.port", 8080);
-    private static final String LIVE_BASE_URL = "http://192.168.1.114:1234/v1";
+    private static final String LIVE_BASE_URL = "http://127.0.0.1:1234/v1";
     private static final String LIVE_MODEL    = "openai/gpt-oss-20b";
-    private static final String LIVE_API_KEY  = firstNonBlank(
-            System.getProperty("ara.api.key"), System.getenv("ARA_API_KEY"), "not-required");
+    private static final String LIVE_API_KEY  = Live.apiKey("not-required");
 
     /**
      * The working-memory budget both agents are wired with — also the max the page's
@@ -121,7 +121,7 @@ public final class StreamingChatWebExample {
                 // Both transports are registered up front, so the mode can be switched
                 // live from the page with no restart. The OpenAI client is just HTTP
                 // config until a call is made — a wrong gateway only fails per-request.
-                .llmClient("offline", new WordStreamLlmClient())
+                .llmClient("offline", new StreamingLlmStub(StreamingChatWebExample::answerFor, 45, "word-stream-stub"))
                 .llmClient("live", OpenAiLlmClient.builder()
                         .baseUrl(LIVE_BASE_URL).apiKey(LIVE_API_KEY).modelName(LIVE_MODEL).build())
                 .build();
@@ -306,74 +306,36 @@ public final class StreamingChatWebExample {
         return b.append('"').toString();
     }
 
-    private static String firstNonBlank(String... values) {
-        for (String v : values) if (v != null && !v.isBlank()) return v;
-        return "";
-    }
+    // ── offline stub answers — streamed word by word by support.StreamingLlmStub ──
 
-    // ── offline stub LLM: streams a canned ARA answer word by word ────────────
-
-    static final class WordStreamLlmClient implements LlmClient {
-
-        private static String answerFor(List<LlmMessage> messages) {
-            String q = messages.isEmpty() ? "" : messages.get(messages.size() - 1).content();
-            String lc = q == null ? "" : q.toLowerCase();
-            String body;
-            if (lc.contains("contratt") || lc.contains("contract")) {
-                body = "Un contratto I/O è una catena di processori Java che gira prima e dopo ogni "
-                     + "chiamata al modello: sanifica l'input, rimuove i fence markdown, valida il JSON "
-                     + "contro uno schema e reda i dati PII. È puro codice, quindi costa zero token.";
-            } else if (lc.contains("strateg")) {
-                body = "Le strategie sono sei: react, respact, reflact, plan_execute, reflexion e il "
-                     + "decoratore rag+react. Si cambiano modificando una sola stringa in "
-                     + "AgentConfig.plannerStrategy(...), senza riscrivere il loop.";
-            } else if (lc.contains("stream")) {
-                body = "Lo streaming si attiva con due cose insieme: streamingEnabled(true) sul profilo "
-                     + "e AgentTask.ofStreaming(prompt, tokenCallback). Il callback riceve ogni token "
-                     + "mentre execute() è ancora in corso; questa pagina lo inoltra via SSE.";
-            } else if (lc.contains("tool")) {
-                body = "Un tool implementa AraTool: toolId, description, argumentSchema ed execute. "
-                     + "Lo abiliti per agente con enabledTools(...); più chiamate nella stessa risposta "
-                     + "vengono dispacciate in parallelo su thread virtuali.";
-            } else {
-                body = "ARA è un runtime Java 21 per agenti: nessuna annotazione, nessuna reflection, "
-                     + "niente Spring. Lo stack di chiamate che debugghi è quello che hai scritto tu. "
-                     + "Questa risposta è generata da uno stub offline e trasmessa una parola alla volta.";
-            }
-            return body;
+    /** Keyword-shaped canned answers for the offline chat model; the stub's
+     *  {@code complete}/{@code stream} split feeds this same text out both ways. */
+    private static String answerFor(List<LlmMessage> messages) {
+        String q = messages.isEmpty() ? "" : messages.get(messages.size() - 1).content();
+        String lc = q == null ? "" : q.toLowerCase();
+        String body;
+        if (lc.contains("contratt") || lc.contains("contract")) {
+            body = "Un contratto I/O è una catena di processori Java che gira prima e dopo ogni "
+                 + "chiamata al modello: sanifica l'input, rimuove i fence markdown, valida il JSON "
+                 + "contro uno schema e reda i dati PII. È puro codice, quindi costa zero token.";
+        } else if (lc.contains("strateg")) {
+            body = "Le strategie sono sei: react, respact, reflact, plan_execute, reflexion e il "
+                 + "decoratore rag+react. Si cambiano modificando una sola stringa in "
+                 + "AgentConfig.plannerStrategy(...), senza riscrivere il loop.";
+        } else if (lc.contains("stream")) {
+            body = "Lo streaming si attiva con due cose insieme: streamingEnabled(true) sul profilo "
+                 + "e AgentTask.ofStreaming(prompt, tokenCallback). Il callback riceve ogni token "
+                 + "mentre execute() è ancora in corso; questa pagina lo inoltra via SSE.";
+        } else if (lc.contains("tool")) {
+            body = "Un tool implementa AraTool: toolId, description, argumentSchema ed execute. "
+                 + "Lo abiliti per agente con enabledTools(...); più chiamate nella stessa risposta "
+                 + "vengono dispacciate in parallelo su thread virtuali.";
+        } else {
+            body = "ARA è un runtime Java 21 per agenti: nessuna annotazione, nessuna reflection, "
+                 + "niente Spring. Lo stack di chiamate che debugghi è quello che hai scritto tu. "
+                 + "Questa risposta è generata da uno stub offline e trasmessa una parola alla volta.";
         }
-
-        @Override
-        public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
-            String a = answerFor(messages);
-            return new LlmCompletion(a, 24, a.length() / 4, "stop", null);
-        }
-
-        @Override
-        public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
-            String answer = answerFor(messages);
-            return subscriber -> {
-                subscriber.onSubscribe(new Flow.Subscription() {
-                    @Override public void request(long n) { }
-                    @Override public void cancel() { }
-                });
-                try {
-                    for (String word : answer.split("(?<= )")) {
-                        subscriber.onNext(word);
-                        Thread.sleep(45);
-                    }
-                    subscriber.onComplete();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    subscriber.onError(e);
-                }
-            };
-        }
-
-        @Override
-        public String providerId() {
-            return "word-stream-stub";
-        }
+        return body;
     }
 
     private StreamingChatWebExample() { }
