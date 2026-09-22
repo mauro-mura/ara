@@ -34,9 +34,10 @@ import java.util.function.Consumer;
  * as the LLM emits it. The gateway uses this to push SSE events to the client.
  * {@code null} means no streaming callback is registered.
  *
- * <p>{@link #toolCallCallback}, when set, is invoked with the tool id each time
- * a tool is about to be dispatched. The gateway emits this as a {@code tool_call}
- * SSE event so the UI can highlight the active tool edge in real time.
+ * <p>{@link #toolCallCallback}, when set, is invoked with a {@link ToolCallEvent} (tool id
+ * plus JSON-serialised arguments) each time a tool is about to be dispatched. The gateway
+ * emits this as a {@code tool_call} SSE event so the UI can highlight the active tool edge,
+ * with its arguments, in real time.
  *
  * <p>{@link #speakCallback}, when set, is invoked with the message text each time
  * {@code ReSpActStrategy} emits a {@link StepType#SPEAK} step — a conversational
@@ -59,7 +60,8 @@ import java.util.function.Consumer;
  * @param createdAt        wall-clock timestamp of task creation
  * @param tokenCallback    optional callback invoked with each streamed token; {@code null}
  *                         when streaming is not requested
- * @param toolCallCallback optional callback invoked with the tool id just before dispatch
+ * @param toolCallCallback optional callback invoked with a {@link ToolCallEvent} just before
+ *                         each tool dispatch
  * @param hints            optional per-call LLM execution hints (ADR-017)
  * @param sessionId        optional session identifier; {@code null} means ephemeral
  * @param userId           optional user identifier (ADR-043 rev. 3); {@code null} means
@@ -79,7 +81,7 @@ public record AgentTask(
         String requestedBy,
         Instant createdAt,
         Consumer<String> tokenCallback,
-        Consumer<String> toolCallCallback,
+        Consumer<ToolCallEvent> toolCallCallback,
         LlmExecutionHints hints,
         SessionId sessionId,
         UserId userId,
@@ -260,7 +262,7 @@ public record AgentTask(
     }
 
     /** Returns a copy with the given tool-call callback. */
-    public AgentTask withToolCallCallback(Consumer<String> callback) {
+    public AgentTask withToolCallCallback(Consumer<ToolCallEvent> callback) {
         return new AgentTask(taskId, input, media, runContext, correlationId, requestedBy, createdAt, tokenCallback, callback, hints, sessionId, userId, speakCallback);
     }
 
@@ -300,8 +302,8 @@ public record AgentTask(
     }
 
     /** Notifies the tool-call callback, if set. No-op when null. */
-    public void notifyToolCall(String toolId) {
-        if (toolCallCallback != null) toolCallCallback.accept(toolId);
+    public void notifyToolCall(String toolId, String argumentJson) {
+        if (toolCallCallback != null) toolCallCallback.accept(new ToolCallEvent(toolId, argumentJson));
     }
 
     /** Notifies the ReSpAct speak callback, if set. No-op when null. */

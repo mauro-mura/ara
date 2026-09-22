@@ -206,7 +206,7 @@ public class MistralLlmClient extends AbstractLangChain4jLlmClient {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
 
-        return fallbackClassify(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex, timeout);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────

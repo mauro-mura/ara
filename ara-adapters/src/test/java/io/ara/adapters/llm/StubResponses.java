@@ -41,4 +41,10 @@ public final class StubResponses {
                         "tool_calls":[{"function":{"name":"get_weather",
                                                    "arguments":{"city":"Rome"}}}]},
              "done":true,"done_reason":"stop","prompt_eval_count":1,"eval_count":1}""";
+
+    /** No text and no tool call — the genuinely-empty shape, unlike {@link #OLLAMA_TOOL_CALL_ONLY}. */
+    public static final String OLLAMA_EMPTY = """
+            {"model":"llama3.2","created_at":"2024-01-01T00:00:00Z",
+             "message":{"role":"assistant","content":""},"done":true,
+             "done_reason":"stop","prompt_eval_count":1,"eval_count":0}""";
 }

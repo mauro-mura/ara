@@ -6,6 +6,7 @@ import io.ara.adapters.llm.StubResponses;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
+import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
@@ -17,6 +18,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -52,6 +54,22 @@ class OllamaLlmClientTest {
 
             assertNotNull(completion);
             assertEquals("", completion.text());
+        }
+    }
+
+    @Test
+    void aGenuinelyEmptyReplyIsReportedAsEmptyResponseNotSilentlySucceeded() throws Exception {
+        // No text and no tool call — distinct from mapsATextlessReplyToAnEmptyCompletion above,
+        // which has no text but does have a tool call. This shape means the provider answered
+        // with literally nothing usable, which must not look like a normal empty-string reply.
+        try (StubLlmProvider provider = StubLlmProvider.answering(StubResponses.OLLAMA_EMPTY)) {
+            LlmClient client = clientPointedAt(provider);
+
+            LlmException ex = assertThrows(LlmException.class, () -> complete(client));
+
+            assertEquals(LlmException.ErrorType.EMPTY_RESPONSE, ex.errorType());
+            assertTrue(ex.isRetryable(), "an empty completion is typically non-deterministic noise");
+            assertTrue(ex.shouldFailover(), "a different provider may not reproduce the blank answer");
         }
     }
 

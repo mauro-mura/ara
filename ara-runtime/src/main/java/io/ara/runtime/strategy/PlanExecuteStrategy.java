@@ -408,7 +408,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             ToolCallParser.ToolCallRequest tcr, String completionText,
             List<LlmMessage> stepLocalHistory, Run run, Tally tally) {
 
-        run.task().notifyToolCall(tcr.toolId());
+        run.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
         tally.steps.add(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), tally.iterations));
 
         String callId = tcr.toolCallId();

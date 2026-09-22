@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.StepType;
+import io.ara.core.agent.ToolCallEvent;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
@@ -76,7 +77,7 @@ class PlanExecuteStrategyTraceTest {
                 .then(new LlmCompletion("Final summary.", 10, 10, "stop", null))
                 .build();
 
-        List<String> notifiedTools = new ArrayList<>();
+        List<ToolCallEvent> notifiedTools = new ArrayList<>();
         AgentTask task = AgentTask.of("do the thing").withToolCallCallback(notifiedTools::add);
 
         AgentConfig config = AgentConfig.defaults()
@@ -102,8 +103,10 @@ class PlanExecuteStrategyTraceTest {
         assertEquals(StepType.FINAL_ANSWER, steps.get(steps.size() - 1).type(),
                 "last step is the synthesised final answer");
 
-        assertEquals(List.of("noop"), notifiedTools,
+        assertEquals(List.of("noop"), notifiedTools.stream().map(ToolCallEvent::toolId).toList(),
                 "the tool_call SSE callback must fire once per dispatched tool");
+        assertEquals("{}", notifiedTools.get(0).argumentJson(),
+                "the callback must carry the tool's arguments, not just its id");
     }
 
     @Test

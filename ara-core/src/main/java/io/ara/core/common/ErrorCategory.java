@@ -16,6 +16,14 @@ package io.ara.core.common;
 public enum ErrorCategory {
     /** Transport could not reach the endpoint (DNS, connection refused, broken pipe, connect timeout). */
     NETWORK,
+    /**
+     * The endpoint was reached and accepted the request, but did not answer within the
+     * configured timeout. Distinct from {@link #NETWORK}: the connection itself was fine, so
+     * this points at the provider being slow/overloaded, not at connectivity — a different
+     * signal for whoever is reading the logs, even though the caller's response (retry the
+     * same endpoint? no; try another? yes) is identical to {@link #NETWORK}.
+     */
+    TIMEOUT,
     /** The provider's server itself failed (5xx). */
     SERVER_ERROR,
     /** The caller exceeded its request-rate allowance (429). */
@@ -34,6 +42,12 @@ public enum ErrorCategory {
     UNSUPPORTED_OPERATION,
     /** The provider's response could not be parsed. */
     PARSE_ERROR,
+    /**
+     * The call completed with no transport/HTTP error, but the provider's answer was blank —
+     * no text and no tool call. Worth a retry (often non-deterministic) and worth failing over
+     * (another provider may not reproduce it), unlike a genuinely malformed request.
+     */
+    EMPTY_RESPONSE,
     /** Uncategorised. */
     UNKNOWN;
 
@@ -47,7 +61,7 @@ public enum ErrorCategory {
      */
     public boolean isRetryable() {
         return switch (this) {
-            case RATE_LIMIT, SERVER_ERROR -> true;
+            case RATE_LIMIT, SERVER_ERROR, EMPTY_RESPONSE -> true;
             default -> false;
         };
     }
@@ -65,7 +79,7 @@ public enum ErrorCategory {
      */
     public boolean shouldFailover() {
         return switch (this) {
-            case NETWORK, SERVER_ERROR, RATE_LIMIT, QUOTA_EXCEEDED -> true;
+            case NETWORK, TIMEOUT, SERVER_ERROR, RATE_LIMIT, QUOTA_EXCEEDED, EMPTY_RESPONSE -> true;
             default -> false;
         };
     }

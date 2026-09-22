@@ -33,6 +33,24 @@ class LlmExceptionTest {
     }
 
     @Test
+    void timeout_mapsToTimeoutCategory_nonRetryableButFailsOver() {
+        LlmException ex = LlmException.timeout("openai", "request timed out", null);
+
+        assertEquals(ErrorCategory.TIMEOUT, ex.errorCategory());
+        assertFalse(ex.isRetryable());
+        assertTrue(ex.shouldFailover());
+    }
+
+    @Test
+    void emptyResponse_mapsToEmptyResponseCategory_retryableAndFailsOver() {
+        LlmException ex = LlmException.emptyResponse("openai", "empty completion");
+
+        assertEquals(ErrorCategory.EMPTY_RESPONSE, ex.errorCategory());
+        assertTrue(ex.isRetryable());
+        assertTrue(ex.shouldFailover());
+    }
+
+    @Test
     void rateLimit_mapsToRateLimitCategory() {
         LlmException ex = LlmException.rateLimit("openai", "429");
         assertEquals(ErrorCategory.RATE_LIMIT, ex.errorCategory());

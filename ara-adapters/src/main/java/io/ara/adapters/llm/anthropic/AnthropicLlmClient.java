@@ -53,6 +53,7 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
     private final AnthropicChatModel          chatModel;
     private final AnthropicStreamingChatModel streamingModel;
     private final String                      modelName;
+    private final java.time.Duration          timeout;
     /**
      * Precomputed once: a pure function of the adapter's capabilities, which never change
      * after construction — rebuilding the set on every request only allocates needlessly.
@@ -99,6 +100,7 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
     private AnthropicLlmClient(Builder builder) {
         LlmSettings s = builder.settings();
         this.modelName = s.modelName();
+        this.timeout   = s.timeout();
         this.supportedMediaTypes =
                 MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT);
         this.chatModel = AnthropicChatModel.builder()
@@ -177,7 +179,7 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
             return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
         }
 
-        return fallbackClassify(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex, timeout);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────

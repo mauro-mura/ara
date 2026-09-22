@@ -78,11 +78,48 @@ class ProviderErrorMapperTest {
     @Test
     void connection_failures_are_non_retryable() {
         assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER,
-                new dev.langchain4j.exception.TimeoutException("too slow")).isRetryable(),
-                "connection timeout is a transport failure, not worth retrying");
-        assertFalse(ProviderErrorMapper.fromTypedException(PROVIDER,
                 new RetriableException("connection reset")).isRetryable(),
                 "connection problems are non-retryable");
+    }
+
+    @Test
+    void a_provider_timeout_is_reported_as_timeout_not_network_but_still_fails_over() {
+        // The connection was fine and the request was accepted — the provider just didn't
+        // answer in time. That is a different situation from an unreachable endpoint (above)
+        // and must not be reported under the same NETWORK label, even though the caller's
+        // decision (don't retry the same client, do try the next one) is identical.
+        LlmException mapped = ProviderErrorMapper.fromTypedException(PROVIDER,
+                new dev.langchain4j.exception.TimeoutException("too slow"));
+
+        assertNotNull(mapped);
+        assertEquals(ErrorType.TIMEOUT, mapped.errorType());
+        assertFalse(mapped.isRetryable(), "retrying the same slow endpoint immediately wastes the same wait");
+        assertTrue(mapped.shouldFailover(), "a different provider is not subject to the same load");
+    }
+
+    @Test
+    void a_provider_timeout_carries_the_configured_timeout_when_the_caller_has_one() {
+        // The adapter knows what it configured; a reader of the log should not have to go
+        // find that configuration separately to tell a too-tight timeout from a stuck provider.
+        LlmException mapped = ProviderErrorMapper.fromTypedException(PROVIDER,
+                new dev.langchain4j.exception.TimeoutException("too slow"),
+                java.time.Duration.ofSeconds(5));
+
+        assertNotNull(mapped);
+        assertEquals(ErrorType.TIMEOUT, mapped.errorType());
+        assertTrue(mapped.getMessage().contains("too slow"), mapped.getMessage());
+        assertTrue(mapped.getMessage().contains("configured timeout: PT5S"), mapped.getMessage());
+    }
+
+    @Test
+    void a_provider_timeout_without_a_known_configured_value_is_reported_plainly() {
+        // The 2-arg overload (used when the caller has no timeout to report) must not append
+        // a bogus "(configured timeout: null)" — this pins that fromTypedException(provider, ex)
+        // and fromTypedException(provider, ex, null) behave identically.
+        LlmException mapped = ProviderErrorMapper.fromTypedException(PROVIDER,
+                new dev.langchain4j.exception.TimeoutException("too slow"));
+
+        assertEquals("too slow", mapped.getMessage());
     }
 
     @Test

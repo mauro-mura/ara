@@ -11,6 +11,8 @@ import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.FinishReason;
 import dev.langchain4j.model.output.TokenUsage;
 import io.ara.core.llm.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Shared request → response pipeline for the four LangChain4j-backed LLM adapters.
@@ -77,6 +79,8 @@ import io.ara.core.llm.*;
  * @see AbstractLlmClientBuilder
  */
 public abstract class AbstractLangChain4jLlmClient implements LlmClient {
+
+    private static final Logger log = LoggerFactory.getLogger(AbstractLangChain4jLlmClient.class);
 
     // ── Pipeline template ──────────────────────────────────────────────────
 
@@ -190,6 +194,19 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
             finishReason = "tool_calls";
         }
 
+        if (text.isBlank() && toolCalls.isEmpty()) {
+            // No transport/HTTP error, no tool call, no text — the provider answered with
+            // nothing. Log the raw response now: this is the one place that still has it,
+            // and a warn-only line (as opposed to throwing silently) is what lets a future
+            // incident be diagnosed from what the provider actually sent instead of guessed
+            // at from a downstream timeout or an empty chat bubble.
+            log.warn("Provider '{}' returned an empty completion "
+                    + "(finishReason={}, tokens in={}/out={}): {}",
+                    providerId(), finishReason, inputTokens, outputTokens, response);
+            throw LlmException.emptyResponse(providerId(),
+                    "Empty completion from '" + providerId() + "' (finishReason=" + finishReason + ")");
+        }
+
         return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
                 toolCallJson, toolCallId, toolCalls);
     }
@@ -262,7 +279,18 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
      */
     protected final LlmException fallbackClassify(
             String provider, String msg, Throwable ex) {
-        LlmException typed = ProviderErrorMapper.fromTypedException(provider, ex);
+        return fallbackClassify(provider, msg, ex, null);
+    }
+
+    /**
+     * Same as {@link #fallbackClassify(String, String, Throwable)}, with the client's
+     * configured request timeout so a {@link dev.langchain4j.exception.TimeoutException} is
+     * reported with the value that was actually in force — see
+     * {@link ProviderErrorMapper#fromTypedException(String, Throwable, java.time.Duration)}.
+     */
+    protected final LlmException fallbackClassify(
+            String provider, String msg, Throwable ex, java.time.Duration timeout) {
+        LlmException typed = ProviderErrorMapper.fromTypedException(provider, ex, timeout);
         if (typed != null) return typed;
         if (ex instanceof IOException || isCausedByIOException(ex)) {
             return LlmException.connectionError(provider, msg, ex);

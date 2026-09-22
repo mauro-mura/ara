@@ -11,6 +11,8 @@ import dev.langchain4j.exception.RetriableException;
 import dev.langchain4j.exception.TimeoutException;
 import io.ara.core.llm.LlmException;
 
+import java.time.Duration;
+
 /**
  * Classifies a provider failure using langchain4j's typed exception hierarchy, so that
  * {@link LlmException#isRetryable()} reflects what the provider actually said rather than what
@@ -78,9 +80,21 @@ public final class ProviderErrorMapper {
      *         langchain4j exception — leaving the caller's own fallback in charge
      */
     public static LlmException fromTypedException(String provider, Throwable ex) {
+        return fromTypedException(provider, ex, null);
+    }
+
+    /**
+     * Same as {@link #fromTypedException(String, Throwable)}, with the client's configured
+     * request timeout appended to a {@link TimeoutException}'s message — e.g. "timed out
+     * (configured timeout: PT30S)" — so a reader does not have to go find the adapter's
+     * configuration to know whether 30 seconds was too tight or the provider was simply stuck.
+     * Every other classification is unaffected; {@code timeout} may be {@code null} when the
+     * caller has none to report.
+     */
+    public static LlmException fromTypedException(String provider, Throwable ex, Duration timeout) {
         Throwable c = ex;
         for (int depth = 0; c != null && depth < MAX_CAUSE_DEPTH; c = c.getCause(), depth++) {
-            LlmException mapped = classify(provider, c);
+            LlmException mapped = classify(provider, c, timeout);
             if (mapped != null) return mapped;
         }
         return null;
@@ -97,14 +111,17 @@ public final class ProviderErrorMapper {
      */
     private static final int MAX_CAUSE_DEPTH = 16;
 
-    private static LlmException classify(String provider, Throwable c) {
+    private static LlmException classify(String provider, Throwable c, Duration timeout) {
         String msg = c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName();
         return switch (c) {
             case AuthenticationException e   -> LlmException.authenticationError(provider, msg);
             case ModelNotFoundException e    -> LlmException.modelNotFound(provider, msg);
             case RateLimitException e        -> LlmException.rateLimit(provider, msg);
             case InternalServerException e   -> LlmException.serverError(provider, msg, 500);
-            case TimeoutException e          -> LlmException.connectionError(provider, msg, c);
+            // The connection was established and the request accepted; the provider simply
+            // did not answer in time. Distinct from a genuine connection failure (below) —
+            // see ErrorCategory.TIMEOUT.
+            case TimeoutException e          -> LlmException.timeout(provider, withTimeout(msg, timeout), c);
             // Before InvalidRequestException, which it extends: a filtered response is a
             // refusal to answer, not a malformed request, and reporting it as the latter would
             // send whoever reads the error looking for a bug in their own payload.
@@ -114,5 +131,10 @@ public final class ProviderErrorMapper {
             case RetriableException e        -> LlmException.connectionError(provider, msg, c);
             default -> null;
         };
+    }
+
+    /** Appends the configured timeout to a message, or returns it unchanged when none is known. */
+    private static String withTimeout(String msg, Duration timeout) {
+        return timeout != null ? msg + " (configured timeout: " + timeout + ")" : msg;
     }
 }

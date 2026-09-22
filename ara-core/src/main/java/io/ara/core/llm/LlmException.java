@@ -21,11 +21,13 @@ public class LlmException extends RuntimeException {
         QUOTA_EXCEEDED,
         MODEL_NOT_FOUND,
         NETWORK,
+        TIMEOUT,
         PARSE_ERROR,
         SERVER_ERROR,
         CONTEXT_LENGTH_EXCEEDED,
         CONTENT_FILTERED,
         UNSUPPORTED_OPERATION,
+        EMPTY_RESPONSE,
         UNKNOWN
     }
 
@@ -69,6 +71,19 @@ public class LlmException extends RuntimeException {
 
     public static LlmException networkError(String provider, String message, Throwable cause) {
         return new LlmException(message, cause, ErrorType.NETWORK, provider, null, true);
+    }
+
+    /**
+     * The endpoint accepted the request but did not answer within the configured timeout.
+     *
+     * <p>Non-retryable on the same client for the same reason as {@link #connectionError}:
+     * whatever made this provider slow (load, a stuck backend) will very likely still be true
+     * a moment later, so retrying it burns the same wait again. A different provider is not
+     * subject to that same load, so {@link #shouldFailover()} is still {@code true} — see
+     * {@link io.ara.core.common.ErrorCategory#TIMEOUT}.
+     */
+    public static LlmException timeout(String provider, String message, Throwable cause) {
+        return new LlmException(message, cause, ErrorType.TIMEOUT, provider, null, false);
     }
 
     public static LlmException serverError(String provider, String message, int statusCode) {
@@ -127,6 +142,20 @@ public class LlmException extends RuntimeException {
     }
 
     /**
+     * The call completed with no transport/HTTP error, but the provider's answer had no text
+     * and no tool call.
+     *
+     * <p>Retryable — unlike a malformed request, an empty completion is typically
+     * non-deterministic sampling noise rather than a structural problem with the request, so
+     * the same client can plausibly succeed on a second try. Also worth
+     * {@link #shouldFailover() failing over}: a different provider may not reproduce whatever
+     * produced the blank answer.
+     */
+    public static LlmException emptyResponse(String provider, String message) {
+        return new LlmException(message, null, ErrorType.EMPTY_RESPONSE, provider, null, true);
+    }
+
+    /**
      * A connection failure — the transport could not reach the provider endpoint.
      *
      * <p>Non-retryable on the same client: a connection problem (DNS failure, connection
@@ -151,7 +180,9 @@ public class LlmException extends RuntimeException {
     public boolean isAuthenticationError()   { return errorType == ErrorType.AUTHENTICATION; }
     public boolean isContextLengthExceeded() { return errorType == ErrorType.CONTEXT_LENGTH_EXCEEDED; }
     public boolean isNetworkError()          { return errorType == ErrorType.NETWORK; }
+    public boolean isTimeout()               { return errorType == ErrorType.TIMEOUT; }
     public boolean isServerError()           { return errorType == ErrorType.SERVER_ERROR; }
+    public boolean isEmptyResponse()         { return errorType == ErrorType.EMPTY_RESPONSE; }
 
     /**
      * Whether trying a <em>different</em> {@code LlmClient} (failover) could plausibly
@@ -184,6 +215,7 @@ public class LlmException extends RuntimeException {
     public ErrorCategory errorCategory() {
         return switch (errorType) {
             case NETWORK                  -> ErrorCategory.NETWORK;
+            case TIMEOUT                  -> ErrorCategory.TIMEOUT;
             case SERVER_ERROR             -> ErrorCategory.SERVER_ERROR;
             case RATE_LIMIT               -> ErrorCategory.RATE_LIMIT;
             case QUOTA_EXCEEDED           -> ErrorCategory.QUOTA_EXCEEDED;
@@ -194,6 +226,7 @@ public class LlmException extends RuntimeException {
             case MODEL_NOT_FOUND         -> ErrorCategory.MODEL_NOT_FOUND;
             case UNSUPPORTED_OPERATION   -> ErrorCategory.UNSUPPORTED_OPERATION;
             case PARSE_ERROR             -> ErrorCategory.PARSE_ERROR;
+            case EMPTY_RESPONSE          -> ErrorCategory.EMPTY_RESPONSE;
             case UNKNOWN                 -> ErrorCategory.UNKNOWN;
         };
     }

@@ -764,7 +764,7 @@ final class ReactExecutionSupport {
             if (ctx.logIo()) {
                 log.info("TOOL CALL [{}] args={}", tcr.toolId(), truncate(tcr.argumentJson(), ctx.logIoMaxChars()));
             }
-            ctx.task().notifyToolCall(tcr.toolId());
+            ctx.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
             ctx.steps().add(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), ctx.iteration()));
             // A derived, per-call task carrying only this call's toolCallId (for
             // TelemetryToolRegistry's tool.call_id attribute) — created here, on the

@@ -65,6 +65,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
     private final OllamaStreamingChatModel streamingModel;
     private final String                   modelName;
     private final boolean                  nativeTools;
+    private final Duration                 timeout;
     /**
      * Precomputed once: a pure function of the adapter's capabilities, which never change
      * after construction — rebuilding the set on every request only allocates needlessly.
@@ -121,6 +122,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
     private OllamaLlmClient(Builder builder) {
         this.modelName     = builder.modelName;
         this.nativeTools   = builder.nativeTools;
+        this.timeout       = builder.timeout;
         this.supportedMediaTypes = MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
         this.chatModel     = OllamaChatModel.builder()
                 .baseUrl(builder.baseUrl)
@@ -189,7 +191,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
         if (msg.contains("404") || msg.contains("model not found") || msg.contains("pull model")) {
             return LlmException.modelNotFound(PROVIDER, modelName);
         }
-        return fallbackClassify(PROVIDER, msg, ex);
+        return fallbackClassify(PROVIDER, msg, ex, timeout);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
