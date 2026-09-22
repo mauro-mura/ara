@@ -2,10 +2,10 @@
 
 Questa classe implementa i pattern **Facade** e **Builder**. È il punto di ingresso unico per gli utenti del framework.
 
-> **Stato correzioni (2026-07-09).** I rilievi #1, #2 (solo `extraStrategies`), #3, #6 e #7
-> sono stati **risolti** e coperti da test in `AraRuntimeLifecycleTest`. I dettagli sono
+> **Stato correzioni (2026-09-16).** I rilievi #1, #2 (solo `extraStrategies`), #3, #6, #7
+> e #8 (vedi sotto) sono stati **risolti** e coperti da test. I dettagli sono
 > annotati inline sotto ciascun punto. #4 e #5 (auto-start) restano scelte di design
-> consapevoli; #8 (`AraRuntimeConfig`) resta un'osservazione aperta. Nota inoltre che la
+> consapevoli. Nota inoltre che la
 > parte di #2 relativa a `interceptors` **non era un bug**: `interceptors(List<...>)` è un
 > setter di lista intera, per cui la sostituzione è la semantica idiomatica attesa.
 
@@ -81,3 +81,15 @@ throw new IllegalStateException("Default LLM client '" + defaultClientId + "' no
 La classe accetta un AraRuntimeConfig nel Builder (runtimeConfig), e lo salva nell'istanza. Tuttavia, durante il build(), nessuna delle dipendenze create (MessageBus, Scheduler, Planner, Factory) usa direttamente cfg per i propri parametri costruttivi. Tutto viene pilotato dai singoli campi del Builder.
 
 Questo fa sorgere il dubbio: a cosa serve realmente AraRuntimeConfig in questo momento? Se serve solo per il logging (config.name()), allora è sovraccarico. Se in futuro dovesse contenere flag che modificano il comportamento del builder (es. cfg.maxParallelTools()), il codice attuale non li leggerebbe. C'è un rischio che AraRuntimeConfig diventi un "Configuration Ghost" (un oggetto che sembra configurare il sistema ma che in realtà viene ignorato a favore dei campi del Builder).
+
+> **✅ Risolto (2026-09-16).** Contrasto al "Configuration Ghost": ogni campo è ora o
+> *consumato* o esplicitamente *riservato*, mai silenziosamente ignorato. Consumati:
+> `name` (identità, log e lifecycle), `description` (identità nella log di avvio di
+> `start()`), `shutdownTimeoutSec` (drain dell'executor), e `startupTimeoutSec` — prima
+> mai letto, ora vincola la creazione degli agenti della `AgentProvider` in `start()`
+> con una deadline cooperativa (`IllegalStateException` se sforata). Riservati e
+> documentati come tali nel javadoc del record: `persistenceMode` e `h2DbPath`,
+> anticipano una persistenza H2 non ancora implementata. Copertura test nuova in
+> `AraRuntimeConfigTest`, `AraYamlLoaderTest` (fixture `ara.yml`) e il watchdog di
+> startup in `AraRuntimeLifecycleTest`. Il contratto campo-per-campo è nel javadoc di
+> `AraRuntimeConfig`.

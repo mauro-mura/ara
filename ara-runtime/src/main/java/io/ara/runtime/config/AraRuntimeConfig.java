@@ -26,6 +26,18 @@ import java.util.Objects;
  *
  * <p>Environment variable substitution is supported in all values:
  * {@code ${ENV_VAR}} and {@code ${ENV_VAR:default}}.
+ *
+ * <p>Field contract — each field is either <em>consumed</em> by the runtime or
+ * explicitly <em>reserved</em>; nothing is dead config. Consumed today: {@link
+ * #name()} (runtime identity, logs and lifecycle messages), {@link
+ * #description()} (identity, included in the startup log), {@link
+ * #startupTimeoutSec()} (bounds {@code AraRuntime.start()}'s provider-driven
+ * agent creation), {@link #shutdownTimeoutSec()} (executor drain before {@code
+ * shutdownNow()}). Reserved: {@link #persistenceMode()} and {@link #h2DbPath()}
+ * anticipate an H2-backed persistence layer that does not exist yet — they are
+ * parsed, validated and round-tripped but intentionally not consumed, and must
+ * not be wired into behavior prematurely (previously the two most confounding
+ * "configuration ghost" fields; see {@code AraRuntime} package README §8).
  */
 public record AraRuntimeConfig(
         String name,

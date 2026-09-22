@@ -12,6 +12,8 @@ import io.ara.runtime.config.AraRuntimeConfig;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -201,10 +203,56 @@ class AraRuntimeLifecycleTest {
         runtime.stop();
     }
 
+    // ── start() honors AraRuntimeConfig.startupTimeoutSec ───────────────────
+
+    /** Provider whose config supply is slow but returns — the cooperative watchdog case. */
+    @Test
+    void start_failsFastWhenProviderStartupExceedsConfiguredTimeout() {
+        AraRuntime runtime = baseBuilder()
+                .runtimeConfig(AraRuntimeConfig.builder().startupTimeoutSec(1).build())
+                .agentProvider(() -> {
+                    sleepQuietly(1_500);
+                    return List.of(minimalConfig("late"));
+                })
+                .build();
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class, runtime::start);
+        assertTrue(ex.getMessage().contains("startupTimeoutSec"),
+                () -> "message should name the knob: " + ex.getMessage());
+
+        // The aborted start left the lifecycle STARTED (same fail-fast contract as a
+        // throwing AgentProvider) — stop() must still clean up cleanly.
+        runtime.stop();   // leave no scheduler/executor behind after the aborted start
+    }
+
+    @Test
+    void start_withFastProvider_createsProviderAgentsWithinTheDeadline() {
+        AraRuntime runtime = baseBuilder()
+                .runtimeConfig(AraRuntimeConfig.builder().startupTimeoutSec(30).build())
+                .agentProvider(() -> List.of(minimalConfig("p1"), minimalConfig("p2")))
+                .build();
+
+        runtime.start();
+        assertTrue(runtime.isRunning());
+        assertTrue(runtime.registry().isRegistered(AgentId.of("p1")), "provider agent was created and registered");
+        assertTrue(runtime.registry().isRegistered(AgentId.of("p2")), "provider agent was created and registered");
+
+        runtime.stop();
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     // ── stop() honors AraRuntimeConfig.shutdownTimeoutSec ───────────────────
 
     /**
      * Strategy that blocks well past the configured drain timeout and shrugs off
+     * interrupts. A cooperative task would already be stopped by {@code terminate()}
      * interrupts. A cooperative task would already be stopped by {@code terminate()}
      * during {@code stop()}'s destroy phase, and the drain would never time out — the
      * non-cooperative task is exactly the scenario the drain timeout exists for.

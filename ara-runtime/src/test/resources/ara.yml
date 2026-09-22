@@ -1,0 +1,9 @@
+ara:
+  runtime:
+    name: my-ara
+    startupTimeoutSec: 15
+    shutdownTimeoutSec: 7
+    description: test fixture runtime
+  persistence:
+    mode: memory
+    h2DbPath: ./data/ara
