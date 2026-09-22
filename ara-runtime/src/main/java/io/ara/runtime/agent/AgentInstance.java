@@ -382,89 +382,110 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             return sessionBusyFailure(task.taskId(), session);
         }
 
+        // With no interceptors registered (the default), every before/after notification and
+        // both Intercepting* decorators are pure hot-path overhead: the chain loops over
+        // nothing, and the decorators would still build a fresh AgentExecutionContext on
+        // every LLM call and every tool dispatch via contextSupplier. Read the count once and
+        // share it across the Planning phase and the Executing dispatch, each of which skips
+        // building a snapshot nobody will read when the chain is empty.
+        boolean hasInterceptors = interceptorChain.size() > 0;
+
         session.stateMachine().transitionTo(AgentState.PLANNING);
-        AgentExecutionContext planCtx = buildContext(task.taskId(), session, 0, 0);
-        interceptorChain.before(planCtx, "Planning");
-
-        ExecutionStrategy strategy = executionPlanner.select(config);
-        log.debug("Agent [{}] selected strategy [{}]", agentId().value(), strategy.strategyName());
-
-        interceptorChain.after(planCtx, "Planning", strategy.strategyName());
+        ExecutionStrategy strategy = selectStrategy(task.taskId(), session, config, hasInterceptors);
 
         session.stateMachine().transitionTo(AgentState.EXECUTING);
-
-        // Declared outside the try so the actual per-call client (resolved once when the
-        // session's wiring was built) is available to resolvedLlmProviderId() even on the
-        // success/failure paths below.
-        LlmClient effectiveLlm = null;
         try {
-            if (closed.get() || session.isCancelRequested()) {
-                return handleEarlyTermination(task.taskId(), session, startedAt);
-            }
-
-            // With no interceptors registered (the default), the before() notification and
-            // the two Intercepting* decorators are pure hot-path overhead: before() loops
-            // over nothing, and the decorators would still build a fresh AgentExecutionContext
-            // on every LLM call and every tool dispatch via contextSupplier. Skip all of it
-            // and hand the strategy the raw session-pinned client/registry — already
-            // OTel-instrumented by the wiring — which is exactly what the decorators would
-            // delegate to.
-            boolean hasInterceptors = interceptorChain.size() > 0;
-            if (hasInterceptors) {
-                AgentExecutionContext execCtx = buildContext(task.taskId(), session, 0, 0);
-                interceptorChain.before(execCtx, "Executing");
-            }
-
-            MemoryManager memoryManager = session.memoryManager();
-            seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
-
-            effectiveLlm = session.wiring().llm();
-            ToolRegistry toolRegistry = session.wiring().toolRegistry();
-
-            LlmClient dispatchedLlm   = effectiveLlm;
-            ToolRegistry dispatchedTools = toolRegistry;
-            if (hasInterceptors) {
-                // One supplier shared by both decorators instead of two identical lambdas:
-                // it is invoked on every LLM call and every tool dispatch, so it belongs
-                // to the hot path.
-                Supplier<AgentExecutionContext> contextSupplier =
-                        () -> buildContext(task.taskId(), session, 0, 0);
-                // Wrapped, not the raw session-pinned client/registry: gives interceptors
-                // per-iteration Think/ToolCall visibility (see InterceptingLlmClient /
-                // InterceptingToolRegistry) without any strategy needing to know about the
-                // interceptor chain — same pattern as the OTel decorators in AraRuntime.
-                dispatchedLlm = new InterceptingLlmClient(effectiveLlm, interceptorChain, contextSupplier);
-                dispatchedTools = new InterceptingToolRegistry(toolRegistry, interceptorChain, contextSupplier);
-            }
-            ExecutionResult result = strategy.execute(task, dispatchedLlm, memoryManager, dispatchedTools, config);
-
-            Duration elapsed = Duration.between(startedAt, Instant.now());
-
-            if (!result.isSuccess()) {
-                return handleFailure(task.taskId(), session, result, elapsed, effectiveLlm);
-            } else {
-                // Record the turn before resetting working memory
-                if (config.maxConversationTurns() > 0) {
-                    session.conversationHistory().addTurn(task.input(), result.output(), task.media());
-                }
-                return handleSuccess(task, session, result, elapsed, effectiveLlm);
-            }
-
+            return runStrategy(task, session, config, effectiveSystemPrompt, strategy,
+                    hasInterceptors, startedAt);
         } catch (ExecutionTimeoutException e) {
             log.warn("Agent [{}] timed out after {}s for task [{}]",
                     agentId().value(), e.timeout().toSeconds(), task.taskId());
             Duration elapsed = Duration.between(startedAt, Instant.now());
-            AgentExecutionContext timeoutCtx = buildContext(task.taskId(), session, 0, 0);
-            interceptorChain.onTimeout(timeoutCtx, "Executing", e.timeout());
-            resetSessionAfterFailure(session);
+            resetSessionAfterFailure(session,
+                    () -> interceptorChain.onTimeout(context(task.taskId(), session, 0, 0), "Executing", e.timeout()));
             return AgentResponse.failure(task.taskId(), agentId(), e.getMessage(), elapsed);
         } catch (Exception e) {
             log.error("Agent [{}] threw an unexpected exception during task [{}]",
                     agentId().value(), task.taskId(), e);
-            Duration elapsed = Duration.between(startedAt, Instant.now());
-            return handleUnexpectedError(task.taskId(), session, e, elapsed);
+            return handleUnexpectedError(task.taskId(), session, e,
+                    Duration.between(startedAt, Instant.now()));
         }
     }
+
+    /**
+     * Planning phase: resolves the strategy and, when interceptors are registered, brackets
+     * the selection with the {@code "Planning"} hooks. The context snapshot is built only when
+     * a hook will read it — with no interceptors the before/after calls are no-ops and the
+     * allocation would be pure overhead (the same reasoning as the Executing hot path).
+     */
+    private ExecutionStrategy selectStrategy(String taskId, AgentSession session,
+                                             AgentConfig config, boolean hasInterceptors) {
+        AgentExecutionContext planCtx = hasInterceptors ? context(taskId, session, 0, 0) : null;
+        if (hasInterceptors) {
+            interceptorChain.before(planCtx, "Planning");
+        }
+        ExecutionStrategy strategy = executionPlanner.select(config);
+        log.debug("Agent [{}] selected strategy [{}]", agentId().value(), strategy.strategyName());
+        if (hasInterceptors) {
+            interceptorChain.after(planCtx, "Planning", strategy.strategyName());
+        }
+        return strategy;
+    }
+
+    /**
+     * Executing phase: bails out if cancellation arrived while queued, seeds working memory
+     * for this turn, runs the strategy against the session's pinned collaborators, and turns
+     * its {@link ExecutionResult} into a response.
+     */
+    private AgentResponse runStrategy(AgentTask task, AgentSession session, AgentConfig config,
+                                      String effectiveSystemPrompt, ExecutionStrategy strategy,
+                                      boolean hasInterceptors, Instant startedAt) {
+        if (closed.get() || session.isCancelRequested()) {
+            return handleEarlyTermination(task.taskId(), session, startedAt);
+        }
+
+        Dispatched dispatched = dispatchCollaborators(task.taskId(), session, hasInterceptors);
+        MemoryManager memoryManager = session.memoryManager();
+        seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
+
+        ExecutionResult result = strategy.execute(task, dispatched.llm(), memoryManager,
+                dispatched.tools(), config);
+
+        Duration elapsed = Duration.between(startedAt, Instant.now());
+        if (!result.isSuccess()) {
+            return handleFailure(task.taskId(), session, result, elapsed, dispatched.llm());
+        }
+        // Record the turn before resetting working memory
+        if (config.maxConversationTurns() > 0) {
+            session.conversationHistory().addTurn(task.input(), result.output(), task.media());
+        }
+        return handleSuccess(task, session, result, elapsed, dispatched.llm());
+    }
+
+    /**
+     * The LLM client and tool registry this execution runs against: the session's pinned
+     * pair — already OTel-instrumented by the wiring — or, when interceptors are registered,
+     * decorators wrapping them so interceptors get per-iteration Think/ToolCall visibility
+     * without any strategy needing to know about the interceptor chain. Same pattern as the
+     * OTel decorators in {@code AraRuntime}.
+     */
+    private Dispatched dispatchCollaborators(String taskId, AgentSession session, boolean hasInterceptors) {
+        LlmClient llm = session.wiring().llm();
+        ToolRegistry tools = session.wiring().toolRegistry();
+        if (!hasInterceptors) {
+            return new Dispatched(llm, tools);
+        }
+        // One supplier shared by both decorators instead of two identical lambdas: it is
+        // invoked on every LLM call and every tool dispatch, so it belongs to the hot path.
+        Supplier<AgentExecutionContext> contextSupplier = () -> context(taskId, session, 0, 0);
+        interceptorChain.before(contextSupplier.get(), "Executing");
+        return new Dispatched(
+                new InterceptingLlmClient(llm, interceptorChain, contextSupplier),
+                new InterceptingToolRegistry(tools, interceptorChain, contextSupplier));
+    }
+
+    /** The collaborators a single strategy execution runs against. */
+    private record Dispatched(LlmClient llm, ToolRegistry tools) {}
 
     /**
      * Seeds working memory for a fresh execution: system prompt, then up to
@@ -632,7 +653,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         String taskId = task.taskId();
         AgentConfig config = session.wiring().config();
         session.stateMachine().transitionTo(AgentState.DONE);
-        AgentExecutionContext doneCtx = buildContext(taskId, session, result.iterationsDone(), result.tokensUsed());
+        AgentExecutionContext doneCtx = context(taskId, session, result.iterationsDone(), result.tokensUsed());
         interceptorChain.after(doneCtx, "Executing", result.output());
 
         AgentResponse response = AgentResponse.success(
@@ -654,12 +675,10 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
 
     private AgentResponse handleFailure(String taskId, AgentSession session,
                                          ExecutionResult result, Duration elapsed, LlmClient usedLlm) {
-        session.stateMachine().transitionTo(AgentState.FAILED);
         String reason = result.failureReasonOpt().orElse("Unknown failure");
-        AgentExecutionContext failCtx = buildContext(taskId, session, result.iterationsDone(), result.tokensUsed());
-        dispatchFailureEvent(failCtx, "Executing", reason);
-        session.memoryManager().clearWorkingMemory();
-        session.stateMachine().transitionTo(AgentState.IDLE);
+        resetSessionAfterFailure(session,
+                () -> dispatchFailureEvent(context(taskId, session, result.iterationsDone(), result.tokensUsed()),
+                        "Executing", reason));
 
         log.warn("Agent [{}] failed task [{}]: {}", agentId().value(), taskId, reason);
         // result.output() is "" for every strategy that has nothing safe to show on
@@ -701,31 +720,34 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     private AgentResponse handleUnexpectedError(String taskId, AgentSession session,
                                                   Exception e, Duration elapsed) {
         String reason = "Unexpected error: " + e.getMessage();
-        AgentExecutionContext errCtx = buildContext(taskId, session, 0, 0);
-        interceptorChain.onError(errCtx, "Executing", e);
-        resetSessionAfterFailure(session);
+        resetSessionAfterFailure(session,
+                () -> interceptorChain.onError(context(taskId, session, 0, 0), "Executing", e));
         return AgentResponse.failure(taskId, agentId(), reason, elapsed);
     }
 
     private AgentResponse handleEarlyTermination(String taskId, AgentSession session, Instant startedAt) {
         log.warn("Agent [{}] termination detected before execution started for task [{}]",
                 agentId().value(), taskId);
-        interceptorChain.onCancelled(buildContext(taskId, session, 0, 0), "Executing");
-        resetSessionAfterFailure(session);
+        resetSessionAfterFailure(session,
+                () -> interceptorChain.onCancelled(context(taskId, session, 0, 0), "Executing"));
         return AgentResponse.failure(taskId, agentId(), "Agent terminated before execution",
                 Duration.between(startedAt, Instant.now()));
     }
 
     /**
-     * Best-effort reset to a clean, idle session after any failure path. Wrapped in a
-     * swallow-all: a concurrent terminate() or cancel may have already moved the state
-     * machine, and failing to reset here would be worse than a silent no-op — the session
-     * must always end up available for the next task.
+     * Best-effort reset to a clean, idle session after any failure path. {@code failureNotice}
+     * runs once the session has been marked {@link AgentState#FAILED} — so a hook reading the
+     * context sees the failure state — but before working memory is cleared, so it still sees
+     * this turn's window. Every step, including the notice, is wrapped in a swallow-all: a
+     * concurrent terminate()/cancel may have already moved the state machine, an interceptor
+     * may itself throw, and failing to reset here would be worse than a silent no-op — the
+     * session must always end up available for the next task.
      */
-    private void resetSessionAfterFailure(AgentSession session) {
-        quietly(session, "transition to FAILED", () -> session.stateMachine().transitionTo(AgentState.FAILED));
-        quietly(session, "clear working memory", () -> session.memoryManager().clearWorkingMemory());
-        quietly(session, "transition to IDLE",   () -> session.stateMachine().transitionTo(AgentState.IDLE));
+    private void resetSessionAfterFailure(AgentSession session, Runnable failureNotice) {
+        quietly(session, "transition to FAILED",    () -> session.stateMachine().transitionTo(AgentState.FAILED));
+        quietly(session, "dispatch failure notice", failureNotice);
+        quietly(session, "clear working memory",    () -> session.memoryManager().clearWorkingMemory());
+        quietly(session, "transition to IDLE",      () -> session.stateMachine().transitionTo(AgentState.IDLE));
     }
 
     /**
@@ -759,8 +781,14 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         return null;
     }
 
-    private AgentExecutionContext buildContext(String taskId, AgentSession session,
-                                               int iterations, int tokens) {
+    /**
+     * Builds the checkpoint snapshot an {@link AgentInterceptor} hook receives for the
+     * current session: the live working-memory window and lifecycle state at the instant of
+     * the call. Each hook invocation gets its own snapshot (memory and state evolve between
+     * calls), so this is a factory, not a cached value.
+     */
+    private AgentExecutionContext context(String taskId, AgentSession session,
+                                          int iterations, int tokens) {
         return new AgentExecutionContext(
                 agentId(),
                 taskId,
@@ -786,7 +814,10 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         return inputRate.multiply(fraction(promptTokens)).plus(outputRate.multiply(fraction(outputTokens)));
     }
 
+    /** Divisor for the per-1k token rate, hoisted so this hot path allocates only the result. */
+    private static final java.math.BigDecimal ONE_THOUSAND = java.math.BigDecimal.valueOf(1_000);
+
     private static java.math.BigDecimal fraction(int tokens) {
-        return java.math.BigDecimal.valueOf(tokens).divide(java.math.BigDecimal.valueOf(1_000));
+        return java.math.BigDecimal.valueOf(tokens).divide(ONE_THOUSAND);
     }
 }

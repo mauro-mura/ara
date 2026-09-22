@@ -12,8 +12,8 @@ import java.util.Objects;
  * sandbox that actually runs a synthesized tool's tests under these limits (denying the
  * network, capping CPU/memory) is a separate component (ADR-0084), not part of this module.
  *
- * @param network        network access; default {@link Network#DENY} is the non-negotiable
- *                       "network denied by default" of source §3.2.6
+ * @param network        network access; default {@link Network#DENY}: a tool must opt in to
+ *                       network access explicitly, it is never granted by default
  * @param allowedDomains when {@code network == ALLOW}, the domains the tool may reach; ignored otherwise
  * @param fsScope        a filesystem path the tool is confined to, or {@code null} for no filesystem access
  * @param timeoutSeconds hard wall-clock cap; {@code > 0}
@@ -41,15 +41,15 @@ public record SandboxPolicy(
         return new SandboxPolicy(Network.DENY, List.of(), null, timeoutSeconds, memMb);
     }
 
-    /** ADR-0084 D2 default: network denied, filesystem scoped to a per-run temp dir, {@code 30}s / {@code 256}MiB. */
+    /** Default wall-clock cap for a synthesized tool's sandbox — a bounded run, never an open one. */
     public static final int DEFAULT_TIMEOUT_SECONDS = 30;
 
-    /** ADR-0084 D2 default memory cap in MiB. */
+    /** Default memory cap in MiB for a synthesized tool's sandbox. */
     public static final int DEFAULT_MEM_MB = 256;
 
     /**
-     * The ADR-0084 D2 default a synthesized tool gets when its {@code Proposal.NewToolSynthesis}
-     * declares no explicit policy — never "run with no limits because nobody set them".
+     * The isolation a synthesized tool gets when it declares no explicit policy — never
+     * "run with no limits because nobody set them".
      */
     public static SandboxPolicy synthesizedDefault(String runId) {
         Objects.requireNonNull(runId, "runId must not be null");

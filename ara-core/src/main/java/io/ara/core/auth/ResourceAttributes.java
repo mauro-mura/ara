@@ -3,8 +3,9 @@ package io.ara.core.auth;
 import java.util.Objects;
 
 /**
- * Attributes of the target agent (or tool) in an ABAC policy decision (ADR-033 Fase 2b, S8
- * — `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`).
+ * Attributes of the target agent (or tool) in an ABAC policy decision (ADR-033): the
+ * "resource" the caller wants to act on, evaluated alongside {@link SubjectAttributes},
+ * {@link ActionAttributes} and {@link EnvironmentAttributes}.
  *
  * @param agentId              the target's own id
  * @param agentType            the target's declared {@code AgentConfig.agentType()}

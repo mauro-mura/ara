@@ -1,5 +1,6 @@
 package io.ara.core.agent;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -9,11 +10,13 @@ import java.util.Objects;
  * (e.g. {@code maxReflections}, {@code replanStrategy}) with a sealed type hierarchy
  * where each permitted type carries exactly the parameters its strategy needs.
  *
- * <p>Permitted to the strategies actually implemented by {@code ExecutionPlanner}'s
- * registered set ({@code ReactStrategy}, {@code ReSpActStrategy}, {@code
- * PlanExecuteStrategy}, {@code ReflexionStrategy}, {@code ReflActStrategy}).
- * Add a new permitted type only alongside a real {@code ExecutionStrategy}
- * implementation — see ADR-001 P9.
+ * <p>The built-in permitted types are sealed to the strategies {@code ExecutionPlanner}
+ * ships ({@code ReactStrategy}, {@code ReSpActStrategy}, {@code PlanExecuteStrategy},
+ * {@code ReflexionStrategy}, {@code ReflActStrategy}). A consumer's own strategy cannot
+ * add a permitted type — a sealed hierarchy permits only its declared subtypes — so
+ * {@link Custom} is the one open variant: it carries the strategy name plus an untyped
+ * parameter map, letting a third-party strategy keep typed configuration without a
+ * new built-in variant per consumer.
  *
  * <h2>Usage</h2>
  * <pre>{@code
@@ -46,7 +49,8 @@ public sealed interface StrategyConfig permits
         StrategyConfig.React,
         StrategyConfig.PlanExecute,
         StrategyConfig.Reflexion,
-        StrategyConfig.ReflAct {
+        StrategyConfig.ReflAct,
+        StrategyConfig.Custom {
 
     /** Returns the string key used by {@code ExecutionPlanner} to select this strategy. */
     String strategyName();
@@ -155,6 +159,36 @@ public sealed interface StrategyConfig permits
 
         /** Returns a {@code ReflAct} config with production defaults (3 reflections, streak of 2, reflect-on-failure). */
         public static ReflAct defaults() { return new ReflAct(3, 2, true, null); }
+    }
+
+    /**
+     * Configuration for a strategy that is not one of the built-ins — the extension seam
+     * for a consumer's own {@link ExecutionStrategy} registered through {@code
+     * AraRuntime.Builder.extraStrategies(...)}.
+     *
+     * <p>A sealed hierarchy cannot be extended from outside this module, so a third-party
+     * strategy has no way to add a permitted type of its own. Without an open variant it
+     * would have to smuggle its parameters through {@code AgentConfig} string fields or a
+     * side channel the framework knows nothing about. {@code Custom} carries the strategy
+     * name plus an untyped parameter map instead: the framework never interprets the map,
+     * the strategy reads its own keys.
+     *
+     * @param strategyName the strategy this config belongs to; must be non-blank and match
+     *                     the registered strategy's {@code strategyName()}
+     * @param params       strategy-specific parameters; {@code null} is treated as empty,
+     *                     and the map is copied defensively (no null keys or values)
+     */
+    record Custom(String strategyName, Map<String, Object> params) implements StrategyConfig {
+
+        public Custom {
+            Objects.requireNonNull(strategyName, "strategyName must not be null");
+            if (strategyName.isBlank())
+                throw new IllegalArgumentException("strategyName must not be blank");
+            params = params == null ? Map.of() : Map.copyOf(params);
+        }
+
+        /** Returns a {@code Custom} config for {@code strategyName} with no parameters. */
+        public static Custom of(String strategyName) { return new Custom(strategyName, Map.of()); }
     }
 
     // ── static factory methods ────────────────────────────────────────────────

@@ -343,6 +343,14 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         LlmCallContext stepCtx = run.nativeTools()
                 ? run.ctx().withResolvedTools(run.resolvedTools()) : run.ctx();
 
+        // The step's instruction prefix — system prompt, task, plan overview, completed-step
+        // summaries, current step instruction — is invariant for every round of this step
+        // (plan, step index and stepResults are fixed here), so it is built once and each
+        // round appends only the tool exchanges this step has accumulated. Rebuilding it
+        // per round re-serialised the plan overview and the step summaries for a string
+        // that never changed.
+        List<LlmMessage> stepPrefix = buildStepPrefix(run, plan, stepResults, stepIdx);
+
         while (!stepDone) {
             if (cancelled()) break;   // outer loop returns "Cancelled" on the next boundary check
             checkTimeout(run.deadline(), run.config());
@@ -351,7 +359,8 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             tally.iterations++;
             stepRounds++;
 
-            List<LlmMessage> messages = buildStepMessages(run, plan, stepResults, stepIdx, stepLocalHistory);
+            List<LlmMessage> messages = new ArrayList<>(stepPrefix);
+            messages.addAll(stepLocalHistory);
 
             LlmCompletion completion;
             try {
@@ -375,7 +384,13 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             Optional<ToolCallParser.ToolCallRequest> toolCall = ToolCallParser.extract(completion);
 
             if (toolCall.isPresent()) {
-                dispatchTool(toolCall.get(), text, stepLocalHistory, run, tally);
+                try {
+                    dispatchTool(toolCall.get(), text, stepLocalHistory, run, tally);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.debug("Cancelled during tool dispatch on step {}/{}", stepIdx + 1, plan.size());
+                    return lastResult;
+                }
                 continue;
             }
 
@@ -403,10 +418,21 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
      * this strategy previously skipped entirely: no {@code tool_call} SSE event ever
      * fired and {@code AgentResponse.steps()} was always empty for {@code plan_execute},
      * despite {@link ExecutionStep}'s contract that traces reach the caller.
+     *
+     * <p><b>P0/U1-U2, 2026-09-22:</b> the tool call itself now runs through {@link
+     * ReactExecutionSupport#runBounded} instead of inline on this (the reasoning) thread —
+     * previously the only dispatch path in the codebase with no deadline and no watchdog at
+     * all, so a hung tool (a stuck MCP server, a shell command still streaming) blocked this
+     * step, and by extension the whole task, forever, ignoring {@code executionTimeout} — the
+     * step loop's own {@code checkTimeout} boundary check is only ever reached between rounds,
+     * never while a round's own tool call is still in flight.
+     *
+     * @throws InterruptedException      if the calling thread is cancelled while the tool call is in flight
+     * @throws ExecutionTimeoutException if {@code run.deadline()} passes before the tool call returns
      */
     private void dispatchTool(
             ToolCallParser.ToolCallRequest tcr, String completionText,
-            List<LlmMessage> stepLocalHistory, Run run, Tally tally) {
+            List<LlmMessage> stepLocalHistory, Run run, Tally tally) throws InterruptedException {
 
         run.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
         tally.steps.add(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), tally.iterations));
@@ -415,7 +441,10 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         AgentTask dispatchTask = (callId != null && !callId.isBlank())
                 ? run.task().withAttachment(TelemetryToolRegistry.TOOL_CALL_ID_ATTACHMENT_KEY, callId)
                 : run.task();
-        ToolResult result = run.tools().execute(tcr.toolId(), tcr.argumentJson(), dispatchTask);
+        ToolResult result = ReactExecutionSupport.runBounded(
+                run.tools(),
+                () -> run.tools().execute(tcr.toolId(), tcr.argumentJson(), dispatchTask),
+                run.deadline(), run.config().executionTimeout());
 
         String observation = result.success()
                 ? result.output()
@@ -511,8 +540,10 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
     }
 
     /**
-     * Per-step execution: isolated context containing system prompt, task, compact plan
-     * status, compact previous results, and the tool exchange history for this step only.
+     * Per-step execution: the invariant instruction prefix for every round of one step —
+     * isolated context containing system prompt, task, compact plan status, compact
+     * previous results, and the current step instruction. The caller appends that step's
+     * own tool exchange history to a copy of this list on each round.
      *
      * <p>Token usage is O(maxPlanSteps × STEP_RESULT_TRUNCATE_CHARS + stepLocalHistory)
      * regardless of total iterations.
@@ -520,9 +551,8 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
      * <p>When {@code run.nativeTools()} is {@code true} the text tool catalog and the
      * inline JSON tool-call instruction are both omitted — see {@link #EXEC_SUFFIX_NATIVE}.
      */
-    private List<LlmMessage> buildStepMessages(
-            Run run, List<String> plan, Map<Integer, String> stepResults,
-            int currentStepIdx, List<LlmMessage> stepLocalHistory) {
+    private List<LlmMessage> buildStepPrefix(
+            Run run, List<String> plan, Map<Integer, String> stepResults, int currentStepIdx) {
 
         List<LlmMessage> messages = new ArrayList<>();
         String toolCatalog = run.stepCatalog();
@@ -558,9 +588,6 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         messages.add(new LlmMessage("user",
                 "Execute step %d/%d: %s".formatted(
                         currentStepIdx + 1, plan.size(), plan.get(currentStepIdx))));
-
-        // Tool call / observation exchanges for this step only
-        messages.addAll(stepLocalHistory);
         return messages;
     }
 

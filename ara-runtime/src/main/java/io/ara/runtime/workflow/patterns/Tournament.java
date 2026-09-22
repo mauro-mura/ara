@@ -52,10 +52,10 @@ import java.util.function.IntFunction;
  * it cannot itself verify inherits the same blind spot the contenders have, and — being
  * built the same way, often the same agent — is no more likely to break the tie correctly
  * than picking at random. {@link #ofJudgingSource} adds a direct edge from the source to
- * the judge so its body receives the problem alongside the candidates (ara-private
- * ADR-0108, where a live tournament over a small local model's date-arithmetic answers
- * measured this exact failure: the judge, seeing only three candidate numbers with no
- * dates to check them against, did no better than chance).
+ * the judge so its body receives the problem alongside the candidates. ADR-0108 measured
+ * this exact failure in a live tournament over a small local model's date-arithmetic
+ * answers: the judge, seeing only three candidate numbers with no dates to check them
+ * against, did no better than chance.
  */
 public final class Tournament implements WorkflowPattern {
 

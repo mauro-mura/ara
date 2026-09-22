@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /**
  * The risk classification of a tool — a property of the tool declared in the registry,
- * never decided by the calling agent at runtime (ADR-0067, source §3.8.3). A wrapper over
+ * never decided by the calling agent at runtime (ADR-0067). A wrapper over
  * {@link AraTool#toolId()}, the same pattern as {@code AgentSpec} over {@code AgentConfig}
  * (ADR-0065): {@code AraTool} is a widely-implemented interface and is not touched.
  *
@@ -23,7 +23,8 @@ import java.util.Objects;
  * @param reversibility the fused four-level classification
  * @param sandbox      {@code null} for {@link ToolOrigin#BUILTIN}; mandatory for {@link ToolOrigin#SYNTHESIZED}
  * @param origin       {@link ToolOrigin#BUILTIN} or {@link ToolOrigin#SYNTHESIZED}
- * @param tests        must be non-empty for a synthesized tool (§3.2.6)
+ * @param tests        must be non-empty for a synthesized tool (a tool that ships without
+ *                     its own tests is refused, not trusted)
  * @param status       {@link ToolLifecycle} phase (ADR-0084 D5); defaults to {@link ToolLifecycle#DRAFT}
  */
 public record ToolSpec(
@@ -63,7 +64,7 @@ public record ToolSpec(
         this(toolId, sideEffects, reversibility, sandbox, origin, tests, ToolLifecycle.DRAFT);
     }
 
-    /** A copy in a different lifecycle phase (ADR-0084 D4). */
+    /** Returns a copy with the given lifecycle phase (a promoted/retired status change). */
     public ToolSpec withStatus(ToolLifecycle newStatus) {
         return new ToolSpec(toolId, sideEffects, reversibility, sandbox, origin, tests,
                 Objects.requireNonNull(newStatus, "newStatus must not be null"));

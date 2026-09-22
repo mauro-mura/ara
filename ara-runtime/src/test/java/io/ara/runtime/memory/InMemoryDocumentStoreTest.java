@@ -3,6 +3,7 @@ package io.ara.runtime.memory;
 import io.ara.core.memory.EmbeddingClient;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -163,5 +164,116 @@ class InMemoryDocumentStoreTest {
         assertEquals(0, failures.get(), "neither indexing nor searching may throw under concurrency");
         // Registry must remain intact after all writes.
         assertTrue(kb.listDocuments().size() >= writers);
+    }
+
+    /**
+     * {@code docs/analysis/concurrency-hardening.md} §3 N1 row 6, §4 U26 — regression test.
+     *
+     * <p>Before U26, {@code indexDocument} called {@code embeddingClient.embed} (a network call
+     * to an embedding provider, in production) once per chunk while holding {@code
+     * lock.writeLock()} — a slow or stalled provider call serialized every concurrent
+     * {@code search} (which only needs the read lock) behind it. This blocks {@code embed}
+     * on a latch to keep it in flight, and checks that a concurrent {@code search} on the same
+     * store returns promptly instead of waiting for it.
+     */
+    @Test
+    void indexDocument_doesNotHoldTheLockWhileEmbedding_soSearchProceedsConcurrently() throws Exception {
+        CountDownLatch embedStarted = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        EmbeddingClient blockingOnce = new EmbeddingClient() {
+            private volatile boolean first = true;
+
+            @Override
+            public List<Float> embed(String text) {
+                if (first) {
+                    first = false;
+                    embedStarted.countDown();
+                    try {
+                        assertTrue(proceed.await(10, TimeUnit.SECONDS), "test must release the blocked embed call");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return EMBED.embed(text);
+            }
+
+            @Override
+            public int dimensions() {
+                return EMBED.dimensions();
+            }
+        };
+        InMemoryDocumentStore kb = new InMemoryDocumentStore("kb", blockingOnce);
+
+        Thread indexer = Thread.ofVirtual().start(() -> kb.indexDocument("d1", "t", "a cat"));
+        try {
+            assertTrue(embedStarted.await(5, TimeUnit.SECONDS), "indexDocument's embed call must have started");
+
+            long startNanos = System.nanoTime();
+            List<DocumentChunk> hits = kb.search("cat", 5);   // must not wait for the write lock
+            long elapsedMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
+
+            assertTrue(hits.isEmpty(), "the document being indexed has not been published yet");
+            assertTrue(elapsedMs < 2000,
+                    "search must not block on indexDocument's still-in-flight embed() call "
+                            + "(U26: embedding must run with no lock held), took " + elapsedMs + "ms");
+        } finally {
+            proceed.countDown();
+            indexer.join(TimeUnit.SECONDS.toMillis(5));
+        }
+
+        assertEquals(1, kb.search("cat", 5).size(), "the document must be published once embedding finishes");
+    }
+
+    /**
+     * {@code docs/analysis/concurrency-hardening.md} §4 U26 — regression test for a second bug
+     * found while implementing U26: {@code docRegistry} used to be guarded by {@code
+     * lock.writeLock()} in {@code indexDocument} but by {@code synchronized (docRegistry)} in
+     * {@code deleteDocument}/{@code listDocuments} — two uncoordinated locks over the same plain
+     * {@link java.util.LinkedHashMap}, giving those call sites no mutual exclusion with each
+     * other at all. Stresses concurrent {@code indexDocument} and {@code listDocuments} calls;
+     * a corrupted map would surface here as a thrown exception (e.g.
+     * {@code ConcurrentModificationException}, or worse, a resize-loop hang) rather than a
+     * clean assertion failure, so the meaningful signal is that this completes at all.
+     */
+    @Test
+    void concurrentIndexingAndListingDocRegistryDoesNotCorrupt() throws Exception {
+        InMemoryDocumentStore kb = store();
+        int writers = 4;
+        int readers = 4;
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger failures = new AtomicInteger();
+        List<Thread> threads = new java.util.ArrayList<>();
+        for (int i = 0; i < writers; i++) {
+            final int id = i;
+            threads.add(Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                    for (int j = 0; j < 50; j++) {
+                        kb.indexDocument("doc-" + id + "-" + j, "t", "a cat");
+                    }
+                } catch (Exception e) {
+                    failures.incrementAndGet();
+                }
+            }));
+        }
+        for (int i = 0; i < readers; i++) {
+            threads.add(Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                    for (int j = 0; j < 200; j++) {
+                        kb.listDocuments();
+                    }
+                } catch (Exception e) {
+                    failures.incrementAndGet();
+                }
+            }));
+        }
+        start.countDown();
+        for (Thread t : threads) {
+            t.join(TimeUnit.SECONDS.toMillis(30));
+        }
+
+        assertEquals(0, failures.get(), "concurrent indexDocument + listDocuments must never throw");
+        assertEquals(writers * 50, kb.listDocuments().size(), "every indexed document must be registered exactly once");
     }
 }

@@ -4,8 +4,8 @@ import io.ara.core.auth.ScopeGrant;
 import io.ara.core.auth.ScopeSet;
 
 /**
- * Store of active {@link ScopeGrant}s per agent (ADR-033 Fase 8, S5,
- * `docs/adr/ADR-033-implementation-plan.md` §8.2, `ara-private`).
+ * Store of active {@link ScopeGrant}s per agent (ADR-033 Fase 8): the time- and
+ * use-bounded grants that supplement an actor's static scopes.
  *
  * <p>Backs {@code AraRuntime.grantTemporaryScope} and is consulted by {@code
  * io.ara.runtime.bus.LocalMessageBus} on every dispatch: the caller's effective scopes are

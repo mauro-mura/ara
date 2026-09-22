@@ -8,8 +8,8 @@ import io.ara.core.eval.EvaluationStrategy;
 /**
  * Passes when the agent's output equals {@code evaluationConfig["expected"]} exactly
  * (trimmed). {@code evaluationConfig["ignore_case"] == "true"} makes the comparison
- * case-insensitive. One of ADR-019's eight built-ins (ADR-0070 D1), the deterministic
- * §3.1.2 level-1 kind.
+ * case-insensitive. One of ADR-019's eight built-in evaluators (ADR-0070 D1) — the
+ * deterministic, no-model-call kind.
  */
 public final class ExactMatchEvaluator implements EvaluationStrategy {
 

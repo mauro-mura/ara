@@ -28,9 +28,9 @@ import java.util.function.BinaryOperator;
  * step N runs, then every node ready at step N+1 runs, and so on. That boundary is where
  * the category's recurring defect lives: on a fan-in whose branches have uneven depth,
  * the short branch's token lands at step N and the long branch's at step N+1, so the join
- * fires once per branch instead of once total, the second time with a partial input (see
- * {@code docs/analysis/spike-adr-052-dataflow/} in ara-private for a side-by-side
- * reproduction of this against the scheduler here, on the same graph).
+ * fires once per branch instead of once total, the second time with a partial input. This
+ * was reproduced side by side against the scheduler here, on the same graph, before the
+ * activation rule below replaced the superstep model.
  *
  * <p>D1's activation rule sidesteps the whole category by asking a different question:
  * not "when did a token arrive" but "which edges carry one". Every node ready by that
@@ -516,22 +516,31 @@ public final class DataflowScheduler {
             return null;
         }
 
-        for (WorkflowEdge back : in.stream().filter(WorkflowEdge::back).toList()) {
-            if (!tokens.get(back).isEmpty()) {
-                return tokens.get(back).peekFirst();
+        // One pass over the incoming edges instead of streaming `in` twice: a back edge
+        // with a token fires immediately (OR-merge), the forward edges are collected for
+        // the AND-join check below.
+        List<WorkflowEdge> forward = new ArrayList<>(in.size());
+        for (WorkflowEdge edge : in) {
+            if (edge.back()) {
+                if (!tokens.get(edge).isEmpty()) {
+                    return tokens.get(edge).peekFirst();
+                }
+            } else {
+                forward.add(edge);
             }
         }
-
-        List<WorkflowEdge> forward = in.stream().filter(e -> !e.back()).toList();
         if (forward.isEmpty()) {
             return null;
         }
 
+        // Ready when every forward edge carries a token or is dead, and at least one does.
+        // The composed input keeps edge-declaration order; build it in the same pass.
+        List<String> ordered = new ArrayList<>(forward.size());
         boolean anyToken = false;
         for (WorkflowEdge edge : forward) {
-            boolean hasToken = !tokens.get(edge).isEmpty();
-            if (hasToken) {
+            if (!tokens.get(edge).isEmpty()) {
                 anyToken = true;
+                ordered.add(tokens.get(edge).peekFirst());
             } else if (!dead.contains(edge)) {
                 return null; // neither a token nor dead: not ready yet
             }
@@ -540,10 +549,6 @@ public final class DataflowScheduler {
             return null; // every forward edge dead: this node is dead too, never fires
         }
 
-        List<String> ordered = forward.stream()
-                .filter(e -> !tokens.get(e).isEmpty())
-                .map(e -> tokens.get(e).peekFirst())
-                .toList();
         java.util.function.Function<List<String>, String> composer = graph.node(id).composer();
         if (composer == null) {
             return String.join(" | ", ordered);
@@ -566,8 +571,11 @@ public final class DataflowScheduler {
                 return;
             }
         }
-        in.stream().filter(e -> !e.back())
-                .forEach(e -> { if (!tokens.get(e).isEmpty()) tokens.get(e).pollFirst(); });
+        for (WorkflowEdge edge : in) {
+            if (!edge.back() && !tokens.get(edge).isEmpty()) {
+                tokens.get(edge).pollFirst();
+            }
+        }
     }
 
     /**
@@ -583,8 +591,17 @@ public final class DataflowScheduler {
             return;
         }
         String target = edge.to();
-        List<WorkflowEdge> forwardIn = graph.in(target).stream().filter(e -> !e.back()).toList();
-        if (!forwardIn.isEmpty() && forwardIn.stream().allMatch(dead::contains)) {
+        boolean anyForward = false;
+        boolean allForwardDead = true;
+        for (WorkflowEdge in : graph.in(target)) {
+            if (in.back()) continue;
+            anyForward = true;
+            if (!dead.contains(in)) {
+                allForwardDead = false;
+                break;
+            }
+        }
+        if (anyForward && allForwardDead) {
             graph.out(target).forEach(this::markDead);
         }
     }

@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 5 (`docs/adr/ADR-033-implementation-plan.md` §5.1, `ara-private`) —
+ * ADR-033 Fase 5 —
  * {@link ExecutionContext}: pure M2M vs. on-behalf-of, and attenuation across a
  * multi-hop delegation chain.
  */

@@ -5,8 +5,8 @@ import io.ara.core.auth.ScopeSet;
 import java.util.Arrays;
 
 /**
- * Convention helper for multi-tenant isolation via scope naming (ADR-033 Fase 9, S7,
- * `docs/adr/ADR-033-implementation-plan.md` §9, `ara-private`) — {@code "<tenant>:<scope>"}.
+ * Convention helper for multi-tenant isolation via scope naming (ADR-033 Fase 9) —
+ * {@code "<tenant>:<scope>"}.
  *
  * <p>ARA does not parse or interpret this prefix anywhere in the authorization model:
  * {@link ScopeSet} treats {@code "acme:finance:read"} as one opaque string, no different

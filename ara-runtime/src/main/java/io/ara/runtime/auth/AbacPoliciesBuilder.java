@@ -8,8 +8,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Fluent accumulator for {@code AraRuntime.Builder.abacPolicies(...)} (ADR-033 Fase 2b,
- * S8 — `docs/adr/ADR-033-implementation-plan.md` §2b.5, `ara-private`):
+ * Fluent accumulator for {@code AraRuntime.Builder.abacPolicies(...)} (ADR-033):
  *
  * <pre>{@code
  * AraRuntime.builder()

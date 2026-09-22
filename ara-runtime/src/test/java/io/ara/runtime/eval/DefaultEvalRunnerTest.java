@@ -300,8 +300,7 @@ class DefaultEvalRunnerTest {
     }
 
     // measuredCosts_feedTopologyCostGate_asARatioOfMedians and
-    // topologyEvalWithNoRecordedCosts_isNotComputable relocated to
-    // io.ara.meta.evolution.TopologyCostGateMeasuredTest (ara-private/ara-meta) together
-    // with PromotionPipeline.TopologyCostGate — this file keeps only the generic,
+    // topologyEvalWithNoRecordedCosts_isNotComputable live in the meta-agent module, beside
+    // PromotionPipeline.TopologyCostGate — this file keeps only the generic,
     // meta-agent-agnostic DefaultEvalRunner coverage.
 }

@@ -1,8 +1,8 @@
 package io.ara.core.auth;
 
 /**
- * A single attribute-based access control rule (ADR-033 Fase 2b, S8 — Livello 1b, opt-in
- * — `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`).
+ * A single attribute-based access control rule (ADR-033): pure function from a
+ * {@link PolicyEvaluationContext} to a {@link PolicyDecision}, composable with other rules.
  *
  * <p>Composable via {@link #and} / {@link #or}, both short-circuiting on the decisive
  * outcome for that combinator ({@link PolicyDecision#DENY} for {@code and},

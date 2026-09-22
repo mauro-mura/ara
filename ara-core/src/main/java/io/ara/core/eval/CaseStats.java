@@ -4,7 +4,8 @@ import java.util.Objects;
 
 /**
  * The distribution of scores for one {@link EvalCase} over N≥3 runs — not a single lucky
- * number (ADR-0070 D2, source §3.5.2: "una singola esecuzione non è una misura").
+ * number (ADR-0070 D2: una singola esecuzione non è una misura, "a single run is not a
+ * measurement").
  *
  * @param caseId    the case these stats aggregate
  * @param meanScore arithmetic mean of the N run scores

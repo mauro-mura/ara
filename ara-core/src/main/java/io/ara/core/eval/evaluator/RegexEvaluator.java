@@ -11,7 +11,7 @@ import java.util.regex.PatternSyntaxException;
 /**
  * Passes when {@code evaluationConfig["pattern"]} is found in the agent's output.
  * {@code evaluationConfig["full_match"] == "true"} requires the pattern to match the whole
- * output. One of ADR-019's built-ins (ADR-0070 D1), the §3.1.2 level-2 kind.
+ * output. One of ADR-019's built-in evaluators (ADR-0070 D1).
  */
 public final class RegexEvaluator implements EvaluationStrategy {
 

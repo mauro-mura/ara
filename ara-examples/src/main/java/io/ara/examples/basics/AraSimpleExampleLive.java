@@ -17,7 +17,7 @@ import java.util.List;
  */
 public class AraSimpleExampleLive {
 
-    private static final String BASE_URL = "http://192.168.1.114:1234/v1";  // local server for example LM Studio
+    private static final String BASE_URL = "http://127.0.0.1:1234/v1";  // local server for example LM Studio
     private static final String API_KEY  = resolveApiKey();
     private static final String MODEL    = "openai/gpt-oss-20b"; // local model
 

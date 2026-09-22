@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -27,10 +28,25 @@ import java.util.function.Supplier;
  * has a real teardown (an {@code LlmClient} typically doesn't; an {@code McpClient}
  * does). Use {@link #forCloseable} when {@code R} does implement {@link AutoCloseable}.
  *
- * <p>Concurrency: each id has its own monitor ({@code Entry.lock}), so {@code pin}/{@code
+ * <p>Concurrency: each id has its own lock ({@code Entry.lock}), so {@code pin}/{@code
  * publish} on different ids never contend, and {@code pin} vs {@code publish} on the
  * <em>same</em> id are mutually exclusive — the invariant ADR-039 calls out as "l'unico
- * invariante di concorrenza del sistema".
+ * invariante di concorrenza del sistema", unchanged by the fix below.
+ *
+ * <p><b>{@code Entry.lock} is a {@link ReentrantLock}, not a monitor</b>
+ * ({@code docs/analysis/concurrency-hardening.md} N1/U23, 2026-09-22): {@code
+ * publishLocked}/{@code retire}/{@code release} call {@code factory.apply}/{@code
+ * closeQuietly} — a real MCP connection open/close in production — while holding this lock,
+ * and on this project's JDK 21 target (JEP 491, which removes this, is JDK 24) a virtual
+ * thread that blocks while holding a {@code synchronized} monitor pins its OS carrier for
+ * the whole block — every {@code pin}/{@code publish} on <em>every other id</em> stalls too,
+ * not just this one, because the carrier pool is shared and small
+ * ({@code Runtime.availableProcessors()} by default). A {@code ReentrantLock} held across
+ * the same blocking call does not pin: the invariant above — same-id mutual exclusion,
+ * cross-id independence — is exactly preserved, only the primitive providing it changed.
+ * Verified empirically, not only by JDK semantics: {@code DefaultResourceRegistryPinningTest}
+ * saturates every carrier with a slow {@code factory} and checks that an unrelated virtual
+ * thread can still be scheduled.
  */
 public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, R>, AutoCloseable {
 
@@ -83,11 +99,14 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     public Lease<R> pin(String id) {
         Objects.requireNonNull(id, "id must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             if (entry.currentVersion == 0) {
                 throw new IllegalStateException("No version has ever been published for id '" + id + "'");
             }
             return acquireLocked(entry, entry.currentVersion);
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -98,13 +117,16 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         if (entry == null) {
             throw new IllegalStateException("Unknown resource id '" + id + "'");
         }
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             if (!entry.versions.containsKey(version)) {
                 throw new IllegalStateException(
                         "Version " + version + " of '" + id + "' is not available "
                         + "(never existed, or already fully closed)");
             }
             return acquireLocked(entry, version);
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -113,11 +135,14 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(specIfAbsent, "specIfAbsent must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             if (entry.currentVersion == 0) {
                 publishLocked(entry, specIfAbsent.get(), DrainPolicy.GRACEFUL);
             }
             return acquireLocked(entry, entry.currentVersion);
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -132,8 +157,11 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         Objects.requireNonNull(spec, "spec must not be null");
         Objects.requireNonNull(policy, "policy must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             return publishLocked(entry, spec, policy);
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -147,13 +175,16 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(resource, "resource must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             if (entry.currentVersion != 0) {
                 throw new IllegalStateException("id '" + id + "' already has a published version; use publish() instead");
             }
             long version = ++entry.versionSeq;
             entry.versions.put(version, new VersionState<>(resource));
             entry.currentVersion = version;
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -191,8 +222,11 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         long delayMs = deadline == null ? 0 : Math.max(0, deadline.toEpochMilli() - System.currentTimeMillis());
         scheduler.schedule(() -> {
             List<Lease<R>> toEvict;
-            synchronized (entry.lock) {
+            entry.lock.lock();
+            try {
                 toEvict = List.copyOf(vs.activeLeases);
+            } finally {
+                entry.lock.unlock();
             }
             toEvict.forEach(Lease::evict);
         }, delayMs, TimeUnit.MILLISECONDS);
@@ -219,7 +253,8 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     }
 
     private void release(Entry<R> entry, long version, Lease<R>[] selfRef) {
-        synchronized (entry.lock) {
+        entry.lock.lock();
+        try {
             VersionState<R> vs = entry.versions.get(version);
             if (vs == null) return;   // already fully closed
             vs.activeLeases.remove(selfRef[0]);
@@ -228,6 +263,8 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
                 entry.versions.remove(version);
                 closeQuietly(vs.resource);
             }
+        } finally {
+            entry.lock.unlock();
         }
     }
 
@@ -248,7 +285,9 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     }
 
     private static final class Entry<R> {
-        final Object lock = new Object();
+        // ReentrantLock, not a monitor — see the class javadoc's N1/U23 note. A virtual
+        // thread parks while blocked here instead of pinning its carrier.
+        final ReentrantLock lock = new ReentrantLock();
         long currentVersion = 0;   // 0 = nothing published yet
         long versionSeq = 0;
         final Map<Long, VersionState<R>> versions = new HashMap<>();

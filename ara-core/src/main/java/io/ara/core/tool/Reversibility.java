@@ -3,7 +3,8 @@ package io.ara.core.tool;
 /**
  * How reversible a tool's effect is, on the fused four-level scale this backlog adopted
  * (ADR-0067 D1 / ADR-0055 D2 / ADR-0063 D3) — reversibility and impact merged into one
- * axis, not the two orthogonal axes of the source document §4.3.
+ * axis rather than kept as two independent axes: a single fused level makes the approval
+ * threshold unambiguous where two axes would require a precedence rule.
  *
  * <p>Sealed records rather than an enum so a future policy datum can attach to a level
  * without touching every {@code switch} — the {@code ApprovalDecision} shape.

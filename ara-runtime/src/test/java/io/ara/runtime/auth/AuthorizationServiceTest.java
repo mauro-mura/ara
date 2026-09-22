@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * ADR-033 Fase 2b §2b.4 (`docs/adr/ADR-033-implementation-plan.md`, `ara-private`) —
+ * ADR-033 Fase 2b —
  * {@link AuthorizationService}: scope check always runs, ABAC only when configured.
  */
 class AuthorizationServiceTest {

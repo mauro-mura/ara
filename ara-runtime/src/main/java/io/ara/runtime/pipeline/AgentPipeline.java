@@ -69,6 +69,19 @@ public final class AgentPipeline {
     /** Reserved id for the synthetic entry node every compiled graph gets — see {@link #compile}. */
     private static final String START_NODE = "$pipeline-start$";
 
+    /**
+     * Shared pool for node execution across every pipeline run.
+     *
+     * <p>A virtual-thread-per-task executor keeps no idle worker threads and every virtual
+     * thread it starts is a daemon, so one process-wide instance serves all runs: it holds
+     * no pooled resource between runs and there is nothing to release. This replaces a
+     * fresh executor per {@link #run}, whose construction and {@code close()} (which waited
+     * for every in-flight node) were per-call churn for a graph that fires one node at a
+     * time — the failure path has no orphaned node in flight, so the per-run quiescence
+     * barrier {@code close()} provided was a no-op here.
+     */
+    private static final ExecutorService NODE_POOL = Executors.newVirtualThreadPerTaskExecutor();
+
     // stepOrder is the correctness-critical source of step order: Map.copyOf does not
     // guarantee iteration order preservation even when the source is a LinkedHashMap,
     // so sequential "advance to the next step" logic must never rely on `steps`' own
@@ -120,23 +133,20 @@ public final class AgentPipeline {
         RunAccumulator acc = new RunAccumulator(task);
         WorkflowGraph graph = compile(acc);
 
-        WorkflowResult wfResult;
-        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
-            // Every compiled graph fires at most one node at a time (see compile()'s
-            // Javadoc), so which executor runs a node's body never introduces the
-            // concurrency DataflowScheduler is built for — virtual threads are simply the
-            // idiom the rest of the runtime already uses for a bounded-lifetime pool.
-            //
-            // maxOccurrences is deliberately maxSteps + 1, not maxSteps: it is a per-node
-            // backstop the scheduler checks BEFORE dispatching to a node's body — before
-            // executeStep()'s own maxSteps check ever runs — so setting it to maxSteps would
-            // let it fire first, on whichever single node happens to loop, with its own
-            // generic "maxOccurrences exceeded on X" message instead of the pipeline's own
-            // "exceeded maximum step count" one. No node can ever occur more than maxSteps
-            // times regardless (its own count never exceeds the global one executeStep()
-            // caps), so this backstop never actually trips — it only stays out of the way.
-            wfResult = new DataflowScheduler(graph, maxSteps + 1).run(task.input(), pool);
-        }
+        // Every compiled graph fires at most one node at a time (see compile()'s Javadoc),
+        // so which executor runs a node's body never introduces the concurrency
+        // DataflowScheduler is built for — virtual threads are simply the idiom the rest of
+        // the runtime already uses for a bounded-lifetime pool.
+        //
+        // maxOccurrences is deliberately maxSteps + 1, not maxSteps: it is a per-node
+        // backstop the scheduler checks BEFORE dispatching to a node's body — before
+        // executeStep()'s own maxSteps check ever runs — so setting it to maxSteps would
+        // let it fire first, on whichever single node happens to loop, with its own
+        // generic "maxOccurrences exceeded on X" message instead of the pipeline's own
+        // "exceeded maximum step count" one. No node can ever occur more than maxSteps
+        // times regardless (its own count never exceeds the global one executeStep()
+        // caps), so this backstop never actually trips — it only stays out of the way.
+        WorkflowResult wfResult = new DataflowScheduler(graph, maxSteps + 1).run(task.input(), NODE_POOL);
 
         List<StepResult> history = List.copyOf(acc.history);
         AgentResponse lastResponse = acc.lastResponse;

@@ -28,8 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 8 (S5) end-to-end DONE-WHEN, verbatim (`docs/adr/ADR-033-implementation-plan.md`
- * §8, `ara-private`): "agente senza tools:shell negli scope statici. Grant temporaneo con
+ * ADR-033 Fase 8 (S5) end-to-end, comportamento atteso: "agente senza tools:shell negli scope statici. Grant temporaneo con
  * maxUses=1. Prima invocazione: ok. Seconda invocazione: AuthorizationException. Grant
  * scaduto per TTL: AuthorizationException." — through the real {@link LocalMessageBus}
  * dispatch path, not the pure registry logic already covered by

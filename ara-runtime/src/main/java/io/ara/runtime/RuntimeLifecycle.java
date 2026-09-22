@@ -7,6 +7,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Encapsulates the runtime lifecycle state machine and the shared virtual-thread
@@ -18,6 +19,23 @@ import java.util.concurrent.TimeUnit;
  * implicit auto-start performed by {@link AraRuntime#createAgent} /
  * {@link AraRuntime#submit} is limited to the {@code NEW} phase — see
  * {@link #autoStart()}.
+ *
+ * <p><b>{@link #lock} is a {@link ReentrantLock}, not a monitor</b> ({@code
+ * docs/analysis/concurrency-hardening.md} N1/U25, 2026-09-22): {@link #stop()} blocks on
+ * {@code awaitTermination} (up to {@code shutdownTimeoutSec} seconds) while holding it, and
+ * {@link AraRuntime#stop}/{@link AraRuntime#destroyAgent} block on real MCP-connection close
+ * (via {@code AgentFactory.destroyPermanently}) while holding the very same lock (see {@link
+ * #getLock()}) — on this project's JDK 21 target (JEP 491, which removes this, is JDK 24) a
+ * virtual thread that blocks while holding a {@code synchronized} monitor pins its OS carrier
+ * for the whole block. This lock is shared by every lifecycle operation
+ * ({@link #autoStart}, {@link #getAgentExecutorOrAutoStart}, and every {@code
+ * synchronized (lifecycle.getLock())} in {@code AraRuntime}) — with a monitor, pinning here
+ * would have starved unrelated virtual threads scheduler-wide (the carrier pool is shared and
+ * small, {@code Runtime.availableProcessors()} by default), not just other callers of this one
+ * lock. A {@code ReentrantLock} held across the same blocking calls parks instead: same
+ * critical sections, same mutual exclusion (deliberately <em>not</em> reduced to a snapshot —
+ * see this class's own methods' javadoc for why), only the primitive changed — exactly U23's
+ * precedent for {@code DefaultResourceRegistry.Entry.lock}.
  */
 final class RuntimeLifecycle {
 
@@ -25,7 +43,7 @@ final class RuntimeLifecycle {
 
     enum Phase { NEW, STARTED, STOPPED }
 
-    private final Object lock = new Object();
+    private final ReentrantLock lock = new ReentrantLock();
     private volatile Phase phase = Phase.NEW;
     private volatile Executor agentExecutor;
     private final QuiescenceTracker quiescenceTracker;
@@ -43,22 +61,40 @@ final class RuntimeLifecycle {
      * provisioning a fresh virtual-thread executor. No-op if already {@code STARTED}.
      */
     void start() {
-        synchronized (lock) {
+        lock.lock();
+        try {
             if (phase == Phase.STARTED) return;
             agentExecutor = Executors.newVirtualThreadPerTaskExecutor();
             phase = Phase.STARTED;
+        } finally {
+            lock.unlock();
         }
     }
 
     /**
      * Transitions the phase to {@code STOPPED} and shuts down the executor
      * gracefully. No-op if already {@code STOPPED}.
+     *
+     * <p>Deliberately still holds {@link #lock} across {@link #shutdownExecutor()}'s
+     * {@code awaitTermination} wait, rather than snapshotting the executor and draining it
+     * after releasing the lock — see this class's own javadoc for the U25 rationale: a
+     * {@code ReentrantLock} held here parks other lifecycle callers instead of pinning their
+     * carriers, which is what N1 actually requires fixed. Releasing the lock earlier would
+     * let a concurrent {@link #start()} (e.g. a supervisor racing a restart) begin
+     * provisioning a fresh executor and re-running {@code AraRuntime}'s {@code AgentProvider}
+     * loop — which can reuse the very same agent ids — before this call has finished tearing
+     * the old ones down, a race this class's original, fully-serialized {@code stop()} never
+     * had. Kept out of scope for U25, which is about pinning, not about shrinking this
+     * lock's contention window.
      */
     void stop() {
-        synchronized (lock) {
+        lock.lock();
+        try {
             if (phase != Phase.STARTED) return;
             shutdownExecutor();
             phase = Phase.STOPPED;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -84,9 +120,12 @@ final class RuntimeLifecycle {
      * stopped — the atomic slow path behind {@link AraRuntime#submit}.
      */
     Executor getAgentExecutorOrAutoStart() {
-        synchronized (lock) {
+        lock.lock();
+        try {
             autoStart(); // throws when stopped; no-op when STARTED
             return agentExecutor;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -96,8 +135,13 @@ final class RuntimeLifecycle {
     /** {@code true} after a {@link #stop()}. */
     boolean isStopped() { return phase == Phase.STOPPED; }
 
-    /** The lock that serializes lifecycle transitions and agent operations. */
-    Object getLock() { return lock; }
+    /**
+     * The {@link ReentrantLock} that serializes lifecycle transitions and agent operations —
+     * see this class's own javadoc for why it is a {@code ReentrantLock} and not a monitor
+     * (U25). {@code AraRuntime} calls {@code lock()}/{@code unlock()} on the returned instance
+     * directly (in a {@code try}/{@code finally}) rather than {@code synchronized} on it.
+     */
+    ReentrantLock getLock() { return lock; }
 
     /** Current phase, for diagnostics and health-check surfaces. */
     Phase phase() { return phase; }

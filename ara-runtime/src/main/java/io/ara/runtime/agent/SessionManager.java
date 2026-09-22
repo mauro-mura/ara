@@ -23,7 +23,10 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Manages the lifecycle of {@link AgentSession}s for a single agent.
@@ -103,11 +106,33 @@ public final class SessionManager {
 
     /**
      * Returns the existing session or creates a new one, pinning its {@link AgentWiring}
-     * from {@code configSnapshot}, and resets the session's idle clock. Thread-safe:
-     * {@code computeIfAbsent} guarantees single creation per sessionId — {@code
-     * configSnapshot} is used only the first time a given {@code sessionId} is seen; an
-     * already-live session keeps the wiring it was born with regardless of what is passed
-     * on subsequent calls (ADR-039 §1: a session's pin survives for its whole lifetime).
+     * from {@code configSnapshot}, and resets the session's idle clock. Thread-safe: single
+     * creation per sessionId — {@code configSnapshot} is used only the first time a given
+     * {@code sessionId} is seen; an already-live session keeps the wiring it was born with
+     * regardless of what is passed on subsequent calls (ADR-039 §1: a session's pin survives
+     * for its whole lifetime).
+     *
+     * <p><b>N1/U24, 2026-09-22:</b> that single-creation guarantee used to come from running
+     * the whole build — {@code wiringFactory.build}, a real MCP connection open in
+     * production — inside {@code ConcurrentHashMap.computeIfAbsent}'s own mapping function,
+     * which holds the map's internal per-bin lock for as long as the function runs. A virtual
+     * thread that blocks on real I/O while inside that lock pins its OS carrier on this
+     * project's JDK 21 target (JEP 491, which removes this, is JDK 24) — and unlike
+     * {@code DefaultResourceRegistry}'s own U23 fix, there is no per-id lock to swap for a
+     * {@link ReentrantLock} here: {@code ConcurrentHashMap}'s bin lock is the JDK's own,
+     * not this class's. The fix is structural instead: {@code computeIfAbsent} now only ever
+     * installs a trivial, non-blocking placeholder ({@code new SessionEntry()}, no I/O), and
+     * the actual build happens after it returns, under {@link SessionEntry#sessionOrBuild} —
+     * a {@code ReentrantLock} <em>this class does own</em>, one per entry, so concurrent
+     * callers racing to create the <em>same new</em> session still build exactly once (the
+     * second caller parks on that lock instead of pinning, then reuses what the first built),
+     * while sessions for different ids never contend at all.
+     *
+     * <p>Moving the build outside {@code computeIfAbsent} opens one narrow window that could
+     * not exist before, because the whole build used to be atomic with respect to the map:
+     * {@link #invalidate}/{@link #shutdown}/the sweeper can now observe a placeholder whose
+     * first build has not finished yet. {@link SessionEntry#takeForClose()} and the retry
+     * loop below close that window — see their own javadoc.
      *
      * @param configSnapshot the agent's current config, read exactly once by the caller
      *                       before this call — never re-read here, so a session born
@@ -117,14 +142,26 @@ public final class SessionManager {
     public AgentSession getOrCreate(SessionId sessionId, AgentConfig configSnapshot) {
         Objects.requireNonNull(sessionId, "sessionId must not be null");
         Objects.requireNonNull(configSnapshot, "configSnapshot must not be null");
-        SessionEntry entry = sessions.computeIfAbsent(
-                sessionId.value(),
-                id -> new SessionEntry(newSession(sessionId, configSnapshot)));
-        // Mutates the entry in place. A record + `entry.touch()` would build a replacement
-        // that nothing ever stores, freezing lastAccessed at creation time and making the
-        // sweeper reclaim busy sessions on a fixed 30-minute lifetime.
-        entry.touch();
-        return entry.session();
+        while (true) {
+            SessionEntry entry = sessions.computeIfAbsent(sessionId.value(), id -> new SessionEntry());
+            AgentSession session = entry.sessionOrBuild(
+                    () -> newSession(sessionId, configSnapshot),
+                    built -> built.wiring().close());
+            if (session != null) {
+                // Mutates the entry in place. A record + `entry.touch()` would build a
+                // replacement that nothing ever stores, freezing lastAccessed at creation
+                // time and making the sweeper reclaim busy sessions on a fixed lifetime.
+                entry.touch();
+                return session;
+            }
+            // Torn down (invalidate/shutdown/the sweeper) while this entry's first build was
+            // still in flight — SessionEntry#sessionOrBuild already closed what it built.
+            // Drop the now-dead placeholder if it is still the one sitting in the map (a
+            // third caller may already have replaced it after computeIfAbsent above raced
+            // the teardown too) and retry as if this sessionId had never been seen, exactly
+            // the outcome a caller arriving one instant later would have gotten anyway.
+            sessions.remove(sessionId.value(), entry);
+        }
     }
 
     private AgentSession newSession(SessionId sessionId, AgentConfig configSnapshot) {
@@ -139,15 +176,28 @@ public final class SessionManager {
         return session;
     }
 
-    /** Returns a snapshot of all currently live sessions. */
+    /**
+     * Returns a snapshot of all currently live sessions. Excludes an entry whose first build
+     * (U24) is still in flight — indistinguishable, to a caller of this method, from a
+     * session that simply has not been created yet.
+     */
     public Collection<AgentSession> activeSessions() {
-        return sessions.values().stream().map(SessionEntry::session).toList();
+        return sessions.values().stream()
+                .map(SessionEntry::session)
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     /**
      * Returns how many sessions are currently live — O(1), and without the per-session
      * {@code List} that {@link #activeSessions()} allocates for a caller that only wants
      * the count.
+     *
+     * <p><b>U24 note:</b> unlike {@link #activeSessions()}, this counts an entry whose first
+     * build is still in flight too — keeping this O(1) (a placeholder is real map occupancy
+     * the moment {@code computeIfAbsent} installs it) costs a momentary, build-duration-only
+     * over-count relative to {@code activeSessions().size()} rather than the O(n) scan
+     * filtering it out would cost on every call.
      */
     public int activeSessionCount() {
         return sessions.size();
@@ -167,11 +217,14 @@ public final class SessionManager {
      *
      * <p>Being read-only, this does <em>not</em> reset the idle clock: inspecting a session
      * from an admin endpoint must never keep it alive past its TTL.
+     *
+     * <p>U24: also empty while the entry's first build is still in flight — this method
+     * never blocks waiting for one, matching its own "no side effect" contract above.
      */
     public Optional<AgentSession> find(SessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId must not be null");
         SessionEntry entry = sessions.get(sessionId.value());
-        return entry == null ? Optional.empty() : Optional.of(entry.session());
+        return entry == null ? Optional.empty() : Optional.ofNullable(entry.session());
     }
 
     /**
@@ -182,6 +235,7 @@ public final class SessionManager {
     public List<Map<String, Object>> listActive() {
         long now = System.nanoTime();
         return sessions.entrySet().stream()
+                .filter(e -> e.getValue().session() != null)   // U24: first build still in flight
                 .<Map<String, Object>>map(e -> {
                     SessionEntry entry = e.getValue();
                     long remainingNanos = sessionTtlNanos - (now - entry.lastAccessedNanos());
@@ -229,7 +283,9 @@ public final class SessionManager {
         List<String> staleKeys = new ArrayList<>();
         for (Map.Entry<String, SessionEntry> e : sessions.entrySet()) {
             SessionEntry entry = e.getValue();
-            if (now - entry.lastAccessedNanos() >= sessionTtlNanos && !entry.session().isBusy()) {
+            AgentSession session = entry.session();
+            if (session == null) continue;   // U24: first build still in flight — never stale
+            if (now - entry.lastAccessedNanos() >= sessionTtlNanos && !session.isBusy()) {
                 staleKeys.add(e.getKey());
             }
         }
@@ -243,30 +299,113 @@ public final class SessionManager {
      * single point of ownership transfer: only the caller that observes a non-null return
      * from {@code remove} closes the wiring, so two concurrent teardown paths
      * ({@code invalidate} racing the sweeper) can never double-close.
+     *
+     * <p>U24: {@link SessionEntry#takeForClose()} extends that same single-owner rule to a
+     * third case — an entry whose first build has not finished yet. It closes the built
+     * session immediately if there is one, or marks the entry so the in-flight
+     * {@link SessionEntry#sessionOrBuild} closes what <em>it</em> builds instead of
+     * publishing it (see {@link #getOrCreate}). Either way exactly one side closes the
+     * wiring, never both, never neither.
      */
     private void removeAndClose(String key) {
         SessionEntry removed = sessions.remove(key);
-        if (removed != null) {
-            removed.session().wiring().close();
-        }
+        if (removed == null) return;
+        removed.takeForClose().ifPresent(session -> session.wiring().close());
     }
 
     /**
-     * Mutable holder for a session's last-access timestamps. Deliberately a class and not a
-     * record: {@link #touch()} must update the live entry the map already holds, and both
-     * fields are {@code volatile} so the sweeper thread always observes the latest write
-     * without any locking on the {@code getOrCreate} hot path.
+     * Mutable holder for one session slot. Deliberately a class and not a record: {@link
+     * #touch()} must update the live entry the map already holds, and the timestamp fields
+     * are {@code volatile} so the sweeper thread always observes the latest write without
+     * any locking on the {@code getOrCreate} hot path.
+     *
+     * <p><b>U24.</b> An instance starts empty ({@code session == null}) — {@code
+     * computeIfAbsent} in {@link #getOrCreate} installs it before any build has happened, so
+     * that installation is trivial and non-blocking. {@link #sessionOrBuild} then does
+     * exactly one of: return an already-built session (the common case, one {@code volatile}
+     * read); or become the single builder for a brand-new one, under {@link #buildLock} — a
+     * {@link ReentrantLock}, not a monitor, so the real I/O {@code wiringFactory.build} does
+     * inside it parks a blocked virtual thread instead of pinning its carrier (N1). Every
+     * other caller racing for the *same* new session parks on that same lock and reuses what
+     * the first one built, rather than each building its own (which is what made the old,
+     * whole-build-inside-{@code computeIfAbsent} version single-creation in the first place —
+     * see {@link #getOrCreate}'s own javadoc for why that guarantee had to move here).
      */
     private static final class SessionEntry {
-        private final AgentSession session;
+        private final ReentrantLock buildLock = new ReentrantLock();
+        /** {@code null} until built; read on the hot path without acquiring {@link #buildLock}. */
+        private volatile AgentSession session;
+        /**
+         * Set by {@link #takeForClose()} <em>before</em> it attempts {@link #buildLock} —
+         * deliberately a plain {@code volatile}, not a field only ever touched under the lock.
+         * A build in flight holds {@link #buildLock} for the whole slow call (real I/O), so a
+         * racing {@link #takeForClose()} cannot acquire that lock — and therefore cannot make a
+         * lock-guarded write visible to {@link #sessionOrBuild}'s post-build check — until
+         * {@code sessionOrBuild} itself is done and releases it, which is always too late for
+         * that check to see. Writing the flag first, outside the lock, is what makes it visible
+         * to the post-build check the moment it happens rather than only after the build
+         * finishes; {@link #buildLock} is then used only to serialize the two sides' access to
+         * {@link #session} itself (who gets to read/write it), never to order this flag.
+         */
+        private volatile boolean tornDownBeforeBuild;
         /** Monotonic, authoritative for TTL arithmetic. */
         private volatile long lastAccessedNanos;
         /** Wall clock, for {@link #listActive()} display only — never used to measure elapsed time. */
         private volatile long lastAccessedEpochMillis;
 
-        SessionEntry(AgentSession session) {
-            this.session = session;
-            touch();
+        /**
+         * Returns the already-built session, or builds one via {@code builder} — exactly
+         * once for this entry, however many callers race here concurrently; the rest park on
+         * {@link #buildLock} and then reuse what the winner built, never building a second
+         * one of their own.
+         *
+         * <p>Returns {@code null} only when {@link #takeForClose()} tore this entry down
+         * (invalidated, shut down, or swept) — either before this <em>first</em> build ever
+         * started, or at any point <em>while</em> it was still in flight (both are races the
+         * old code could not have, because the whole build used to run inside {@code
+         * ConcurrentHashMap.computeIfAbsent}'s own atomic section). When that happens, {@code
+         * closeTornDown} is handed the session this call just finished building (so its wiring
+         * gets closed — the entry is already gone from {@link #sessions}, so nothing else ever
+         * would) and this returns {@code null} for {@link #getOrCreate} to retry with a fresh
+         * entry, exactly as if this one had never existed.
+         */
+        AgentSession sessionOrBuild(Supplier<AgentSession> builder, Consumer<AgentSession> closeTornDown) {
+            AgentSession existing = session;
+            if (existing != null) return existing;
+            buildLock.lock();
+            try {
+                if (session != null) return session;
+                if (tornDownBeforeBuild) return null;   // torn down before we ever started building
+                AgentSession built = builder.get();
+                if (tornDownBeforeBuild) {              // torn down WHILE builder.get() was running —
+                    closeTornDown.accept(built);        // visible here precisely because the flag write
+                    return null;                        // in takeForClose() does not wait for buildLock
+                }
+                session = built;
+                return session;
+            } finally {
+                buildLock.unlock();
+            }
+        }
+
+        /**
+         * Called after this entry has been removed from {@link #sessions}, to hand back the
+         * session to close — or, if the first build has not finished yet, to mark this entry
+         * so {@link #sessionOrBuild} closes what it builds instead of publishing it. The flag
+         * write happens first and needs no lock (see its own javadoc for why that is what makes
+         * a torn-down-while-building race actually observable); {@link #buildLock} is acquired
+         * only afterward, purely to read {@link #session} without racing {@code
+         * sessionOrBuild}'s own write of it — so exactly one side ever ends up closing the
+         * wiring, never both, never neither.
+         */
+        Optional<AgentSession> takeForClose() {
+            tornDownBeforeBuild = true;
+            buildLock.lock();
+            try {
+                return Optional.ofNullable(session);
+            } finally {
+                buildLock.unlock();
+            }
         }
 
         void touch() {
@@ -274,6 +413,7 @@ public final class SessionManager {
             this.lastAccessedEpochMillis = System.currentTimeMillis();
         }
 
+        /** {@code null} while this entry's first build is still in flight. */
         AgentSession session()          { return session; }
         long lastAccessedNanos()        { return lastAccessedNanos; }
         long lastAccessedEpochMillis()  { return lastAccessedEpochMillis; }

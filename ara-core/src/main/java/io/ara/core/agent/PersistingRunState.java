@@ -3,6 +3,7 @@ package io.ara.core.agent;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
 
 /**
@@ -31,6 +32,16 @@ import java.util.function.BiFunction;
  * that ends up behind, so the loss only surfaces after a restart or an eviction — the
  * worst kind to debug. Reads ({@link #get}, {@link #snapshot}) stay lock-free: they never
  * touch the store, and the delegate is already thread-safe.
+ *
+ * <p><b>N1/U27, 2026-09-22:</b> {@link #writeLock} is a {@link ReentrantLock}, not a
+ * monitor — {@link #put}/{@link #merge} block on {@link SessionStore#saveState} while
+ * holding it, and on this project's JDK 21 target a virtual thread that blocks while
+ * holding a {@code synchronized} monitor pins its OS carrier for the whole call. A {@code
+ * ReentrantLock} held across the same call does not — same critical section, same mutual
+ * exclusion between {@link #put}/{@link #merge}, only the primitive changed (U23's
+ * precedent). Does not by itself make a genuinely slow {@code store} free of contention —
+ * a concurrent writer still waits for the lock — only of pinning; see {@link SessionStore}'s
+ * own javadoc for the non-blocking constraint a real implementation must uphold.
  */
 final class PersistingRunState implements RunState {
 
@@ -38,7 +49,7 @@ final class PersistingRunState implements RunState {
     private final SessionStore store;
     private final SessionId sessionId;
     /** Serialises mutate-then-persist pairs. Dedicated object so callers cannot lock on us. */
-    private final Object writeLock = new Object();
+    private final ReentrantLock writeLock = new ReentrantLock();
 
     PersistingRunState(RunState delegate, SessionStore store, SessionId sessionId) {
         this.delegate  = Objects.requireNonNull(delegate,  "delegate must not be null");
@@ -53,9 +64,12 @@ final class PersistingRunState implements RunState {
 
     @Override
     public void put(String key, Object value) {
-        synchronized (writeLock) {
+        writeLock.lock();
+        try {
             delegate.put(key, value);
             store.saveState(sessionId, delegate.snapshot());
+        } finally {
+            writeLock.unlock();
         }
     }
 
@@ -69,10 +83,13 @@ final class PersistingRunState implements RunState {
      */
     @Override
     public <T> T merge(String key, T value, BiFunction<? super T, ? super T, ? extends T> remappingFunction) {
-        synchronized (writeLock) {
+        writeLock.lock();
+        try {
             T result = delegate.merge(key, value, remappingFunction);
             store.saveState(sessionId, delegate.snapshot());
             return result;
+        } finally {
+            writeLock.unlock();
         }
     }
 

@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 6 §6.2 (`docs/adr/ADR-033-implementation-plan.md`, `ara-private`) —
+ * ADR-033 Fase 6 —
  * {@link AgentTask#executionContext()} and {@link AgentTask#withExecutionContext}.
  */
 class AgentTaskExecutionContextTest {

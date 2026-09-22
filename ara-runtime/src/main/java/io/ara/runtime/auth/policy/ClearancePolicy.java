@@ -6,8 +6,7 @@ import io.ara.core.auth.PolicyEvaluationContext;
 
 /**
  * Denies unless the subject's {@code clearanceLevel} is at least the resource's declared
- * {@code requiredClearance} (ADR-033 Fase 2b, S8 — `docs/adr/ADR-033-implementation-plan.md`
- * §2b.3, `ara-private`). Abstains ({@link PolicyDecision#NOT_APPLICABLE}) for a resource
+ * {@code requiredClearance} (ADR-033). Abstains ({@link PolicyDecision#NOT_APPLICABLE}) for a resource
  * that declares no {@code requiredClearance} at all — nothing to check.
  */
 public final class ClearancePolicy implements AbacPolicy {

@@ -3,8 +3,8 @@ package io.ara.core.auth;
 import java.util.Objects;
 
 /**
- * Everything an {@link AbacPolicy} needs to reach a decision (ADR-033 Fase 2b, S8 —
- * `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`).
+ * Everything an {@link AbacPolicy} needs to reach a decision (ADR-033): the four
+ * attribute groups, plus the full {@link ExecutionContext} when one is available.
  *
  * @param subject         who is calling
  * @param resource        what is being called

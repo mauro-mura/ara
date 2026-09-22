@@ -20,7 +20,7 @@ import java.util.function.Supplier;
  *
  * <p>{@code contextSupplier} is invoked fresh on every call (rather than captured once) so
  * each notification carries the working memory and state as they stand at that moment,
- * mirroring how {@code AgentInstance.buildContext} is used elsewhere.
+ * mirroring how {@code AgentInstance.context} is used elsewhere.
  *
  * <p>Mirrors {@code InstrumentedLlmClient} (the OTel equivalent): {@link #stream} is
  * deliberately left un-instrumented, same as that class — streaming responses carry no

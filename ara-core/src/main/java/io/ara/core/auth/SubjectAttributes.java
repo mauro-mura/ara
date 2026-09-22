@@ -3,8 +3,8 @@ package io.ara.core.auth;
 import java.util.Objects;
 
 /**
- * Attributes of the caller in an ABAC policy decision (ADR-033 Fase 2b, S8 — Livello 1b,
- * opt-in — `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`).
+ * Attributes of the caller in an ABAC policy decision (ADR-033) — the opt-in, attribute
+ * level that complements scope-based authorization.
  *
  * <p>A strict superset of what {@link ScopeSet}-based authorization (Fasi 1-9) already
  * checks: {@code grantedScopes} is carried here too so a policy can combine both signals

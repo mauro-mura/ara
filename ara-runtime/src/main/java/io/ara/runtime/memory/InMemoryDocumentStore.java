@@ -39,7 +39,12 @@ public final class InMemoryDocumentStore implements KbStore {
     private final List<Entry> entries = new ArrayList<>();
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
-    /** In-memory registry of indexed documents: docId → title. */
+    /**
+     * In-memory registry of indexed documents: docId → title. Guarded by
+     * {@code synchronized (docRegistry)}, never by {@link #lock} — a separate, smaller
+     * critical section than {@link #entries}'s, since nothing in this class needs the two
+     * structures updated atomically with respect to each other (U26, 2026-09-22).
+     */
     private final Map<String, String> docRegistry = new LinkedHashMap<>();
 
     public InMemoryDocumentStore(String kbId, EmbeddingClient embeddingClient) {
@@ -64,15 +69,34 @@ public final class InMemoryDocumentStore implements KbStore {
         List<String> chunks = DocumentStore.chunk(content);
         log.info("[InMemoryDocumentStore] Indexing '{}' → {} chunks", title, chunks.size());
 
+        // U26, 2026-09-22: embeddingClient.embed is a network call to an embedding provider —
+        // computing it while holding the write lock (the old code did, per-chunk, inside the
+        // locked section) serialized every reader (search) and every other writer (indexDocument,
+        // deleteDocument) behind however long the provider took, for however many chunks the
+        // document had. Embedding now runs with no lock held at all; the lock is acquired only
+        // to publish the already-computed entries, in one bulk `addAll` — which also keeps this
+        // document's chunks contiguous and atomic with respect to a concurrent indexDocument for
+        // a different docId, exactly as the old per-chunk-under-lock loop did.
+        List<Entry> newEntries = new ArrayList<>(chunks.size());
+        for (String chunkText : chunks) {
+            List<Float> vector = embeddingClient.embed(chunkText);
+            newEntries.add(new Entry(docId, title, chunkText, normalize(toFloatArray(vector))));
+        }
+
         lock.writeLock().lock();
         try {
-            for (String chunkText : chunks) {
-                List<Float> vector = embeddingClient.embed(chunkText);
-                entries.add(new Entry(docId, title, chunkText, normalize(toFloatArray(vector))));
-            }
-            docRegistry.put(docId, title);
+            entries.addAll(newEntries);
         } finally {
             lock.writeLock().unlock();
+        }
+        // docRegistry has its own, separate synchronized block — see the field javadoc: it must
+        // never share `lock` (found while making this change; `deleteDocument`/`listDocuments`
+        // already only ever touched docRegistry under `synchronized (docRegistry)`, never `lock`,
+        // so this put() being under `lock.writeLock()` instead gave the two call sites no mutual
+        // exclusion with each other at all — a plain LinkedHashMap concurrently read/written from
+        // two uncoordinated locks).
+        synchronized (docRegistry) {
+            docRegistry.put(docId, title);
         }
         log.info("[InMemoryDocumentStore] Indexed '{}' ({} chunks)", title, chunks.size());
         return chunks.size();

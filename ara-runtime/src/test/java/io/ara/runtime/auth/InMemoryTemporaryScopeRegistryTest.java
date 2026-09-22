@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 8 (S5, `docs/adr/ADR-033-implementation-plan.md` §8.2, `ara-private`) —
+ * ADR-033 Fase 8 (S5) —
  * {@link InMemoryTemporaryScopeRegistry}.
  */
 class InMemoryTemporaryScopeRegistryTest {

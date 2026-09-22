@@ -32,6 +32,8 @@ import io.ara.runtime.agent.InstanceContextStore;
 import io.ara.runtime.agent.Reconfigurable;
 import io.ara.runtime.agent.SessionHistoryAware;
 import io.ara.runtime.agent.SessionScoped;
+import io.ara.runtime.auth.AuthorizationService;
+import io.ara.runtime.auth.TemporaryScopeRegistry;
 import io.ara.runtime.bus.AgentDelegationTool;
 import io.ara.runtime.bus.DelegatingToolRegistry;
 import io.ara.runtime.bus.LocalMessageBus;
@@ -129,8 +131,8 @@ public final class AraRuntime implements AutoCloseable {
     private final AgentScheduler   scheduler;
     private final InstanceContextStore instanceContextStore;
     private final ApprovalGate     approvalGate;
-    private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
-    private final io.ara.runtime.auth.AuthorizationService authorizationService;
+    private final TemporaryScopeRegistry temporaryScopeRegistry;
+    private final AuthorizationService authorizationService;
     private final RuntimeLifecycle lifecycle;
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
@@ -178,7 +180,8 @@ public final class AraRuntime implements AutoCloseable {
      * catches slow-but-returning work, it cannot preempt a call that blocks forever.
      */
     public void start() {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             if (lifecycle.isStarted()) return;
             log.info("AraRuntime [{}]{} starting", config.name(), identitySuffix());
             lifecycle.start();
@@ -196,6 +199,8 @@ public final class AraRuntime implements AutoCloseable {
             scheduler.start();
             log.info("AraRuntime [{}] started — {} agent(s) registered{}",
                     config.name(), registry.count(), identitySuffix());
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -224,9 +229,21 @@ public final class AraRuntime implements AutoCloseable {
      * left in a half-stopped "zombie" state (running, but scheduler/executor already
      * gone). The executor is drained for up to {@link AraRuntimeConfig#shutdownTimeoutSec()}
      * seconds before {@code shutdownNow()} forces it.
+     *
+     * <p><b>N1/U25, 2026-09-22:</b> {@code factory.destroyPermanently} below closes each
+     * agent's real MCP connections, and {@code lifecycle.stop()} blocks on {@code
+     * awaitTermination} for up to {@code shutdownTimeoutSec} seconds — both while holding
+     * {@code lifecycle.getLock()}, the single lock shared by every other lifecycle operation
+     * ({@link #createAgent}, {@link #destroyAgent}, {@link #submit}'s slow path...). See
+     * {@code RuntimeLifecycle}'s own class javadoc for why this lock is a {@link
+     * java.util.concurrent.locks.ReentrantLock}, not a monitor (a virtual thread blocked here
+     * would otherwise pin its carrier for this whole method on JDK 21) — deliberately without
+     * also shrinking this critical section to a snapshot (that would let a concurrent {@link
+     * #start()} race this method's own destroy loop for agent ids the two could share).
      */
     public void stop() {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             if (!lifecycle.isStarted()) return;
             log.info("AraRuntime [{}] stopping", config.name());
             try {
@@ -249,6 +266,8 @@ public final class AraRuntime implements AutoCloseable {
                 lifecycle.stop();
                 log.info("AraRuntime [{}] stopped", config.name());
             }
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -288,9 +307,12 @@ public final class AraRuntime implements AutoCloseable {
      * explicitly via {@link #start()} first.
      */
     public AraAgent createAgent(AgentConfig config) {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             autoStart();
             return factory.create(config);
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -299,9 +321,12 @@ public final class AraRuntime implements AutoCloseable {
      * Same lifecycle rules as {@link #createAgent(AgentConfig)}.
      */
     public AraAgent createAgent(AgentConfig config, AgentContract contract) {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             autoStart();
             return factory.create(config, contract);
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -354,9 +379,12 @@ public final class AraRuntime implements AutoCloseable {
      * UI without dropping work already in progress against the old one.
      */
     public AraAgent replaceAgent(AgentConfig config) {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             autoStart();
             return factory.replace(config);
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -366,9 +394,12 @@ public final class AraRuntime implements AutoCloseable {
      * #replaceAgent(AgentConfig)}.
      */
     public AraAgent replaceAgent(AgentConfig config, AgentContract contract) {
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             autoStart();
             return factory.replace(config, contract);
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -391,7 +422,8 @@ public final class AraRuntime implements AutoCloseable {
     public void reconfigureAgent(AgentId id, UnaryOperator<AgentConfig> update) {
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(update, "update must not be null");
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             autoStart();
             AraAgent agent = registry.findById(id)
                     .orElseThrow(() -> new IllegalArgumentException(
@@ -401,6 +433,8 @@ public final class AraRuntime implements AutoCloseable {
                         "Agent [" + id.value() + "] does not support hot reconfiguration");
             }
             reconfigurable.reconfigure(update.apply(agent.config()));
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -470,10 +504,16 @@ public final class AraRuntime implements AutoCloseable {
      *
      * @param agent the agent to destroy; must be currently registered
      */
+    // N1/U25, 2026-09-22: factory.destroyPermanently below closes the agent's real MCP
+    // connections while holding lifecycle.getLock() — see RuntimeLifecycle's class javadoc
+    // for why that lock is a ReentrantLock, not a monitor (a virtual thread blocked here
+    // would otherwise pin its carrier on JDK 21, and every other lifecycle caller sharing
+    // this lock would stall behind it, not just other destroyAgent() calls).
     public void destroyAgent(AraAgent agent) {
         Objects.requireNonNull(agent, "agent must not be null");
 
-        synchronized (lifecycle.getLock()) {
+        lifecycle.getLock().lock();
+        try {
             // Guard: runtime already stopped → all agents were destroyed by stop()
             if (lifecycle.isStopped()) {
                 log.debug("AraRuntime [{}] already stopped — destroyAgent([{}]) is a no-op",
@@ -499,6 +539,8 @@ public final class AraRuntime implements AutoCloseable {
 
             log.info("AraRuntime [{}] agent [{}] destroyed",
                     config.name(), agent.agentId().value());
+        } finally {
+            lifecycle.getLock().unlock();
         }
     }
 
@@ -863,6 +905,7 @@ public final class AraRuntime implements AutoCloseable {
         private String defaultClientId = "default";
         private final java.util.Map<String, Retriever> namedRetrievers = new java.util.LinkedHashMap<>();
         private String defaultRetrieverId;
+        private RetrieverRouter retrieverRouter;
         private Function<AgentConfig, MemoryManager> memoryManagerFactory;
         private EmbeddingClient embeddingClient;
         private SemanticStore   semanticStore;
@@ -884,6 +927,7 @@ public final class AraRuntime implements AutoCloseable {
         private List<AgentInterceptor>    interceptors     = List.of();
         private final List<ExecutionStrategy> extraStrategies = new java.util.ArrayList<>();
         private LlmClientFactory          llmClientFactory;
+        private LlmRouter                 reflectionRouter;
         private final java.util.Map<String, McpServerBinding> mcpServers = new java.util.LinkedHashMap<>();
 
         private Builder() {}
@@ -955,6 +999,20 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         /**
+         * Overrides the router used for meta-level reflection calls (Reflexion / ReflAct),
+         * which may route the critique to a different provider than the main loop's own
+         * model. This router does <em>not</em> govern the main LLM resolution — that happens
+         * per session in the wiring factory, customized via {@link #llmClient}/{@link
+         * #llmClientFactory} — so the name is deliberately narrow rather than a misleading
+         * {@code llmRouter}. Unset means a {@code DefaultLlmRouter} over the registered
+         * clients.
+         */
+        public Builder reflectionRouter(LlmRouter reflectionRouter) {
+            this.reflectionRouter = Objects.requireNonNull(reflectionRouter, "reflectionRouter must not be null");
+            return this;
+        }
+
+        /**
          * Registers a single {@link Retriever} under the id {@code "default"} and makes it
          * the default, regardless of what was registered before. Like every builder setter,
          * the last call wins: a later {@link #defaultRetriever(String)} (or another call to
@@ -988,6 +1046,19 @@ public final class AraRuntime implements AutoCloseable {
         /** Sets which registered id acts as the fallback when {@code retrieverId} is not found. */
         public Builder defaultRetriever(String id) {
             this.defaultRetrieverId = Objects.requireNonNull(id);
+            return this;
+        }
+
+        /**
+         * Overrides retriever routing for the RAG-augmented strategies with a
+         * caller-supplied {@link RetrieverRouter}. Providing this also registers the
+         * {@code "rag+*"} strategies even with no named retriever, since the router is the
+         * thing that resolves them. Mutually exclusive with {@link #retriever(Retriever)}/
+         * {@link #retriever(String, Retriever)}: a custom router supersedes the named map,
+         * so supplying both is refused at build time rather than silently ignoring one.
+         */
+        public Builder retrieverRouter(RetrieverRouter retrieverRouter) {
+            this.retrieverRouter = Objects.requireNonNull(retrieverRouter, "retrieverRouter must not be null");
             return this;
         }
 
@@ -1296,6 +1367,11 @@ public final class AraRuntime implements AutoCloseable {
                                 + "' is not among the registered retrievers " + namedRetrievers.keySet()
                                 + " — register it via retriever(id, retriever) or fix defaultRetriever(id)");
             }
+            if (retrieverRouter != null && !namedRetrievers.isEmpty()) {
+                throw new IllegalStateException(
+                        "AraRuntime.Builder: set either retriever(...)/retriever(id, ...) or "
+                                + "retrieverRouter(...), not both — a custom router supersedes the named map");
+            }
             if (toolRegistry != null && toolRegistryFactory != null) {
                 throw new IllegalStateException(
                         "AraRuntime.Builder: set either toolRegistry(...) or toolRegistryFactory(...), not both");
@@ -1343,16 +1419,17 @@ public final class AraRuntime implements AutoCloseable {
 
         /** Registers the built-in strategies (react, respact, plan_execute, reflexion, reflact), RAG variants, and any extras. */
         private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients) {
-            LlmRouter reflectionRouter =
-                    new DefaultLlmRouter(instrumentedClients, defaultClientId, llmClientFactory);
+            LlmRouter reflection = reflectionRouter != null
+                    ? reflectionRouter
+                    : new DefaultLlmRouter(instrumentedClients, defaultClientId, llmClientFactory);
 
             ReactStrategy       reactStrategy     = new ReactStrategy();
             ReSpActStrategy     respactStrategy   = new ReSpActStrategy();
             PlanExecuteStrategy planStrategy      = new PlanExecuteStrategy();
-            ReflexionStrategy   reflexionStrategy = new ReflexionStrategy(reactStrategy, reflectionRouter);
-            // Same reflectionRouter as ReflexionStrategy — both support routing the
+            ReflexionStrategy   reflexionStrategy = new ReflexionStrategy(reactStrategy, reflection);
+            // Same reflection router as ReflexionStrategy — both support routing the
             // critique call to a different provider than the main loop's own model.
-            ReflActStrategy     reflactStrategy   = new ReflActStrategy(reflectionRouter);
+            ReflActStrategy     reflactStrategy   = new ReflActStrategy(reflection);
 
             ExecutionPlanner.Builder plannerBuilder = ExecutionPlanner.builder()
                     .register(reactStrategy)
@@ -1361,12 +1438,14 @@ public final class AraRuntime implements AutoCloseable {
                     .register(reflexionStrategy)
                     .register(reflactStrategy);
 
-            if (!namedRetrievers.isEmpty()) {
-                RetrieverRouter retrieverRouter = new DefaultRetrieverRouter(namedRetrievers, defaultRetrieverId);
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reactStrategy,   retrieverRouter));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(respactStrategy, retrieverRouter));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(planStrategy,    retrieverRouter));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reflactStrategy, retrieverRouter));
+            if (retrieverRouter != null || !namedRetrievers.isEmpty()) {
+                RetrieverRouter rr = retrieverRouter != null
+                        ? retrieverRouter
+                        : new DefaultRetrieverRouter(namedRetrievers, defaultRetrieverId);
+                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reactStrategy,   rr));
+                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(respactStrategy, rr));
+                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(planStrategy,    rr));
+                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reflactStrategy, rr));
             }
 
             extraStrategies.forEach(plannerBuilder::register);

@@ -9,11 +9,10 @@ import io.ara.core.auth.ScopeSet;
 
 /**
  * Facade combining ADR-033's two authorization layers: the OAuth-style scope check
- * (Fasi 1-9, always applied) and the opt-in ABAC layer (Fase 2b, applied only when an
- * {@link AbacPolicyEngine} is configured) — `docs/adr/ADR-033-implementation-plan.md`
- * §2b.4, `ara-private`.
+ * (always applied) and the opt-in ABAC layer (applied only when an
+ * {@link AbacPolicyEngine} is configured).
  *
- * <p>Deviates from the plan's own sketch in one respect: {@code ScopeVerifier} is a
+ * <p>Deviates from the original design sketch in one respect: {@code ScopeVerifier} is a
  * stateless utility class of {@code static} methods (ADR-033 Fase 2), not something to
  * hold an instance of — this calls those static methods directly rather than through a
  * held field that couldn't exist as sketched.

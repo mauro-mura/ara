@@ -26,9 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 5 §5.3 DONE-WHEN, verbatim (`docs/adr/ADR-033-implementation-plan.md`,
- * `ara-private`): "catena A[ops,hr] → B[finance,ops] → C[ops]. Verificare che C veda
- * effectiveScopes=[ops] e non possa accedere a risorse finance."
+ * ADR-033 Fase 5, comportamento atteso: "catena A[ops,hr] → B[finance,ops] → C[ops].
+ * Verificare che C veda effectiveScopes=[ops] e non possa accedere a risorse finance."
  *
  * <p>{@link io.ara.core.auth.ScopeSetTest#intersect_composesAcrossADelegationChain} and
  * {@link io.ara.core.auth.ExecutionContextTest#delegate_composesAcrossAThreeHopChain_matchingTheAdrExample}

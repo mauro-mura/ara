@@ -39,6 +39,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 /**
  * Reasoning-loop machinery shared by every ReAct-shaped strategy — tool dispatch and
@@ -820,6 +821,71 @@ final class ReactExecutionSupport {
     }
 
     /**
+     * Runs {@code work} on a dedicated virtual thread, with {@code tools}'s ambient tracing
+     * context propagated across the hop (see {@link ToolRegistry#wrapForPropagation}), bounded
+     * by {@code deadline}. If {@code work} has not produced a result by then, the worker is
+     * interrupted and abandoned — never joined, so a worker blocked on I/O that ignores the
+     * interrupt cannot strand this call too — and {@link ExecutionTimeoutException} is thrown.
+     *
+     * <p>docs/analysis/concurrency-hardening.md P0/U1, 2026-09-22 — introduced for {@link
+     * PlanExecuteStrategy#dispatchTool}, U2's target: unlike {@link #dispatchBounded}'s batch of
+     * (possibly zero) parallel calls, which already has a bound and deliberately falls back to a
+     * per-call "result missing" placeholder rather than aborting the whole dispatch, {@code
+     * dispatchTool} handles exactly one call with no deadline at all before this — a hung tool
+     * (a stuck MCP server, a shell command still streaming) blocked the whole step, and the step
+     * loop's own {@code checkTimeout} boundary check was never reached because the call never
+     * returned. Deliberately <strong>not</strong> used for an {@code LlmClient} call: see {@link
+     * #completeWithin}'s own javadoc for why an LLM call stays on the calling thread instead
+     * (stranded tracing context, an abandoned provider connection nothing would close) — a tool
+     * call has neither problem, since {@code wrapForPropagation} carries the tracing context
+     * across the hop and {@code AraTool}/{@code ToolRegistry} implementations own their own
+     * connection lifecycle rather than this method holding one open.
+     *
+     * @throws ExecutionTimeoutException if {@code deadline} passes before {@code work} completes
+     * @throws InterruptedException      if the calling thread is cancelled while waiting
+     */
+    static <T> T runBounded(ToolRegistry tools, Supplier<T> work, Instant deadline, Duration executionTimeout)
+            throws InterruptedException {
+
+        long remainingMs = Math.max(0, Duration.between(Instant.now(), deadline).toMillis());
+        if (remainingMs <= 0) {
+            throw new ExecutionTimeoutException(executionTimeout);
+        }
+
+        AtomicReference<T> result = new AtomicReference<>();
+        AtomicReference<RuntimeException> failure = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+
+        Thread worker = Thread.ofVirtual().start(tools.wrapForPropagation(() -> {
+            try {
+                result.set(work.get());
+            } catch (RuntimeException e) {
+                failure.set(e);
+            } finally {
+                done.countDown();
+            }
+        }));
+
+        boolean finished;
+        try {
+            finished = done.await(remainingMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            worker.interrupt();   // propagate the calling thread's own cancellation to the worker
+            throw e;
+        }
+        if (!finished) {
+            worker.interrupt();   // best-effort — abandoned either way, never joined
+            throw new ExecutionTimeoutException(executionTimeout);
+        }
+
+        RuntimeException f = failure.get();
+        if (f != null) {
+            throw f;
+        }
+        return result.get();
+    }
+
+    /**
      * Appends the LLM's output to working memory in the form the next reasoning step
      * (and, for native tool calls, the adapter reconstructing the assistant turn)
      * expects, then records the {@code thought} step. Three shapes, in priority order:
@@ -886,8 +952,11 @@ final class ReactExecutionSupport {
                 iterations, totalPromptTokens, totalOutputTokens, steps);
     }
 
+    /** Divisor for the per-1k token rate, hoisted so the hot budget path allocates only the result. */
+    private static final java.math.BigDecimal ONE_THOUSAND = java.math.BigDecimal.valueOf(1_000);
+
     private static java.math.BigDecimal fraction(int tokens) {
-        return java.math.BigDecimal.valueOf(tokens).divide(java.math.BigDecimal.valueOf(1_000));
+        return java.math.BigDecimal.valueOf(tokens).divide(ONE_THOUSAND);
     }
 
     /**
@@ -1031,9 +1100,15 @@ final class ReactExecutionSupport {
         // complete() fallback (LlmClient.super.stream) but only forwarded .text(),
         // silently dropping a native tool-call response. Fall back to complete() so
         // the caller receives the full LlmCompletion with tool-call metadata intact.
+        //
+        // P0/U4, 2026-09-22: routed through completeWithRetry — bounded by the same
+        // `deadline` the stream itself was bounded by (whatever is left of it, not a fresh
+        // window) and with the same interrupt-watchdog and retryable-failure handling every
+        // other blocking LLM call in this class gets — instead of a raw llm.complete(...)
+        // with neither.
         if (text.isBlank()) {
             log.debug("Stream returned blank text — retrying with blocking complete() to recover tool-call metadata");
-            return llm.complete(messages, ctx);
+            return completeWithRetry(llm, messages, ctx, deadline, config, task.taskId());
         }
 
         // Streaming responses carry no token usage. Returning 0/0 would silently disable

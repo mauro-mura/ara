@@ -16,10 +16,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * ADR-033 Fase 2b (S8, `docs/adr/ADR-033-implementation-plan.md` §2b.2, `ara-private`) —
- * {@link CompositeAbacPolicyEngine}'s two combining algorithms, verbatim from the plan's
- * own DONE-WHEN: "DENY_OVERRIDES: una sola DENY blocca tutto", "PERMIT_OVERRIDES: una
- * sola PERMIT sblocca tutto".
+ * ADR-033 Fase 2b (S8) — {@link CompositeAbacPolicyEngine}'s two combining algorithms and
+ * their decisive behaviour: "DENY_OVERRIDES: una sola DENY blocca tutto",
+ * "PERMIT_OVERRIDES: una sola PERMIT sblocca tutto".
  */
 class CompositeAbacPolicyEngineTest {
 

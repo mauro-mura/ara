@@ -39,6 +39,12 @@ public final class JsonRuleValidator implements InputProcessor, OutputProcessor 
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * Dot-path separator, precompiled: {@code "\\."} has no fast path in {@link String#split}
+     * (a two-char pattern is compiled), so splitting a field path per payload recompiled it.
+     */
+    private static final Pattern FIELD_SEPARATOR = Pattern.compile("\\.");
+
     /** Predicate over a JSON field node; {@code node} is {@code null} when the field is absent or JSON null. */
     @FunctionalInterface
     public interface FieldCondition {
@@ -157,7 +163,7 @@ public final class JsonRuleValidator implements InputProcessor, OutputProcessor 
 
     private static JsonNode resolve(JsonNode root, String fieldPath) {
         JsonNode node = root;
-        for (String part : fieldPath.split("\\.")) {
+        for (String part : FIELD_SEPARATOR.split(fieldPath)) {
             if (node == null || node.isMissingNode()) return null;
             node = node.get(part);
         }

@@ -188,6 +188,17 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
     private static final class AugmentingLlmClient extends DelegatingLlmClient {
 
         private final String contextBlock;
+        /**
+         * Memo for the augmented system message, keyed by the identity of the source system
+         * message. A strategy that reuses its message prefix (the incremental {@code
+         * MessageBuffer} in the ReAct family) presents the *same* system {@link LlmMessage}
+         * object across several iterations, so re-concatenating the context block — which is
+         * stable for the whole task — was pure churn on every call. A miss simply recomputes;
+         * the client is created per task and used by one strategy loop, so the memo needs no
+         * synchronisation.
+         */
+        private LlmMessage lastSystem;
+        private LlmMessage lastAugmented;
 
         AugmentingLlmClient(LlmClient delegate, String contextBlock) {
             super(delegate);
@@ -209,7 +220,7 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
             boolean injected = false;
             for (LlmMessage msg : messages) {
                 if (!injected && "system".equals(msg.role())) {
-                    result.add(LlmMessage.system(msg.content() + "\n\n" + contextBlock));
+                    result.add(augmentedSystem(msg));
                     injected = true;
                 } else {
                     result.add(msg);
@@ -220,6 +231,16 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
                 result.add(0, LlmMessage.system(contextBlock));
             }
             return result;
+        }
+
+        private LlmMessage augmentedSystem(LlmMessage system) {
+            if (system == lastSystem) {
+                return lastAugmented;
+            }
+            LlmMessage augmented = LlmMessage.system(system.content() + "\n\n" + contextBlock);
+            lastSystem = system;
+            lastAugmented = augmented;
+            return augmented;
         }
     }
 }

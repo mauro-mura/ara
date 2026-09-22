@@ -251,7 +251,8 @@ public final class ReflActStrategy implements ExecutionStrategy {
                         }
                         if (anyFailed && rc.reflectOnToolFailure() && reflectionsUsed < rc.maxReflections()) {
                             var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
-                                    "A tool call failed. Diagnose why and suggest what to try instead.", iterations);
+                                    "A tool call failed. Diagnose why and suggest what to try instead.", iterations,
+                                    deadline, config);
                             totalPromptTokens += usage.promptTokens();
                             totalOutputTokens += usage.outputTokens();
                             reflectionsUsed++;
@@ -269,7 +270,7 @@ public final class ReflActStrategy implements ExecutionStrategy {
                             var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
                                     unproductiveStreak + " steps in a row produced neither a tool call nor a final "
                                             + "answer. Diagnose why the approach is stalled and suggest a concrete next action.",
-                                    iterations);
+                                    iterations, deadline, config);
                             totalPromptTokens += usage.promptTokens();
                             totalOutputTokens += usage.outputTokens();
                             reflectionsUsed++;
@@ -303,10 +304,21 @@ public final class ReflActStrategy implements ExecutionStrategy {
      * context), and records it as a {@link StepType#REFLECTION} step.
      * Failures degrade to a generic nudge rather than propagating — a broken reflection
      * call must not abort a task that could otherwise still succeed.
+     *
+     * <p><b>P0/U3, 2026-09-22:</b> the reflection call now runs through {@link
+     * ReactExecutionSupport#completeWithRetry} — bounded by {@code deadline} with the same
+     * interrupt-watchdog {@link ReactExecutionSupport#callLlm} uses for the main loop's own
+     * LLM calls — instead of a raw {@code reflectionLlm.complete(...)} with no deadline at
+     * all. A cancellation ({@link InterruptedException}) still degrades to a fallback
+     * critique rather than propagating, consistent with every other failure here — this
+     * method has no {@code ExecutionResult} to report "Cancelled" through — but the
+     * interrupt flag is restored first so the main loop's own {@code isInterrupted()} check
+     * at the top of its next iteration still observes the cancellation instead of losing it.
      */
     private ReflectionUsage reflect(
             MemoryManager memory, List<ExecutionStep> steps, AgentTask task, LlmCallContext ctx,
-            LlmClient mainLlm, String reflectionProvider, String trigger, int iteration) {
+            LlmClient mainLlm, String reflectionProvider, String trigger, int iteration,
+            Instant deadline, AgentConfig config) {
 
         String scratchpad = recentScratchpad(steps);
         String prompt = "Recent trace:\n" + scratchpad + "\n\nWhy it looks stuck: " + trigger;
@@ -320,11 +332,16 @@ public final class ReflActStrategy implements ExecutionStrategy {
         int promptTokens = 0;
         int outputTokens = 0;
         try {
-            LlmCompletion completion = reflectionLlm.complete(messages, ctx);
+            LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
+                    reflectionLlm, messages, ctx, deadline, config, task.taskId());
             promptTokens = completion.promptTokens();
             outputTokens = completion.outputTokens();
             String text = completion.text();
             critique = (text != null && !text.isBlank()) ? text.strip() : fallbackCritique();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("ReflAct: reflection call cancelled for task [{}]", task.taskId());
+            critique = fallbackCritique();
         } catch (Exception e) {
             log.warn("ReflAct: reflection call failed for task [{}]: {}", task.taskId(), e.getMessage());
             critique = fallbackCritique();

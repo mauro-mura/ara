@@ -86,22 +86,26 @@ before registering it:
   It is almost always a typo between `strategyName()` and the value passed to
   `plannerStrategy(...)`.
 
-- **`StrategyConfig` is sealed** (`React` / `PlanExecute` / `Reflexion` /
-  `ReflAct`, declared in `ara-core`) and cannot be extended with a new
-  permitted type from outside that module. If your strategy needs typed,
-  per-agent parameters, don't try to add a `StrategyConfig` variant for it —
-  read what you need directly off `AgentConfig` (`enabledTools()`,
-  `maxIterations()`, …) or via the agent's instance-parameter mechanism
-  instead.
+- **`StrategyConfig` is sealed — but has an open variant for your strategy.**
+  The built-in variants (`React` / `PlanExecute` / `Reflexion` / `ReflAct`, declared
+  in `ara-core`) cannot be extended, but `StrategyConfig.Custom(strategyName, params)`
+  is a permitted type you can use from outside the module: point its
+  `strategyName` at your registered strategy's `strategyName()` and carry whatever
+  typed parameters you need in its `Map<String, Object>`. The framework never
+  interprets that map — your strategy reads its own keys. Use `Custom` rather than
+  smuggling parameters through `AgentConfig` string fields.
 
-- **`ReactExecutionSupport` is package-private.** The shared ReAct loop
-  machinery (`buildMessages`, `decideNormal`/`decideForcedFinal`, `dispatchParallel`,
-  `maybeInjectSynthesis`, `streamAndCollect`, …) lives in
-  `io.ara.runtime.strategy` and isn't part of the public API. A strategy
-  implemented in your own application package cannot call it directly — you
-  either re-implement the bits you need (tool dispatch, streaming) or place
-  your class inside `io.ara.runtime.strategy` if you're extending ARA itself
-  rather than consuming it as a library.
+- **Reusing the ReAct loop machinery: use `ReActSupport`.** The shared ReAct loop
+  internals (`ReactExecutionSupport`) stay package-private, but their *mechanics* are
+  re-published for external strategies by the public `io.ara.runtime.strategy.ReActSupport`
+  facade: incremental message building (`ReActSupport.MessageBuffer`), the deadline-bounded
+  LLM call with retry/streaming (`callLlm`/`completeWithRetry`/`streamAndCollect`), tool
+  dispatch (`dispatchSingle`/`dispatchParallel` with `DispatchContext`), and the cost/run
+  budget checks (`checkBudget`/`chargeRunBudget`) — plus `toolCatalog` and the synthesis
+  nudge. A custom ReAct-shaped strategy brings its own decision protocol and reuses these,
+  instead of re-implementing them (and their already-fixed bugs). The *protocol* half
+  (`StepDecision`/`ForcedFinalDecision`, the iteration skeleton) remains internal, because
+  it is the part that varies per strategy.
 
 ---
 

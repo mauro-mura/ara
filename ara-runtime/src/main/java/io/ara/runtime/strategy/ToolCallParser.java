@@ -38,6 +38,12 @@ public final class ToolCallParser {
             "<\\|channel\\|>.*?to=(\\S+).*?<\\|message\\|>\\s*(\\{.+)",
             Pattern.DOTALL);
 
+    /**
+     * Inline-JSON field names whose presence marks a candidate as a tool call, in priority
+     * order: the canonical ARA {@code tool_id} is preferred over the {@code name} alias.
+     */
+    private static final List<String> INLINE_TOOL_FIELDS = List.of("\"tool_id\"", "\"name\"");
+
     private ToolCallParser() {}
 
     /**
@@ -107,7 +113,7 @@ public final class ToolCallParser {
         // preserving the original priority order across the same candidate list.
         // No try/catch here: parseToolCallJson never throws — it catches internally
         // and reports failure as the "unknown" sentinel this loop already skips.
-        for (String key : new String[]{"\"tool_id\"", "\"name\""}) {
+        for (String key : INLINE_TOOL_FIELDS) {
             for (String json : candidates) {
                 if (json.contains(key)) {
                     ToolCallRequest tcr = parseToolCallJson(json);

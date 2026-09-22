@@ -3,7 +3,7 @@ package io.ara.core.tool;
 /**
  * Where a tool came from (ADR-0067 D1 / ADR-0063). A {@link #SYNTHESIZED} tool carries
  * extra construction-time obligations on its {@link ToolSpec} — a sandbox policy and at
- * least one test (§3.2.6, non-negotiable).
+ * least one test — because nothing else vouches for a tool no human wrote.
  */
 public enum ToolOrigin {
     /** Hand-written, shipped with ARA or the application (e.g. {@code ara-tools}). */

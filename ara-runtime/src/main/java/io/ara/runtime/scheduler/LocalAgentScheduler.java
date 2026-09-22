@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -35,13 +36,44 @@ import java.util.concurrent.TimeUnit;
  * {@link AraAgents#executeAsync(AraAgent, AgentTask, java.util.concurrent.Executor)} and
  * logs the outcome. If the agent is not found in the registry the trigger is
  * skipped with a warning.
+ *
+ * <p><b>P2, 2026-09-22 — two executors, not one.</b> {@link #tickExecutor} is a small,
+ * fixed-size pool whose only job is deciding <em>when</em> to fire (the {@code
+ * scheduleAtFixedRate}/{@code schedule} calls in {@link #scheduleJob}/{@link
+ * #scheduleCron}); {@link #agentExecutor} is a separate, unbounded virtual-thread-per-task
+ * executor that actually runs the agent ({@link #fire}'s {@code AraAgents.executeAsync}
+ * call). Before this they were the same fixed-size pool (sized {@code max(2,
+ * availableProcessors())}): enough concurrent long-running agent executions filled every
+ * worker, leaving nothing to fire the next tick on time — a scheduler starving its own
+ * ticks on the very agents it started. Splitting them means a slow agent can never delay
+ * another schedule's trigger.
+ *
+ * <p><b>P2, 2026-09-22 — {@code entries} mutations are atomic per id.</b> {@link #register},
+ * {@link #pause} and {@link #resume} each used to read {@code entries.get(id)} and then
+ * separately {@code entries.put(id, ...)} — two non-atomic map operations. Two concurrent
+ * calls for the <em>same</em> id (e.g. two {@code register} calls racing on startup, or a
+ * {@code resume} racing a concurrent {@code register}) could both observe the same starting
+ * entry, both start their own new {@link ScheduledFuture} (via {@link #scheduleJob}), and
+ * then overwrite each other's map entry — whichever {@code put} lands last wins in {@code
+ * entries}, silently orphaning the other call's job: it keeps firing forever, no longer
+ * reachable from {@link #list}/{@link #pause}/{@link #cancel} since the map only ever
+ * tracks one {@code Entry} per id. Every mutating method below now goes through a single
+ * {@code entries.compute}/{@code remove} call per id instead, which {@link ConcurrentHashMap}
+ * serializes per-bin — the two racing calls above are now fully
+ * ordered, and the second one always observes (and correctly cancels) the first one's job
+ * before installing its own. Safe to do work inside the remapping function here specifically
+ * because {@link #scheduleJob}/{@link #scheduleCron} never block (they only register a task
+ * with {@link #tickExecutor} and return) — the same "short, no I/O" exception N1's own
+ * findings call out, not the general "don't do slow work inside a map's per-bin lock"
+ * pinning risk those findings are otherwise about.
  */
 public final class LocalAgentScheduler implements AgentScheduler {
 
     private static final Logger log = LoggerFactory.getLogger(LocalAgentScheduler.class);
 
     private final AgentRegistry            registry;
-    private final ScheduledExecutorService executor;
+    private final ScheduledExecutorService tickExecutor;
+    private final ExecutorService          agentExecutor;
 
     /** Holds the AgentSchedule definition and its active ScheduledFuture — a {@code null} future means paused. */
     private record Entry(AgentSchedule schedule, ScheduledFuture<?> future) {}
@@ -50,9 +82,10 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
     public LocalAgentScheduler(AgentRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry must not be null");
-        this.executor = Executors.newScheduledThreadPool(
+        this.tickExecutor = Executors.newScheduledThreadPool(
                 Math.max(2, Runtime.getRuntime().availableProcessors()),
-                Thread.ofVirtual().factory());
+                Thread.ofVirtual().name("ara-scheduler-tick-", 0).factory());
+        this.agentExecutor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     // ── AgentScheduler ────────────────────────────────────────────────────────
@@ -61,44 +94,63 @@ public final class LocalAgentScheduler implements AgentScheduler {
     public void register(AgentSchedule schedule) {
         Objects.requireNonNull(schedule, "schedule must not be null");
 
-        // cancel existing entry with same id if present
-        Entry existing = entries.get(schedule.scheduleId());
-        if (existing != null) {
-            existing.future().cancel(false);
-        }
-
-        ScheduledFuture<?> future = schedule.active()
-                ? scheduleJob(schedule)
-                : null;
-
-        entries.put(schedule.scheduleId(), new Entry(schedule, future));
+        entries.compute(schedule.scheduleId(), (id, existing) -> {
+            if (existing != null && existing.future() != null) {
+                existing.future().cancel(false);
+            }
+            ScheduledFuture<?> future = schedule.active() ? scheduleJob(schedule) : null;
+            return new Entry(schedule, future);
+        });
         log.info("[Scheduler] registered '{}' trigger={} active={}",
                 schedule.scheduleId(), describe(schedule.trigger()), schedule.active());
     }
 
     @Override
     public void pause(String scheduleId) {
-        Entry entry = require(scheduleId);
-        if (entry.future() == null) return;
-        entry.future().cancel(false);
-        entries.put(scheduleId, new Entry(entry.schedule(), null));
-        log.info("[Scheduler] paused '{}'", scheduleId);
+        boolean[] alreadyPaused = {false};
+        entries.compute(scheduleId, (id, existing) -> {
+            if (existing == null) {
+                throw new NoSuchElementException("No schedule registered with id: " + scheduleId);
+            }
+            if (existing.future() == null) {
+                alreadyPaused[0] = true;
+                return existing;
+            }
+            existing.future().cancel(false);
+            return new Entry(existing.schedule(), null);
+        });
+        if (!alreadyPaused[0]) {
+            log.info("[Scheduler] paused '{}'", scheduleId);
+        }
     }
 
     @Override
     public void resume(String scheduleId) {
-        Entry entry = require(scheduleId);
-        if (entry.future() != null) return;
-        ScheduledFuture<?> future = scheduleJob(entry.schedule());
-        entries.put(scheduleId, new Entry(entry.schedule(), future));
-        log.info("[Scheduler] resumed '{}'", scheduleId);
+        boolean[] alreadyActive = {false};
+        entries.compute(scheduleId, (id, existing) -> {
+            if (existing == null) {
+                throw new NoSuchElementException("No schedule registered with id: " + scheduleId);
+            }
+            if (existing.future() != null) {
+                alreadyActive[0] = true;
+                return existing;
+            }
+            return new Entry(existing.schedule(), scheduleJob(existing.schedule()));
+        });
+        if (!alreadyActive[0]) {
+            log.info("[Scheduler] resumed '{}'", scheduleId);
+        }
     }
 
     @Override
     public void cancel(String scheduleId) {
-        Entry entry = require(scheduleId);
-        if (entry.future() != null) entry.future().cancel(false);
-        entries.remove(scheduleId);
+        Entry removed = entries.remove(scheduleId);
+        if (removed == null) {
+            throw new NoSuchElementException("No schedule registered with id: " + scheduleId);
+        }
+        if (removed.future() != null) {
+            removed.future().cancel(false);
+        }
         log.info("[Scheduler] cancelled '{}'", scheduleId);
     }
 
@@ -126,7 +178,8 @@ public final class LocalAgentScheduler implements AgentScheduler {
         entries.values().forEach(e -> {
             if (e.future() != null) e.future().cancel(false);
         });
-        executor.shutdownNow();
+        tickExecutor.shutdownNow();
+        agentExecutor.shutdownNow();
         log.info("[Scheduler] stopped");
     }
 
@@ -134,8 +187,8 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
     private ScheduledFuture<?> scheduleJob(AgentSchedule schedule) {
         return switch (schedule.trigger()) {
-            case Trigger.Interval i -> executor.scheduleAtFixedRate(
-                    () -> fire(schedule),
+            case Trigger.Interval i -> tickExecutor.scheduleAtFixedRate(
+                    () -> safeFire(schedule),
                     i.every().toMillis(),
                     i.every().toMillis(),
                     TimeUnit.MILLISECONDS);
@@ -150,22 +203,60 @@ public final class LocalAgentScheduler implements AgentScheduler {
      */
     private ScheduledFuture<?> scheduleCron(AgentSchedule schedule, String expression) {
         long delaySeconds = CronEvaluator.secondsUntilNext(expression);
-        return executor.schedule(() -> {
-            fire(schedule);
-            // re-schedule for the next occurrence
-            Entry current = entries.get(schedule.scheduleId());
-            if (current != null && current.future() != null) {
-                ScheduledFuture<?> next = scheduleCron(schedule, expression);
-                entries.put(schedule.scheduleId(), new Entry(schedule, next));
+        return tickExecutor.schedule(() -> {
+            safeFire(schedule);
+            // Re-schedule for the next occurrence — attempted regardless of whether safeFire
+            // above swallowed a failure or not (P1): one bad trigger must not also prevent
+            // every future one from ever being scheduled.
+            try {
+                Entry current = entries.get(schedule.scheduleId());
+                if (current != null && current.future() != null) {
+                    ScheduledFuture<?> next = scheduleCron(schedule, expression);
+                    entries.put(schedule.scheduleId(), new Entry(schedule, next));
+                }
+            } catch (Throwable t) {
+                log.error("[Scheduler] '{}' failed to reschedule after its cron trigger — "
+                        + "this schedule will not fire again until re-registered", schedule.scheduleId(), t);
             }
         }, delaySeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Runs {@link #fire}, catching and logging any {@link Throwable} instead of letting it
+     * propagate.
+     *
+     * <p>P1, 2026-09-22: an uncaught exception thrown from a {@code scheduleAtFixedRate} task
+     * silently cancels every future execution of that periodic task — a documented {@link
+     * java.util.concurrent.ScheduledThreadPoolExecutor} pitfall, not a hypothetical one, since
+     * {@link #fire} can throw synchronously (a malformed {@code inputTemplate}, the executor
+     * rejecting a submission during shutdown) even though the agent's own execution is
+     * fire-and-forget. An uncaught exception from the cron path's one-shot {@code schedule()}
+     * call similarly vanishes with nothing ever observing it, which stops the reschedule step
+     * below from running at all. Either way a schedule "dies" with no trace in the logs of
+     * why — mirrors {@code SessionManager.sweep()}'s own catch-all for the identical
+     * scheduleAtFixedRate pitfall.
+     *
+     * <p>Package-private (not {@code private}) so {@code LocalAgentSchedulerTest} can call it
+     * directly with a schedule constructed to make {@link #fire} throw deterministically —
+     * asserting the surrounding {@code scheduleAtFixedRate}/cron machinery never sees an
+     * exception is otherwise only provable indirectly and non-deterministically (timing-
+     * dependent), the same testability reasoning behind {@code ReactExecutionSupport}'s own
+     * package-private methods.
+     */
+    void safeFire(AgentSchedule schedule) {
+        try {
+            fire(schedule);
+        } catch (Throwable t) {
+            log.error("[Scheduler] '{}' trigger threw unexpectedly — the schedule will keep "
+                    + "firing on its own interval/cron", schedule.scheduleId(), t);
+        }
     }
 
     private AgentFuture fire(AgentSchedule schedule) {
         return registry.findById(schedule.agentId())
                 .map(agent -> {
                     AgentTask task = AgentTask.of(schedule.inputTemplate());
-                    AgentFuture future = AraAgents.executeAsync(agent, task, executor);
+                    AgentFuture future = AraAgents.executeAsync(agent, task, agentExecutor);
                     future.async().whenComplete((r, ex) -> {
                         if (ex != null) {
                             log.warn("[Scheduler] '{}' threw: {}", schedule.scheduleId(), ex.getMessage());

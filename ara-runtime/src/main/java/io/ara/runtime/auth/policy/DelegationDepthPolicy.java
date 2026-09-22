@@ -6,8 +6,7 @@ import io.ara.core.auth.PolicyEvaluationContext;
 
 /**
  * Denies a call whose {@link io.ara.core.auth.EnvironmentAttributes#delegationDepth()}
- * exceeds a configured maximum (ADR-033 Fase 2b, S8 —
- * `docs/adr/ADR-033-implementation-plan.md` §2b.3, `ara-private`) — a circuit breaker on
+ * exceeds a configured maximum (ADR-033) — a circuit breaker on
  * how many hops a delegation chain may run, independent of whether every individual hop's
  * scope attenuation (Fase 5) is itself satisfied.
  */

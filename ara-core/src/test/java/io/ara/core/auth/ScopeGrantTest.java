@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 8 (S5, `docs/adr/ADR-033-implementation-plan.md` §8.1, `ara-private`) —
+ * ADR-033 Fase 8 (S5) —
  * {@link ScopeGrant#isValid()}/{@link ScopeGrant#consume()} boundary cases.
  */
 class ScopeGrantTest {

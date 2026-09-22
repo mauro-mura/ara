@@ -20,8 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-033 Fase 9 (S7, `docs/adr/ADR-033-implementation-plan.md` §9, `ara-private`) —
- * {@link TenantScopeHelper}. DONE-WHEN letterale del piano: "agente con scope
+ * ADR-033 Fase 9 (S7) —
+ * {@link TenantScopeHelper}. Comportamento atteso: "agente con scope
  * [\"acme:finance\"] non riesce ad accedere ad agente con requiredScopes=[\"other:finance\"]."
  *
  * <p>These pass through {@link ScopeVerifier} unmodified — the point of the ADR is

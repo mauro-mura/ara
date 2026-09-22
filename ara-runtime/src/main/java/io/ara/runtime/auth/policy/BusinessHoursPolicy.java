@@ -14,8 +14,7 @@ import java.util.Set;
 
 /**
  * Denies an action on a {@code dataClassification = "critical"} resource outside a
- * configured business-hours window (ADR-033 Fase 2b, S8 —
- * `docs/adr/ADR-033-implementation-plan.md` §2b.3, `ara-private`). Abstains for any
+ * configured business-hours window (ADR-033). Abstains for any
  * resource not classified {@code "critical"} — nothing to check.
  *
  * <p>Reads {@link io.ara.core.auth.EnvironmentAttributes#timestamp()} rather than {@code

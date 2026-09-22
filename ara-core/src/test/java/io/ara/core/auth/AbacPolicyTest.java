@@ -7,10 +7,10 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * ADR-033 Fase 2b (S8, `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`) —
+ * ADR-033 Fase 2b (S8) —
  * {@link AbacPolicy#and}/{@link AbacPolicy#or} combinators, including the
- * {@link PolicyDecision#NOT_APPLICABLE} abstention case the plan's own sketch does not
- * spell out explicitly but the implementation must still handle sensibly.
+ * {@link PolicyDecision#NOT_APPLICABLE} abstention case, which the implementation must
+ * still handle sensibly even though it is easy to overlook.
  */
 class AbacPolicyTest {
 

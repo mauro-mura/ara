@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * ADR-033 Fase 7 (S4, `docs/adr/ADR-033-implementation-plan.md`, `ara-private`) —
+ * ADR-033 Fase 7 (S4) —
  * {@link ScopeVerifier#checkApproved}. Reuses the existing ADR-048 {@link ApprovalGate}
  * rather than a parallel mechanism — see the method's own javadoc for why.
  */

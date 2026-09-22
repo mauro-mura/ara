@@ -3,8 +3,8 @@ package io.ara.core.auth;
 import java.util.Objects;
 
 /**
- * The action being authorized in an ABAC policy decision (ADR-033 Fase 2b, S8 —
- * `docs/adr/ADR-033-implementation-plan.md` §2b.1, `ara-private`).
+ * The action being authorized in an ABAC policy decision (ADR-033) — what the caller is
+ * asking to do with the {@link ResourceAttributes}.
  *
  * <p>A plain wrapped {@code String} rather than an enum: a deployment's own policies may
  * need action names this type has no reason to know about in advance (the three constants

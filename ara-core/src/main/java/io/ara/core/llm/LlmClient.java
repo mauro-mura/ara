@@ -4,6 +4,7 @@ import io.ara.core.agent.AgentConfig;
 
 import java.util.List;
 import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Abstraction over any LLM provider (OpenAI, Anthropic, Gemini, Ollama, …).
@@ -50,20 +51,49 @@ public interface LlmClient {
      * <p>The default implementation delegates to {@link #complete(List, LlmCallContext)}
      * and emits the full response as a single item. Implementations that support native
      * streaming (e.g. {@code Lc4jLlmClient}) override this method.
+     *
+     * <p><b>P0/U6, 2026-09-22:</b> {@code request(n)} runs {@link #complete} on a dedicated
+     * virtual thread rather than the calling thread. The caller here is typically {@code
+     * ReactExecutionSupport.streamAndCollect} (in {@code ara-runtime}, which depends on this
+     * module — not the other way around, so that class's own bounded-wait-plus-retry
+     * machinery, {@code completeWithRetry}, cannot be called from here directly): it {@code
+     * subscribe()}s and then bounds its wait for {@code onComplete}/{@code onError} with its
+     * own deadline. That bound only ever applies to time spent <em>after</em> {@code
+     * subscribe()} returns — a {@code request(n)} that blocked synchronously inside {@code
+     * complete()} (the previous behaviour here) ran before the bounded wait even started,
+     * silently bypassing it entirely for every client that relies on this default rather than
+     * overriding {@link #stream}. Handing the call to a worker thread lets {@code
+     * subscribe()} return immediately, so the deadline enforced downstream actually applies;
+     * {@link Flow.Subscription#cancel()} interrupts that worker, mirroring {@code
+     * completeWithin}'s own interrupt-based cancellation — best-effort, same as there, since
+     * nothing here can force an uncooperative {@link #complete} implementation to return
+     * early. Guarded to run {@link #complete} at most once even if {@code request} is called
+     * more than once, since this publisher only ever emits a single item.
      */
     default Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
         return subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            private final AtomicBoolean started = new AtomicBoolean();
+            private volatile Thread worker;
+
             @Override
             public void request(long n) {
-                try {
-                    String text = complete(messages, context).text();
-                    subscriber.onNext(text);
-                    subscriber.onComplete();
-                } catch (Exception e) {
-                    subscriber.onError(e);
-                }
+                if (!started.compareAndSet(false, true)) return;   // single-item publisher — only the first request() runs anything
+                worker = Thread.ofVirtual().start(() -> {
+                    try {
+                        String text = complete(messages, context).text();
+                        subscriber.onNext(text);
+                        subscriber.onComplete();
+                    } catch (Exception e) {
+                        subscriber.onError(e);
+                    }
+                });
             }
-            @Override public void cancel() {}
+
+            @Override
+            public void cancel() {
+                Thread w = worker;
+                if (w != null) w.interrupt();
+            }
         });
     }
 

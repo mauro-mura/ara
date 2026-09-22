@@ -6,8 +6,7 @@ import io.ara.core.auth.PolicyEvaluationContext;
 
 /**
  * Denies if the subject's {@code tenantId} differs from the tenant prefix found in the
- * resource's {@code agentId} (ADR-033 Fase 2b, S8 —
- * `docs/adr/ADR-033-implementation-plan.md` §2b.3, `ara-private`) — the same
+ * resource's {@code agentId} (ADR-033) — the same
  * {@code "<tenant>:..."} convention {@code io.ara.runtime.auth.TenantScopeHelper}
  * (ADR-033 Fase 9) applies to scope strings, applied here to agent ids instead.
  *

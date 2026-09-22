@@ -327,6 +327,14 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
   strategy, reuse it rather than copying: the parallel-dispatch interrupt propagation and
   the streaming-subscription-cancel-on-timeout were both real bugs, and a hand-copied
   second implementation is exactly what drifts out of sync on the next fix.
+- **`ReActSupport`** — the *public* face of the same internals, for a strategy written
+  outside this package (a consumer's own `ExecutionStrategy`). It re-publishes the
+  mechanics a custom ReAct-shaped loop needs — `MessageBuffer`, `callLlm`/
+  `completeWithRetry`/`streamAndCollect`, `dispatchSingle`/`dispatchParallel` with
+  `DispatchContext`, `checkBudget`/`chargeRunBudget`, `toolCatalog` and the synthesis nudge
+  — while keeping the strategy-specific decision protocol (`StepDecision`/
+  `ForcedFinalDecision`) internal. Every method delegates to `ReactExecutionSupport`, so
+  there is one implementation, not two. See `docs/ADVANCED.md` for the consumer view.
 - **`ToolCallParser`** — the single place that turns an `LlmCompletion` into
   `ToolCallRequest`s, used by every strategy in this package (previously duplicated
   between `ReactStrategy` and `PlanExecuteStrategy`). Extraction priority: native tool call
@@ -377,6 +385,7 @@ wrong variant) still runs with sane defaults rather than throwing a `ClassCastEx
 | `PlanExecute` | `replanPolicy` (`"never"`), `maxPlanSteps` (8), `maxStepRoundsPerStep` (3) |
 | `Reflexion` | `maxReflections` (2), `reflectionPrompt` (`null`), `reflectionProvider` (`null`) |
 | `ReflAct` | `maxReflections` (3), `unproductiveStreak` (2), `reflectOnToolFailure` (`true`), `reflectionProvider` (`null`) |
+| `Custom` | `strategyName` (required), `params` (open `Map<String,Object>`, empty when unset) — the extension seam for a strategy registered from outside `ara-core`; the framework never reads the map |
 
 `ReactStrategy` and `ReSpActStrategy` have no `StrategyConfig` variant of their own —
 their knobs (`maxIterations`, `maxTokensPerStep`, cost budget) live directly on

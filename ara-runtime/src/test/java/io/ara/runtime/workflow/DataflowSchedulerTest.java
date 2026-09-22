@@ -17,10 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-052 D1's gate of Fase 1, ported from the standalone spike
- * ({@code docs/analysis/spike-adr-052-dataflow/} in ara-private) to production code: same
- * 19 assertions, now exercising {@link DataflowScheduler} instead of the spike's copy of
- * it, plus the second half of D1 the spike deliberately left untested — {@code
+ * ADR-052 D1's gate of Fase 1, ported from a standalone spike to production code: the
+ * same 19 assertions, now exercising {@link DataflowScheduler} instead of the spike's copy
+ * of it, plus the second half of D1 the spike deliberately left untested — {@code
  * onUncertainResume} and the {@link NodeOutcome.Failed}/{@link NodeOutcome.Suspended}
  * outcomes the two-phase journal exists to make resumable-or-not, on purpose. No facade,
  * no build-time checks, no {@code AraAgent} — those are later increments.

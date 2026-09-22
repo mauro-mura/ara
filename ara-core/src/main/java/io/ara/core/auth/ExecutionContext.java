@@ -9,7 +9,7 @@ import java.util.Objects;
  * {@code actorScopes}), and — for delegation on behalf of a user (ADR-033 Fase 6) —
  * whose authority ultimately bounds it ({@code subjectId}/{@code subjectScopes}).
  *
- * <p>ADR-033 Fase 5 (`docs/adr/ADR-033-implementation-plan.md` §5.1, `ara-private`).
+ * <p>Delegation-on-behalf-of modeling (ADR-033 Fase 5).
  * Supersedes the bare {@link ScopeSet} carried by {@code AgentMessage.senderScopes}
  * (ADR-033 Fase 2) for anything beyond a single direct hop: a {@code ScopeSet} alone
  * cannot distinguish "this agent's own authority" from "the human whose request this

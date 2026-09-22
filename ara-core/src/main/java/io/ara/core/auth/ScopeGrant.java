@@ -4,8 +4,7 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * A scope grant limited in time and/or use-count (ADR-033 Fase 8, S5) —
- * `docs/adr/ADR-033-implementation-plan.md` §8.1, `ara-private`.
+ * A scope grant limited in time and/or use-count (ADR-033 Fase 8).
  *
  * <p>Extends, never replaces, an actor's static {@code grantedScopes}: {@link
  * ScopeSet#union} is the only way this type composes with anything else in the model —

@@ -21,6 +21,13 @@ public abstract class AbstractMemoryManager implements MemoryManager {
 
     protected final List<MemoryEntry> working = new ArrayList<>();
 
+    /**
+     * Read-only facade over {@link #working}. Memoised because {@code working} is final and
+     * this view reflects mutations live — rebuilding the wrapper on every call was one
+     * allocation per loop iteration for a view whose identity never changes.
+     */
+    private final List<MemoryEntry> workingView = Collections.unmodifiableList(working);
+
     @Override
     public void appendToWorkingMemory(String role, String content) {
         working.add(MemoryEntry.of(role, content));
@@ -38,7 +45,7 @@ public abstract class AbstractMemoryManager implements MemoryManager {
 
     @Override
     public List<MemoryEntry> workingMemory() {
-        return Collections.unmodifiableList(working);
+        return workingView;
     }
 
     @Override

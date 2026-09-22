@@ -5,6 +5,7 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.StrategyConfig;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStrategy;
+import io.ara.core.agent.ExecutionTimeoutException;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -19,6 +20,7 @@ import io.ara.runtime.agent.AgentInstance;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -150,7 +152,18 @@ public final class ReflexionStrategy implements ExecutionStrategy {
         int totalPromptTokens = 0;
         int totalOutputTokens = 0;
 
+        // P0/U5, 2026-09-22: one deadline for the whole retry loop — before this there was
+        // no deadline here at all, neither per-attempt nor overall (each `delegate.execute`
+        // call computes its own fresh `executionTimeout` window independently, so nothing
+        // bounded the total wall-clock time across every attempt plus every reflection call
+        // combined). Checked between attempts, and again bounds `generateReflection`'s own
+        // LLM call (U3) — previously unbounded on its own.
+        Instant deadline = Instant.now().plus(config.executionTimeout());
+
         for (int attempt = 0; attempt <= maxReflections; attempt++) {
+            if (Instant.now().isAfter(deadline)) {
+                throw new ExecutionTimeoutException(config.executionTimeout());
+            }
             log.debug("Reflexion attempt {}/{} for task [{}]",
                     attempt + 1, maxReflections + 1, task.taskId());
 
@@ -183,9 +196,12 @@ public final class ReflexionStrategy implements ExecutionStrategy {
             }
 
             // ── Generate reflection ────────────────────────────────────────────
+            if (Instant.now().isAfter(deadline)) {
+                throw new ExecutionTimeoutException(config.executionTimeout());
+            }
             Reflection reflection = generateReflection(
                     task, result.failureReason(), priorReflections, promptTemplate, llm, ctx,
-                    rc.reflectionProvider());
+                    rc.reflectionProvider(), deadline, config);
             // The reflection is an LLM call like any other: its usage must land in the
             // totals, or the cost of every retry cycle is under-reported to the caller
             // (and invisible to any downstream cost accounting).
@@ -229,6 +245,17 @@ public final class ReflexionStrategy implements ExecutionStrategy {
      */
     private record Reflection(String text, int promptTokens, int outputTokens) {}
 
+    /**
+     * <p><b>P0/U3, 2026-09-22:</b> the reflection call now runs through {@link
+     * ReactExecutionSupport#completeWithRetry} — bounded by {@code deadline}, the same
+     * shared deadline U5 introduced for the whole retry loop — instead of a raw {@code
+     * reflectionLlm.complete(...)} with no deadline at all. A cancellation ({@link
+     * InterruptedException}) still degrades to a fallback reflection text rather than
+     * propagating, consistent with every other failure here — this method has no {@code
+     * ExecutionResult} to report "Cancelled" through — but the interrupt flag is restored
+     * first so {@link #execute}'s own {@code isInterrupted()} check at the top of its next
+     * attempt still observes the cancellation instead of losing it.
+     */
     private Reflection generateReflection(
             AgentTask task,
             String failureReason,
@@ -236,7 +263,9 @@ public final class ReflexionStrategy implements ExecutionStrategy {
             String promptTemplate,
             LlmClient llm,
             LlmCallContext ctx,
-            String reflectionProvider) {
+            String reflectionProvider,
+            Instant deadline,
+            AgentConfig config) {
 
         String priorText = priorReflections.isEmpty()
                 ? "(none)"
@@ -257,12 +286,17 @@ public final class ReflexionStrategy implements ExecutionStrategy {
         LlmClient reflectionLlm = resolveReflectionLlm(llm, ctx, reflectionProvider, task.taskId());
 
         try {
-            LlmCompletion completion = reflectionLlm.complete(messages, ctx);
+            LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
+                    reflectionLlm, messages, ctx, deadline, config, task.taskId());
             String text = completion.text();
             String reflectionText = (text != null && !text.isBlank())
                     ? text.strip()
                     : fallbackReflection(failureReason);
             return new Reflection(reflectionText, completion.promptTokens(), completion.outputTokens());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("Reflection generation cancelled for task [{}]", task.taskId());
+            return new Reflection(fallbackReflection(failureReason), 0, 0);
         } catch (Exception e) {
             log.warn("Reflection generation failed for task [{}]: {}", task.taskId(), e.getMessage());
             return new Reflection(fallbackReflection(failureReason), 0, 0);

@@ -10,8 +10,7 @@ import java.util.Objects;
 
 /**
  * Reference {@link AbacPolicyEngine}: a named, ordered list of {@link AbacPolicy}
- * evaluations folded into one decision under a chosen combining algorithm (ADR-033
- * Fase 2b, S8 — `docs/adr/ADR-033-implementation-plan.md` §2b.2, `ara-private`).
+ * evaluations folded into one decision under a chosen combining algorithm (ADR-033).
  *
  * <p>Built via {@link AbacPoliciesBuilder}, not this class's own constructor directly —
  * see that class for the fluent {@code .add(name, policy).combineWith(algorithm)} API
