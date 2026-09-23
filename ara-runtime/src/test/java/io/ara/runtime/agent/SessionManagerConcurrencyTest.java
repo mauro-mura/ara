@@ -229,4 +229,18 @@ class SessionManagerConcurrencyTest {
             executor.shutdown();
         }
     }
+
+    // Note (P5/U16, 2026-09-23): getOrCreate's fast path — a volatile read of an already-
+    // built SessionEntry.session — was fixed to re-verify the entry is still the map's
+    // current value before trusting it (SessionEntry.takeForClose() marks an entry torn
+    // down but never nulls its `session` field, so a stale SessionEntry reference could
+    // otherwise still read a since-closed session). No regression test for this specific
+    // fix: the race window is a couple of CPU instructions wide (between computeIfAbsent
+    // returning and the very next line's field read, no I/O or blocking call in between to
+    // land a concurrent teardown in), and a sustained concurrent-churn stress attempt (16
+    // readers hammering getOrCreate against a concurrent invalidate loop for 500ms, well
+    // over a million combined calls) did not reproduce the bug even once against the
+    // pre-fix code across repeated runs — confirmed by reverting the fix locally and
+    // re-running it, per this project's own verification convention. Correctness here
+    // rests on the code-reading analysis in this method's own javadoc, not on a test.
 }

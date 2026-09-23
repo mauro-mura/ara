@@ -254,6 +254,26 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         // from one snapshot, never a torn mix of old/new (ADR-039 "lettura coerente").
         AgentSession session = sessionManager.getOrCreate(sessionId, versionedConfig.current());
 
+        // P5/U18bis, 2026-09-23: re-check `closed` immediately after getOrCreate, before
+        // `session` is used for anything else. `terminate()` can run concurrently between
+        // the check above and the getOrCreate call: it flips `closed` and drains every
+        // session sessionManager.shutdown() can see at that moment — a session this call
+        // creates strictly afterward is invisible to that drain (never in its snapshot).
+        // runStrategy() independently re-checks `closed` right before the strategy would
+        // actually run, so this is not what stops the task from executing against a
+        // terminated agent (that was already covered) — it is what stops the session
+        // itself from leaking: without it, this orphaned session stays registered with its
+        // wiring open forever, since terminate() is idempotent (no second drain ever
+        // comes) and execute()'s very first check now rejects every later call before it
+        // can reach getOrCreate again. invalidate() here is safe even if terminate() also
+        // raced this exact session into its own drain first — the second teardown of the
+        // same key is a documented no-op (SessionManager's own single-owner removal rule).
+        if (closed.get()) {
+            sessionManager.invalidate(sessionId);
+            return AgentResponse.failure(task.taskId(), agentId(),
+                    "Agent terminated", Duration.ZERO);
+        }
+
         // Bind this session's shared RunState onto the task, but only if it doesn't
         // already carry one: a fresh top-level call should see its session's
         // accumulated state, but a task that arrived via delegate_task already has

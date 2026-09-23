@@ -156,13 +156,19 @@ class SessionManagerTest {
         manager.getOrCreate(SessionId.of("abandoned"), dummyConfig());
         assertEquals(1, manager.activeSessionCount());
 
+        // P5/U16: eviction now dispatches onto its own virtual thread instead of running
+        // inline on the sweeper (so one slow close can no longer block every future sweep
+        // — see evictStale's own javadoc). That decouples "removed from the map" from
+        // "wiring closed" as observed from this thread: nothing says the close has already
+        // happened just because activeSessionCount() has already dropped to 0. Poll the
+        // actual condition this test cares about instead of inferring it from the map size.
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-        while (manager.activeSessionCount() > 0 && System.nanoTime() < deadline) {
+        while (wiringFactory.releases.get() == 0 && System.nanoTime() < deadline) {
             Thread.sleep(20);
         }
 
-        assertEquals(0, manager.activeSessionCount(), "an idle session must be reclaimed after its TTL");
         assertEquals(1, wiringFactory.releases.get(), "eviction must release the evicted session's leases");
+        assertEquals(0, manager.activeSessionCount(), "an idle session must be reclaimed after its TTL");
 
         manager.shutdown();
     }

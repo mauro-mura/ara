@@ -147,19 +147,29 @@ public final class SessionManager {
             AgentSession session = entry.sessionOrBuild(
                     () -> newSession(sessionId, configSnapshot),
                     built -> built.wiring().close());
-            if (session != null) {
+            // P5/U16, 2026-09-23: re-verify `entry` is still the one actually in the map
+            // before trusting `session`. Without this, the already-built fast path above
+            // (session != null, returned on `entry`'s first volatile read, before ever
+            // touching buildLock) could hand back a session whose wiring a concurrent
+            // evictStale/invalidate/shutdown had *already* closed moments earlier: that
+            // teardown path only ever clears `entry` from this map and marks it via
+            // takeForClose() — it never nulls out `entry.session` itself — so a caller
+            // already holding a reference to this same `entry` (from computeIfAbsent
+            // above, in the same call) would otherwise never notice.
+            if (session != null && sessions.get(sessionId.value()) == entry) {
                 // Mutates the entry in place. A record + `entry.touch()` would build a
                 // replacement that nothing ever stores, freezing lastAccessed at creation
                 // time and making the sweeper reclaim busy sessions on a fixed lifetime.
                 entry.touch();
                 return session;
             }
-            // Torn down (invalidate/shutdown/the sweeper) while this entry's first build was
-            // still in flight — SessionEntry#sessionOrBuild already closed what it built.
-            // Drop the now-dead placeholder if it is still the one sitting in the map (a
-            // third caller may already have replaced it after computeIfAbsent above raced
-            // the teardown too) and retry as if this sessionId had never been seen, exactly
-            // the outcome a caller arriving one instant later would have gotten anyway.
+            // Either the build was torn down while still in flight (session == null —
+            // SessionEntry#sessionOrBuild already closed what it built), or this entry was
+            // concurrently removed after we fetched it (the re-verify above). Drop the now-
+            // stale placeholder if it is still the one sitting in the map (a third caller
+            // may already have replaced it after computeIfAbsent raced the teardown too)
+            // and retry as if this sessionId had never been seen, exactly the outcome a
+            // caller arriving one instant later would have gotten anyway.
             sessions.remove(sessionId.value(), entry);
         }
     }
@@ -249,15 +259,31 @@ public final class SessionManager {
                 .toList();
     }
 
-    /** Shuts down the sweeper and releases every live session's wiring before clearing the map. */
+    /**
+     * Shuts down the sweeper and releases every live session's wiring before clearing the
+     * map.
+     *
+     * <p><b>P5/U16, 2026-09-23:</b> a session created via {@link #getOrCreate} concurrently
+     * with — and strictly after — the snapshot below is not in it, so the drain loop never
+     * closes its wiring: a real, accepted residual leak. This is now narrow in practice
+     * because {@code AgentInstance} re-checks its own {@code closed} flag immediately after
+     * {@code getOrCreate} returns and tears down (rather than uses) any session created
+     * during exactly this race — the caller {@code shutdown()} exists to serve — but {@code
+     * SessionManager} has no such flag of its own to enforce that for every possible caller.
+     * The final {@link Map#clear()} does not (cannot) close that orphan's wiring — nothing
+     * observed it — but at least drops the dangling {@link SessionEntry} reference instead
+     * of leaving it in {@link #sessions} for the rest of the JVM's lifetime.
+     */
     public void shutdown() {
         sweeper.shutdownNow();
-        // Drain key by key rather than clear()-then-close: with clear(), a session created
-        // concurrently between the clear and the close loop would be dropped from the map
-        // with its leases never released.
+        // Drain key by key rather than clear()-then-close: with clear() alone, a session
+        // created concurrently between the clear and the close loop would be dropped from
+        // the map with its leases never released — draining first at least closes every
+        // session this snapshot could see.
         for (String key : List.copyOf(sessions.keySet())) {
             removeAndClose(key);
         }
+        sessions.clear();
     }
 
     /**
@@ -277,6 +303,27 @@ public final class SessionManager {
      * Removes sessions idle longer than {@link #SESSION_TTL}, releasing each one's wiring.
      * Sessions with a task in flight are skipped: closing their wiring would pull the LLM
      * transport out from under a running execution.
+     *
+     * <p><b>P5/U15, 2026-09-23:</b> the {@code !session.isBusy()} check used to be a plain
+     * snapshot, taken here and acted on later in {@link #removeAndClose} — a task that
+     * acquired {@link AgentSession#executionLock()} in between found its wiring closed out
+     * from under it mid-execution. {@link #evictIfStillIdle} closes that window: it holds
+     * the session's own {@code executionLock} (via {@code tryLock()}, so a genuinely busy
+     * session is skipped rather than waited on) across the removal itself, so no task can
+     * begin running on a session between this method deciding it is idle and it actually
+     * being torn down.
+     *
+     * <p><b>P5/U16, 2026-09-23:</b> each eviction now runs on its own dedicated virtual
+     * thread instead of inline on this method's caller — the single {@link #sweeper}
+     * thread. {@code wiring().close()} can do real teardown I/O (closing an MCP
+     * connection); before this, a single slow or hanging close blocked eviction of every
+     * <em>other</em> stale session in the same pass, and — worse — blocked {@code
+     * scheduleAtFixedRate}'s next scheduled tick, since that mechanism runs the same task
+     * serially on one thread: one stuck close would have silently disabled session
+     * reclamation for the rest of the JVM's lifetime, not just delayed it. Evictions
+     * across different sessions are independent of each other by construction (each only
+     * ever touches its own {@link SessionEntry}/{@link AgentSession#executionLock()}), so
+     * running them concurrently introduces no new coordination need.
      */
     private void evictStale() {
         long now = System.nanoTime();
@@ -285,12 +332,41 @@ public final class SessionManager {
             SessionEntry entry = e.getValue();
             AgentSession session = entry.session();
             if (session == null) continue;   // U24: first build still in flight — never stale
-            if (now - entry.lastAccessedNanos() >= sessionTtlNanos && !session.isBusy()) {
+            if (now - entry.lastAccessedNanos() >= sessionTtlNanos) {
                 staleKeys.add(e.getKey());
             }
         }
         for (String key : staleKeys) {
-            removeAndClose(key);
+            Thread.ofVirtual().start(() -> evictIfStillIdle(key));
+        }
+    }
+
+    /**
+     * U15: the atomic "still idle, and not busy, and still this session" check-and-evict
+     * behind {@link #evictStale}. Re-reads the entry (rather than trusting the snapshot
+     * {@link #evictStale} built) because a {@code getOrCreate} touch, or an unrelated
+     * teardown, may have happened since; re-checks the TTL for the same reason — a session
+     * touched between the snapshot and this call is no longer stale and must survive.
+     */
+    private void evictIfStillIdle(String key) {
+        SessionEntry entry = sessions.get(key);
+        if (entry == null) return;
+        AgentSession session = entry.session();
+        if (session == null) return;   // first build still in flight, or torn down already
+        if (System.nanoTime() - entry.lastAccessedNanos() < sessionTtlNanos) return;   // touched since the snapshot
+
+        ReentrantLock executionLock = session.executionLock();
+        if (!executionLock.tryLock()) return;   // busy right now — retried on the next sweep
+        try {
+            // Identity-checked remove: `entry` may already have been replaced (e.g. an
+            // invalidate() racing this same sweep) by the time we get here, and removing
+            // by bare key would then tear down whatever session currently sits at `key`
+            // instead of a no-op.
+            if (sessions.remove(key, entry)) {
+                entry.takeForClose().ifPresent(s -> s.wiring().close());
+            }
+        } finally {
+            executionLock.unlock();
         }
     }
 

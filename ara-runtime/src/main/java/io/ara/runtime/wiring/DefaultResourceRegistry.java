@@ -35,18 +35,29 @@ import java.util.function.Supplier;
  *
  * <p><b>{@code Entry.lock} is a {@link ReentrantLock}, not a monitor</b>
  * ({@code docs/analysis/concurrency-hardening.md} N1/U23, 2026-09-22): {@code
- * publishLocked}/{@code retire}/{@code release} call {@code factory.apply}/{@code
- * closeQuietly} — a real MCP connection open/close in production — while holding this lock,
- * and on this project's JDK 21 target (JEP 491, which removes this, is JDK 24) a virtual
- * thread that blocks while holding a {@code synchronized} monitor pins its OS carrier for
- * the whole block — every {@code pin}/{@code publish} on <em>every other id</em> stalls too,
- * not just this one, because the carrier pool is shared and small
- * ({@code Runtime.availableProcessors()} by default). A {@code ReentrantLock} held across
- * the same blocking call does not pin: the invariant above — same-id mutual exclusion,
- * cross-id independence — is exactly preserved, only the primitive providing it changed.
- * Verified empirically, not only by JDK semantics: {@code DefaultResourceRegistryPinningTest}
- * saturates every carrier with a slow {@code factory} and checks that an unrelated virtual
- * thread can still be scheduled.
+ * publishLocked} calls {@code factory.apply} — a real MCP connection open in production —
+ * while holding this lock, and on this project's JDK 21 target (JEP 491, which removes
+ * this, is JDK 24) a virtual thread that blocks while holding a {@code synchronized}
+ * monitor pins its OS carrier for the whole block — every {@code pin}/{@code publish} on
+ * <em>every other id</em> stalls too, not just this one, because the carrier pool is shared
+ * and small ({@code Runtime.availableProcessors()} by default). A {@code ReentrantLock}
+ * held across the same blocking call does not pin: the invariant above — same-id mutual
+ * exclusion, cross-id independence — is exactly preserved, only the primitive providing it
+ * changed. Verified empirically, not only by JDK semantics: {@code
+ * DefaultResourceRegistryPinningTest} saturates every carrier with a slow {@code factory}
+ * and checks that an unrelated virtual thread can still be scheduled.
+ *
+ * <p><b>Closing is never done under this lock</b> (P5/U17, 2026-09-23, completing what
+ * U23 deliberately deferred): {@code closeQuietly} — the other half of the same real I/O —
+ * used to run inside {@code entry.lock} too, from both {@code retire} (a publish that
+ * immediately supersedes an unreferenced version) and {@code release} (a lease's last
+ * holder). Both now remove the retired {@code VersionState} from {@code entry.versions}
+ * under the lock — the point past which nothing can ever reference it again — and close it
+ * only after unlocking, so a slow/hanging close on one id no longer serializes every other
+ * {@code pin}/{@code publish}/{@code release} call for that <em>same</em> id behind it.
+ * {@link #scheduleForcedDrain}'s own timer callback got the equivalent fix: it now spawns a
+ * dedicated virtual thread instead of running the lock-and-evict body inline on the single
+ * scheduler thread this whole registry shares across every id.
  */
 public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, R>, AutoCloseable {
 
@@ -135,15 +146,22 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(specIfAbsent, "specIfAbsent must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
+        R toClose = null;
+        Lease<R> lease;
         entry.lock.lock();
         try {
             if (entry.currentVersion == 0) {
-                publishLocked(entry, specIfAbsent.get(), DrainPolicy.GRACEFUL);
+                // A brand-new id never retires anything (oldVersion is 0 inside
+                // publishLocked), so toClose is always null here in practice — kept for
+                // symmetry with publish() below, not because this path needs it.
+                toClose = publishLocked(entry, specIfAbsent.get(), DrainPolicy.GRACEFUL).toClose();
             }
-            return acquireLocked(entry, entry.currentVersion);
+            lease = acquireLocked(entry, entry.currentVersion);
         } finally {
             entry.lock.unlock();
         }
+        if (toClose != null) closeQuietly(toClose);
+        return lease;
     }
 
     @Override
@@ -157,12 +175,15 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         Objects.requireNonNull(spec, "spec must not be null");
         Objects.requireNonNull(policy, "policy must not be null");
         Entry<R> entry = entries.computeIfAbsent(id, k -> new Entry<>());
+        PublishOutcome<R> outcome;
         entry.lock.lock();
         try {
-            return publishLocked(entry, spec, policy);
+            outcome = publishLocked(entry, spec, policy);
         } finally {
             entry.lock.unlock();
         }
+        if (outcome.toClose() != null) closeQuietly(outcome.toClose());
+        return outcome.version();
     }
 
     /**
@@ -188,8 +209,14 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         }
     }
 
-    /** Caller must hold {@code entry.lock}. */
-    private long publishLocked(Entry<R> entry, S spec, DrainPolicy policy) {
+    /**
+     * Caller must hold {@code entry.lock}. {@code factory.apply} still runs under it
+     * (U23's deliberate, documented scope — see the class javadoc), but the retired
+     * version's {@code closeQuietly}, if this publish immediately closed one, is deferred
+     * to the returned {@link PublishOutcome#toClose()} so the caller can run it
+     * <em>after</em> unlocking (P5/U17).
+     */
+    private PublishOutcome<R> publishLocked(Entry<R> entry, S spec, DrainPolicy policy) {
         R resource = factory.apply(spec);
         long newVersion = ++entry.versionSeq;
         entry.versions.put(newVersion, new VersionState<>(resource));
@@ -197,30 +224,52 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         long oldVersion = entry.currentVersion;
         entry.currentVersion = newVersion;
 
-        if (oldVersion != 0) {
-            retire(entry, oldVersion, policy);
-        }
-        return newVersion;
+        R toClose = oldVersion != 0 ? retire(entry, oldVersion, policy) : null;
+        return new PublishOutcome<>(newVersion, toClose);
     }
 
-    /** Caller must hold {@code entry.lock}. */
-    private void retire(Entry<R> entry, long version, DrainPolicy policy) {
+    /**
+     * Caller must hold {@code entry.lock}. Returns the retired version's resource if this
+     * call closed it immediately (no active leases at retirement) — the caller closes it
+     * <em>after</em> unlocking (P5/U17, consistent with U23's own precedent of not holding
+     * this lock across real teardown I/O when it can be avoided). Returns {@code null} when
+     * nothing needs closing here: already retired, still referenced (a {@link Lease#close}
+     * will close it later via {@link #release}), or handed to {@link #scheduleForcedDrain}
+     * instead.
+     */
+    private R retire(Entry<R> entry, long version, DrainPolicy policy) {
         VersionState<R> vs = entry.versions.get(version);
-        if (vs == null || vs.retired) return;
+        if (vs == null || vs.retired) return null;
         vs.retired = true;
         if (vs.refCount == 0) {
             entry.versions.remove(version);
-            closeQuietly(vs.resource);
-            return;
+            return vs.resource;
         }
         if (policy instanceof DrainPolicy.Forced forced) {
             scheduleForcedDrain(entry, vs, forced.deadline());
         }
+        return null;
     }
 
+    /** Paired with {@link #publishLocked} — see its own javadoc. */
+    private record PublishOutcome<R>(long version, R toClose) {}
+
+    /**
+     * P5/U17, 2026-09-23: the timer callback itself only spawns a dedicated virtual thread
+     * and returns immediately — it no longer runs the lock-and-evict body inline on {@link
+     * #scheduler}. That scheduler is a single thread shared by <em>every</em> id this
+     * registry manages; {@code entry.lock} can itself be contended (another {@code
+     * pin}/{@code publish}/{@code release} for the same id, possibly itself mid-{@code
+     * factory.apply}/close), and {@code Lease::evict} runs a caller-supplied callback this
+     * registry does not control the runtime of (ADR-039's layering guardrail — e.g.
+     * {@code SessionManager} binds it to {@code session::requestCancel}, cheap today, but
+     * this registry has no way to know that in general). Before this, a single slow evict
+     * for one id — or even just lock contention — delayed every other id's forced-drain
+     * deadline behind it, on the one thread the whole registry shares.
+     */
     private void scheduleForcedDrain(Entry<R> entry, VersionState<R> vs, Instant deadline) {
         long delayMs = deadline == null ? 0 : Math.max(0, deadline.toEpochMilli() - System.currentTimeMillis());
-        scheduler.schedule(() -> {
+        scheduler.schedule(() -> Thread.ofVirtual().start(() -> {
             List<Lease<R>> toEvict;
             entry.lock.lock();
             try {
@@ -229,7 +278,7 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
                 entry.lock.unlock();
             }
             toEvict.forEach(Lease::evict);
-        }, delayMs, TimeUnit.MILLISECONDS);
+        }), delayMs, TimeUnit.MILLISECONDS);
     }
 
     /** Caller must hold {@code entry.lock}. */
@@ -252,7 +301,17 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         return (Lease<R>[]) new Lease<?>[1];
     }
 
+    /**
+     * P5/U17, 2026-09-23: {@code closeQuietly} used to run inside {@code entry.lock} — real
+     * teardown I/O (an MCP disconnect) serializing every other {@code pin}/{@code publish}/
+     * {@code release} for this same id behind it. Once {@code entry.versions.remove(version)}
+     * has run under the lock, nothing else can ever reference this version again (a fresh
+     * {@code pin(id, version)} throws "not available", and no lease still holds it — refCount
+     * is already 0) — so the close itself needs no lock at all, and can safely happen after
+     * unlocking.
+     */
     private void release(Entry<R> entry, long version, Lease<R>[] selfRef) {
+        R toClose = null;
         entry.lock.lock();
         try {
             VersionState<R> vs = entry.versions.get(version);
@@ -261,10 +320,13 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
             vs.refCount--;
             if (vs.retired && vs.refCount == 0) {
                 entry.versions.remove(version);
-                closeQuietly(vs.resource);
+                toClose = vs.resource;
             }
         } finally {
             entry.lock.unlock();
+        }
+        if (toClose != null) {
+            closeQuietly(toClose);
         }
     }
 

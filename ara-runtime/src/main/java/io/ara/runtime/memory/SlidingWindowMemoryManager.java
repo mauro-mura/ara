@@ -319,6 +319,21 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
      * embedding failures are still swallowed individually (embedding can be a remote call
      * too); a failed batch write is logged and swallowed — offload is best-effort, it must
      * never break eviction.
+     *
+     * <p><b>P5/U18, 2026-09-23 — interrupt hygiene, not a new budget parameter:</b> neither
+     * {@code embed} nor {@code appendToWorkingMemory} (hence this whole eviction path) takes
+     * a deadline — {@link io.ara.core.memory.MemoryManager} has no such parameter today, and
+     * adding one is a breaking interface change across every implementation and call site,
+     * out of this unit's scope. What <em>is</em> in scope and was a real bug: when the
+     * strategy thread this runs on <em>is</em> externally interrupted (the deadline watchdog
+     * that already wraps this same thread's LLM calls elsewhere in {@code
+     * ReactExecutionSupport} et al.), {@code embed}'s {@code RuntimeException} wrapper — like
+     * most — does not restore the interrupt flag itself, and the catch below used to just
+     * log and move on to the <em>next</em> entry regardless, one multi-second remote RTT at a
+     * time, instead of noticing the deadline had already fired and stopping. Checked once per
+     * iteration (cheap — this method has no other cheap cancellation point) and once more
+     * before the batch write, since {@code upsertAll} is itself another unbounded remote
+     * call.
      */
     private void offloadBeforeDiscard(int fromInclusive, int toExclusive) {
         if (!offloadEnabled()) {
@@ -326,6 +341,11 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         }
         List<SemanticEntry> batch = new ArrayList<>();
         for (int i = fromInclusive; i < toExclusive && i < working.size(); i++) {
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("SlidingWindowMemoryManager: offload interrupted — stopping after {} of {} entries",
+                        i - fromInclusive, toExclusive - fromInclusive);
+                return;
+            }
             MemoryEntry e = working.get(i);
             if (e.content() == null || e.content().isBlank()) {
                 continue;
@@ -338,6 +358,11 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
             }
         }
         if (batch.isEmpty()) {
+            return;
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            log.warn("SlidingWindowMemoryManager: offload interrupted — skipping upsertAll for {} collected entries",
+                    batch.size());
             return;
         }
         try {

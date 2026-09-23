@@ -8,6 +8,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -207,6 +208,90 @@ class DefaultResourceRegistryTest {
         assertTrue(done.await(30, TimeUnit.SECONDS));
         pool.shutdown();
         assertEquals(0, useAfterCloseErrors.get());
+    }
+
+    // ── closing outside the per-id lock — P5/U17 ────────────────────────────────
+
+    @Test
+    void release_closesOutsideTheLock_doesNotBlockAConcurrentPinForTheSameId() throws Exception {
+        CountDownLatch closeEntered = new CountDownLatch(1);
+        CountDownLatch releaseClose = new CountDownLatch(1);
+        var registry = new DefaultResourceRegistry<String, String>(
+                spec -> spec,
+                resource -> {
+                    closeEntered.countDown();
+                    try {
+                        assertTrue(releaseClose.await(5, TimeUnit.SECONDS), "test must release the close");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        registry.publish("id", "v1");
+        Lease<String> leaseV1 = registry.pin("id");
+        registry.publish("id", "v2");   // retires v1 — still referenced by leaseV1, so not closed yet
+
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            Future<?> releaseFuture = executor.submit(() -> { leaseV1.close(); return null; });   // triggers the slow close
+            assertTrue(closeEntered.await(5, TimeUnit.SECONDS), "the slow close must have started");
+
+            // The close above holds no lock (P5/U17) — pin() for the SAME id must not wait
+            // on it. Run it on its own thread with a short bound: on the pre-fix code this
+            // would otherwise hang until releaseClose is counted down, below.
+            Future<Lease<String>> pinFuture = executor.submit(() -> registry.pin("id"));
+            Lease<String> newLease;
+            try {
+                newLease = pinFuture.get(1, TimeUnit.SECONDS);
+            } finally {
+                releaseClose.countDown();   // always release the slow close, even on failure
+            }
+            newLease.close();
+
+            releaseFuture.get(5, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void scheduledForcedDrain_forOneId_doesNotDelayAnotherIdsForcedDrain() throws Exception {
+        var registry = newRegistry(new AtomicInteger());
+
+        registry.publish("slow-id", "v1");
+        Lease<CountingResource> slowLease = registry.pin("slow-id");
+        CountDownLatch slowEvictEntered = new CountDownLatch(1);
+        CountDownLatch releaseSlowEvict = new CountDownLatch(1);
+        slowLease.bindEvictionTarget(() -> {
+            slowEvictEntered.countDown();
+            try {
+                assertTrue(releaseSlowEvict.await(5, TimeUnit.SECONDS), "test must release the slow evict");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+
+        registry.publish("fast-id", "v1");
+        Lease<CountingResource> fastLease = registry.pin("fast-id");
+        AtomicInteger fastEvictions = new AtomicInteger();
+        fastLease.bindEvictionTarget(fastEvictions::incrementAndGet);
+
+        // Both scheduled on the SAME shared scheduler thread (one per registry). The slow
+        // id's deadline fires first; its own evict callback then blocks indefinitely.
+        registry.publish("slow-id", "v2", new DrainPolicy.Forced(Instant.now().plusMillis(20)));
+        registry.publish("fast-id", "v2", new DrainPolicy.Forced(Instant.now().plusMillis(60)));
+
+        assertTrue(slowEvictEntered.await(2, TimeUnit.SECONDS), "the slow id's evict must have started");
+        try {
+            // P5/U17: the scheduler thread only spawns a worker per deadline and returns
+            // immediately, so the fast id's own deadline still fires on time even while the
+            // slow id's evict callback is still blocked — before this fix, both ran inline
+            // on the one thread the whole registry shares, so the fast id would never fire
+            // until the slow one's callback finally returned.
+            awaitTrue(() -> fastEvictions.get() == 1, 2000);
+        } finally {
+            releaseSlowEvict.countDown();
+        }
     }
 
     // ── close()/isClosed() — P4/U14 ─────────────────────────────────────────────
