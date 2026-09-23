@@ -197,6 +197,39 @@ class ApprovalToolRegistryTest {
     }
 
     /**
+     * P3 hardening: {@code join()} used to ignore an interrupt entirely, leaving the
+     * calling thread parked until the gate's own timeout — up to its full configured
+     * duration — instead of reacting to cancellation immediately.
+     */
+    @Test
+    void interrupted_isNoticedImmediately_andNeverTouchesTheDelegate() throws InterruptedException {
+        RecordingRegistry delegate = new RecordingRegistry();
+        CompletableFuture<ApprovalDecision> neverCompletes = new CompletableFuture<>();
+        ApprovalGate hangingGate = new ApprovalGate() {
+            @Override public CompletableFuture<ApprovalDecision> requestApproval(ApprovalRequest request) {
+                return neverCompletes;
+            }
+            @Override public void submit(String requestId, ApprovalDecision decision) {
+                throw new UnsupportedOperationException();
+            }
+            @Override public List<ApprovalRequest> getPendingRequests() { return List.of(); }
+        };
+
+        java.util.concurrent.atomic.AtomicReference<ToolResult> result = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> result.set(gated(delegate, hangingGate).execute("delete_record", ARGS)));
+        worker.start();
+        Thread.sleep(50); // let the worker reach the wait
+        worker.interrupt();
+        worker.join(5_000);
+
+        assertFalse(worker.isAlive(), "the worker must not stay parked past the interrupt");
+        assertTrue(result.get().isFailed());
+        assertTrue(result.get().error().contains("cancelled"), result.get().error());
+        assertTrue(neverCompletes.isCancelled(), "the pending future must be cancelled, not left dangling");
+        assertTrue(delegate.calls.isEmpty(), "a cancelled approval must not run the action");
+    }
+
+    /**
      * Any other gate failure — a broken store, a transport error — must also fail
      * closed. The distinction from timeout is only the message.
      */

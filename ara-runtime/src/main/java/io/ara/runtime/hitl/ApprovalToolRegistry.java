@@ -175,19 +175,23 @@ public final class ApprovalToolRegistry implements ToolRegistry {
 
         ApprovalDecision decision;
         try {
-            decision = gate.requestApproval(request).join();
-        } catch (Exception e) {
-            Throwable cause = unwrap(e);
-            if (cause instanceof ApprovalTimeoutException) {
-                log.warn("Approval timed out for tool [{}] on agent [{}], requestId={}",
-                        toolId, agentId, request.requestId());
-                return ToolResult.failure(toolId,
-                        "Human approval timed out for action '" + toolId + "' (requestId=" + request.requestId() + ")");
-            }
-            log.error("Approval gate error for tool [{}] on agent [{}]: {}",
-                    toolId, agentId, cause.getMessage(), cause);
+            decision = ApprovalWaiter.await(gate, request);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.info("Approval wait cancelled for tool [{}] on agent [{}], requestId={}",
+                    toolId, agentId, request.requestId());
             return ToolResult.failure(toolId,
-                    "Approval gate error: " + cause.getMessage());
+                    "Approval cancelled for action '" + toolId + "' (requestId=" + request.requestId() + ")");
+        } catch (ApprovalTimeoutException e) {
+            log.warn("Approval timed out for tool [{}] on agent [{}], requestId={}",
+                    toolId, agentId, request.requestId());
+            return ToolResult.failure(toolId,
+                    "Human approval timed out for action '" + toolId + "' (requestId=" + request.requestId() + ")");
+        } catch (RuntimeException e) {
+            log.error("Approval gate error for tool [{}] on agent [{}]: {}",
+                    toolId, agentId, e.getMessage(), e);
+            return ToolResult.failure(toolId,
+                    "Approval gate error: " + e.getMessage());
         }
 
         return switch (decision) {
@@ -234,11 +238,6 @@ public final class ApprovalToolRegistry implements ToolRegistry {
         }
         double confidence = state.get(confidenceStateKey, Number.class).map(Number::doubleValue).orElse(0.0);
         return autonomyPolicy.escalate(taskClass, spec.get(), confidence);
-    }
-
-    private static Throwable unwrap(Exception e) {
-        Throwable cause = e.getCause();
-        return cause != null ? cause : e;
     }
 
     @FunctionalInterface

@@ -21,7 +21,9 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * ADR-033 Fase 7 (S4) —
@@ -106,6 +108,39 @@ class ScopeVerifierApprovalTest {
                 () -> ScopeVerifier.checkApproved(agent, gate, "caller", ScopeSet.of("ops")));
         assertEquals(AuthorizationException.Reason.APPROVAL_REQUIRED, e.reason());
         operator.join();
+    }
+
+    /**
+     * P3 hardening: {@code join()} used to ignore an interrupt entirely, leaving the
+     * calling thread parked until the gate's own timeout (up to its full configured
+     * duration — 30 minutes by default) instead of reacting to cancellation immediately.
+     */
+    @Test
+    void interrupted_isNoticedImmediately_notAfterTheFullTimeout_andThrowsApprovalRequired() throws InterruptedException {
+        AraAgent agent = agentRequiringApproval(true);
+        InMemoryApprovalGate gate = new InMemoryApprovalGate();
+
+        java.util.concurrent.atomic.AtomicReference<AuthorizationException> caught = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            try {
+                ScopeVerifier.checkApproved(agent, gate, "caller", ScopeSet.of("ops"));
+            } catch (AuthorizationException e) {
+                caught.set(e);
+            }
+        });
+        worker.start();
+
+        for (int i = 0; i < 200 && gate.getPendingRequests().isEmpty(); i++) {
+            Thread.sleep(10);
+        }
+        assertFalse(gate.getPendingRequests().isEmpty(), "no approval request was registered within 2s");
+
+        worker.interrupt();
+        worker.join(5_000);
+
+        assertFalse(worker.isAlive(), "the worker must not stay parked past the interrupt");
+        assertEquals(AuthorizationException.Reason.APPROVAL_REQUIRED, caught.get().reason());
+        assertTrue(gate.getPendingRequests().isEmpty(), "the cancelled request must be dropped from the gate");
     }
 
     @Test

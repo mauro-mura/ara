@@ -7,6 +7,7 @@ import io.ara.core.hitl.ApprovalDecision;
 import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.tool.AraTool;
+import io.ara.runtime.hitl.ApprovalWaiter;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -88,8 +89,12 @@ public final class ScopeVerifier {
 
         ApprovalDecision decision;
         try {
-            decision = gate.requestApproval(request).join();
-        } catch (Exception e) {
+            decision = ApprovalWaiter.await(gate, request);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AuthorizationException(AuthorizationException.Reason.APPROVAL_REQUIRED,
+                    target.agentId().value(), ScopeSet.EMPTY, effective);
+        } catch (RuntimeException e) {
             throw new AuthorizationException(AuthorizationException.Reason.APPROVAL_REQUIRED,
                     target.agentId().value(), ScopeSet.EMPTY, effective);
         }

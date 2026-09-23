@@ -267,6 +267,36 @@ class ApprovalClassifierTest {
         assertEquals(ApprovalClassifier.Outcome.TIMED_OUT, outcomeOf(task));
     }
 
+    /**
+     * P3 hardening: {@code join()} used to ignore an interrupt entirely, leaving the
+     * calling thread parked until the gate's own timeout (up to its full configured
+     * duration — 30 minutes here) instead of reacting to cancellation immediately.
+     */
+    @Test
+    void an_interrupt_while_parked_on_the_real_gate_isNoticedImmediately_notAfterTheFullTimeout() throws Exception {
+        InMemoryApprovalGate gate = new InMemoryApprovalGate();
+        AraAgent agent = ApprovalClassifier.builder(ID, gate)
+                .labels("BILLING", "TECH").proposedLabelFrom("intent").timeout(Duration.ofMinutes(30))
+                .recordOutcomeAs("approval.outcome")
+                .orElse("UNKNOWN");
+        AgentTask task = task("Vorrei un rimborso", "TECH");
+
+        java.util.concurrent.atomic.AtomicReference<AgentResponse> result = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> result.set(agent.execute(task)));
+        worker.start();
+
+        awaitPending(gate);
+        worker.interrupt();
+        worker.join(5_000);
+
+        assertFalse(worker.isAlive(), "the worker must not stay parked past the interrupt");
+        AgentResponse response = result.get();
+        assertTrue(response.isSuccess());
+        assertTrue(response.content().contains("UNKNOWN"));
+        assertEquals(ApprovalClassifier.Outcome.CANCELLED, outcomeOf(task));
+        assertTrue(gate.getPendingRequests().isEmpty(), "the cancelled request must be dropped from the gate");
+    }
+
     private static ApprovalRequest awaitPending(InMemoryApprovalGate gate) throws InterruptedException {
         for (int i = 0; i < 200; i++) {
             List<ApprovalRequest> pending = gate.getPendingRequests();

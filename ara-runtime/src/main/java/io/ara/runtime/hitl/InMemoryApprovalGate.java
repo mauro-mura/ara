@@ -15,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -22,11 +23,16 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Each call to {@link #requestApproval} registers the request and returns a
  * {@link CompletableFuture} that is completed by {@link #submit} when the external
- * decision arrives. The calling virtual thread parks cheaply on {@code future.join()}.
+ * decision arrives. The calling virtual thread parks cheaply on it (see
+ * {@code io.ara.runtime.hitl.ApprovalWaiter}, the interruptible wait every call site uses
+ * instead of {@code join()}).
  *
  * <p>A shared {@link ScheduledExecutorService} handles timeout expiry: when a
  * request's deadline passes, the future is completed exceptionally with
- * {@link ApprovalTimeoutException} and the pending maps are cleaned up.
+ * {@link ApprovalTimeoutException} and the pending maps are cleaned up. However the future
+ * completes — a decision, a timeout, or an external cancellation — the still-pending
+ * timeout task is cancelled too, so it never lingers in the scheduler's queue past that
+ * point.
  *
  * <p>This class is intended to be used as a singleton by {@code AraRuntime}.
  */
@@ -58,14 +64,18 @@ public class InMemoryApprovalGate implements ApprovalGate {
 
         CompletableFuture<ApprovalDecision> future = new CompletableFuture<>();
 
+        pendingFutures.put(request.requestId(), future);
+        pendingRequests.put(request.requestId(), request);
+
+        // Captured so a decision (or a cancellation — ApprovalWaiter cancels this future
+        // on the caller's interrupt) can cancel the still-pending timeout task instead of
+        // leaving it sitting in the scheduler's queue for up to the full expiry window.
+        ScheduledFuture<?> timeoutTask = scheduleTimeout(request, future);
         future.whenComplete((decision, ex) -> {
+            timeoutTask.cancel(false);
             pendingFutures.remove(request.requestId());
             pendingRequests.remove(request.requestId());
         });
-
-        pendingFutures.put(request.requestId(), future);
-        pendingRequests.put(request.requestId(), request);
-        scheduleTimeout(request, future);
 
         log.debug("Approval requested: requestId={}, agentId={}, action={}, expiresAt={}",
                 request.requestId(), request.agentId(), request.action(), request.expiresAt());
@@ -94,11 +104,11 @@ public class InMemoryApprovalGate implements ApprovalGate {
         return List.copyOf(pendingRequests.values());
     }
 
-    private void scheduleTimeout(ApprovalRequest request, CompletableFuture<ApprovalDecision> future) {
+    private ScheduledFuture<?> scheduleTimeout(ApprovalRequest request, CompletableFuture<ApprovalDecision> future) {
         long delayMs = Math.max(0L,
                 Duration.between(Instant.now(), request.expiresAt()).toMillis());
 
-        scheduler.schedule(() -> {
+        return scheduler.schedule(() -> {
             boolean timedOut = future.completeExceptionally(new ApprovalTimeoutException(request));
             if (timedOut) {
                 log.warn("Approval request timed out: requestId={}, agentId={}, action={}",

@@ -133,6 +133,41 @@ class McpAraToolTest {
         assertEquals("upstream exploded", result.error());
     }
 
+    // ── Interrupt handling (P3 hardening) ─────────────────────────────────────
+
+    /**
+     * {@code join()} used to ignore an interrupt entirely, leaving the worker parked until
+     * the SDK's own {@code requestTimeout} (30s by default) instead of reacting to
+     * cancellation immediately — e.g. from {@code ReactExecutionSupport}'s deadline
+     * watchdog interrupting the worker thread.
+     */
+    @Test
+    void interruptIsNoticedImmediately_notOnlyAfterTheServerResponds() throws Exception {
+        java.util.concurrent.CompletableFuture<McpToolResult> neverCompletes = new java.util.concurrent.CompletableFuture<>();
+        McpClient hanging = new McpClient() {
+            @Override public CompletableFuture<List<McpTool>> listTools() {
+                return CompletableFuture.completedFuture(List.of());
+            }
+            @Override public CompletableFuture<McpToolResult> callTool(String n, Map<String, Object> a) {
+                return neverCompletes;
+            }
+            @Override public void close() {}
+        };
+        McpAraTool hangingTool = new McpAraTool(new McpTool("search", "d", null), new McpToolRegistry(hanging));
+
+        java.util.concurrent.atomic.AtomicReference<ToolResult> result = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread worker = new Thread(() -> result.set(hangingTool.execute("{}")));
+        worker.start();
+        Thread.sleep(50); // let the worker reach get()
+        worker.interrupt();
+        worker.join(5_000);
+
+        assertFalse(worker.isAlive(), "the worker must not stay parked past the interrupt");
+        assertTrue(result.get().isFailed());
+        assertTrue(result.get().error().contains("cancelled"), result.get().error());
+        assertTrue(neverCompletes.isCancelled(), "the pending future must be cancelled, not left dangling");
+    }
+
     // ── Schema advertisement ──────────────────────────────────────────────────
 
     @Test

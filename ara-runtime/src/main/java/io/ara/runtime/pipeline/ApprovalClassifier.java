@@ -14,6 +14,7 @@ import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.hitl.ApprovalNotifier;
 import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.hitl.ApprovalTimeoutException;
+import io.ara.runtime.hitl.ApprovalWaiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +26,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -107,6 +107,8 @@ public final class ApprovalClassifier {
         REJECTED,
         /** Nobody decided before the request expired. */
         TIMED_OUT,
+        /** The task was cancelled while waiting for a decision. */
+        CANCELLED,
         /** A decision arrived but could not be turned into a label — see the logged reason. */
         UNUSABLE_DECISION
     }
@@ -316,12 +318,12 @@ public final class ApprovalClassifier {
         private Resolution await(ApprovalRequest request, String proposedLabel) {
             ApprovalDecision decision;
             try {
-                decision = gate.requestApproval(request).join();
-            } catch (CompletionException e) {
-                if (e.getCause() instanceof ApprovalTimeoutException) {
-                    return Resolution.unresolved(Outcome.TIMED_OUT);
-                }
-                throw e;
+                decision = ApprovalWaiter.await(gate, request);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Resolution.unresolved(Outcome.CANCELLED);
+            } catch (ApprovalTimeoutException e) {
+                return Resolution.unresolved(Outcome.TIMED_OUT);
             }
             return switch (decision) {
                 case ApprovalDecision.Approved ignored -> {

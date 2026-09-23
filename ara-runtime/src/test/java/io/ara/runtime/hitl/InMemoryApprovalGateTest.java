@@ -6,11 +6,18 @@ import io.ara.core.hitl.ApprovalTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -276,6 +283,98 @@ class InMemoryApprovalGateTest {
         assertTrue(assertInstanceOf(ApprovalDecision.Rejected.class, decision).reason().startsWith("r"),
                 "the resolved decision must be one that was actually submitted");
         assertTrue(gate.getPendingRequests().isEmpty());
+    }
+
+    // ── timeout task lifecycle (P3/U10 hardening) ─────────────────────────────
+
+    /**
+     * Wraps a real scheduler and records every {@link ScheduledFuture} handed out by
+     * {@link #schedule(Runnable, long, TimeUnit)} — the overload
+     * {@link InMemoryApprovalGate}'s {@code scheduleTimeout} actually calls — so a test
+     * can inspect whether that task was cancelled after a decision arrives.
+     */
+    private static final class RecordingScheduler implements ScheduledExecutorService {
+        private final ScheduledExecutorService delegate = Executors.newSingleThreadScheduledExecutor();
+        final List<ScheduledFuture<?>> scheduled = new CopyOnWriteArrayList<>();
+
+        @Override public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            ScheduledFuture<?> f = delegate.schedule(command, delay, unit);
+            scheduled.add(f);
+            return f;
+        }
+        @Override public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
+            return delegate.schedule(callable, delay, unit);
+        }
+        @Override public ScheduledFuture<?> scheduleAtFixedRate(
+                Runnable command, long initialDelay, long period, TimeUnit unit) {
+            return delegate.scheduleAtFixedRate(command, initialDelay, period, unit);
+        }
+        @Override public ScheduledFuture<?> scheduleWithFixedDelay(
+                Runnable command, long initialDelay, long delay, TimeUnit unit) {
+            return delegate.scheduleWithFixedDelay(command, initialDelay, delay, unit);
+        }
+        @Override public void shutdown() { delegate.shutdown(); }
+        @Override public List<Runnable> shutdownNow() { return delegate.shutdownNow(); }
+        @Override public boolean isShutdown() { return delegate.isShutdown(); }
+        @Override public boolean isTerminated() { return delegate.isTerminated(); }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+            return delegate.awaitTermination(timeout, unit);
+        }
+        @Override public <T> Future<T> submit(Callable<T> task) { return delegate.submit(task); }
+        @Override public <T> Future<T> submit(Runnable task, T result) { return delegate.submit(task, result); }
+        @Override public Future<?> submit(Runnable task) { return delegate.submit(task); }
+        @Override public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks) throws InterruptedException {
+            return delegate.invokeAll(tasks);
+        }
+        @Override public <T> List<Future<T>> invokeAll(
+                Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit) throws InterruptedException {
+            return delegate.invokeAll(tasks, timeout, unit);
+        }
+        @Override public <T> T invokeAny(Collection<? extends Callable<T>> tasks)
+                throws InterruptedException, ExecutionException {
+            return delegate.invokeAny(tasks);
+        }
+        @Override public <T> T invokeAny(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
+                throws InterruptedException, ExecutionException, java.util.concurrent.TimeoutException {
+            return delegate.invokeAny(tasks, timeout, unit);
+        }
+        @Override public void execute(Runnable command) { delegate.execute(command); }
+    }
+
+    @Test
+    void aDecision_cancelsTheStillPendingTimeoutTask() throws Exception {
+        RecordingScheduler scheduler = new RecordingScheduler();
+        InMemoryApprovalGate gate = new InMemoryApprovalGate(scheduler);
+        ApprovalRequest req = request(LONG_ENOUGH);
+
+        gate.requestApproval(req);
+        assertEquals(1, scheduler.scheduled.size());
+        ScheduledFuture<?> timeoutTask = scheduler.scheduled.get(0);
+        assertFalse(timeoutTask.isDone());
+
+        gate.submit(req.requestId(), new ApprovalDecision.Approved());
+
+        assertTrue(timeoutTask.isCancelled(),
+                "a decided request's timeout task must be cancelled, not left in the scheduler's "
+                        + "queue for up to the full expiry window");
+        scheduler.shutdown();
+    }
+
+    @Test
+    void anExternalCancellation_alsoCancelsTheStillPendingTimeoutTask() throws Exception {
+        RecordingScheduler scheduler = new RecordingScheduler();
+        InMemoryApprovalGate gate = new InMemoryApprovalGate(scheduler);
+        ApprovalRequest req = request(LONG_ENOUGH);
+
+        CompletableFuture<ApprovalDecision> future = gate.requestApproval(req);
+        ScheduledFuture<?> timeoutTask = scheduler.scheduled.get(0);
+
+        // What ApprovalWaiter does on the caller's interrupt.
+        future.cancel(true);
+
+        assertTrue(timeoutTask.isCancelled(),
+                "cancelling the approval future (interrupt path) must cancel the timeout task too");
+        scheduler.shutdown();
     }
 
     // ── argument validation ───────────────────────────────────────────────────

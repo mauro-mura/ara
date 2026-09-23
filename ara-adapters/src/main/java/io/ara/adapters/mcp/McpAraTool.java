@@ -12,15 +12,20 @@ import org.slf4j.LoggerFactory;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 /**
  * Adapts an MCP tool as an {@link AraTool} so it can be registered in any ARA
  * {@link io.ara.core.tool.ToolRegistry}.
  *
  * <p>The MCP server is called synchronously inside {@link #execute} — the
- * {@link McpToolRegistry#callTool} future is joined on the caller's thread.
- * Since agents run on virtual threads this is cheap: the carrier thread is
- * released while the network call is in flight.
+ * {@link McpToolRegistry#callTool} future is awaited on the caller's thread via
+ * {@link CompletableFuture#get()}, not {@code join()}, so an interrupt (task
+ * cancellation, a deadline watchdog) is noticed immediately instead of only after the
+ * SDK's own {@code requestTimeout}. Since agents run on virtual threads this is cheap:
+ * the carrier thread is released while the network call is in flight.
  *
  * <p>Usage:
  * <pre>{@code
@@ -87,14 +92,27 @@ public class McpAraTool implements AraTool {
             return ToolResult.failure(tool.name(), "Malformed argument JSON: " + e.getMessage());
         }
 
+        CompletableFuture<McpToolResult> future = registry.callTool(tool.name(), args);
         try {
-            McpToolResult result = registry.callTool(tool.name(), args).join();
+            McpToolResult result = future.get();
             if (result.isError()) {
                 return ToolResult.failure(tool.name(), result.content());
             }
             return ToolResult.success(tool.name(), result.content());
-        } catch (Exception e) {
-            return ToolResult.failure(tool.name(), "MCP call failed: " + e.getMessage());
+        } catch (InterruptedException e) {
+            // Unlike join(), get() responds to Thread.interrupt() — cancel(true) also
+            // interrupts the virtual thread the SDK call is running on, so a call parked
+            // on interruptible I/O has a chance to unwind instead of leaking until the
+            // SDK's own 30s requestTimeout eventually resolves it.
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            log.info("MCP tool '{}' call cancelled while waiting for a result", tool.name());
+            return ToolResult.failure(tool.name(), "MCP call cancelled");
+        } catch (CancellationException e) {
+            return ToolResult.failure(tool.name(), "MCP call cancelled");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            return ToolResult.failure(tool.name(), "MCP call failed: " + cause.getMessage());
         }
     }
 
