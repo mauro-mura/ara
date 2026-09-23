@@ -4,6 +4,8 @@ import io.ara.core.agent.AgentChain;
 import io.ara.core.budget.RunBudget;
 import io.ara.core.budget.Spend;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -18,6 +20,8 @@ import java.util.Set;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BinaryOperator;
 
 /**
@@ -53,6 +57,7 @@ public final class DataflowScheduler {
     private final WorkflowGraph graph;
     private final int maxOccurrences;
     private final RunBudget budget;   // null = no global cost governor for this run
+    private final Instant deadline;   // null = no wall-clock bound on this run (P7/U20)
 
     private final Map<WorkflowEdge, Deque<String>> tokens = new LinkedHashMap<>();
     private final Set<WorkflowEdge> dead = new LinkedHashSet<>();
@@ -85,9 +90,27 @@ public final class DataflowScheduler {
      *               applies).
      */
     public DataflowScheduler(WorkflowGraph graph, int maxOccurrences, RunBudget budget) {
+        this(graph, maxOccurrences, budget, null);
+    }
+
+    /**
+     * @param deadline wall-clock bound on the whole run (P7/U20, 2026-09-23): {@link
+     *                 #drive} stops waiting past it and fails the run instead of blocking
+     *                 forever on a node (or a {@code mapOver} child) that never completes —
+     *                 one of the unbounded-wait holes named elsewhere in this codebase's own
+     *                 hardening effort. {@code null} leaves the run unbounded (the original,
+     *                 still-default behaviour — every existing caller of the other
+     *                 constructors gets this). In-flight work past the deadline is
+     *                 abandoned, not cancelled: a node body is an arbitrary {@code
+     *                 Function<String,String>} this scheduler does not know is safely
+     *                 interruptible, the same "abandon, don't force" choice {@code
+     *                 ReactExecutionSupport.runBounded} (U1) already made.
+     */
+    public DataflowScheduler(WorkflowGraph graph, int maxOccurrences, RunBudget budget, Instant deadline) {
         this.graph = graph;
         this.maxOccurrences = maxOccurrences;
         this.budget = budget;
+        this.deadline = deadline;
     }
 
     public WorkflowResult run(String initialInput, ExecutorService pool) {
@@ -261,7 +284,12 @@ public final class DataflowScheduler {
             // Wait for the FIRST to finish, not all of them — the difference from BSP.
             Fired fired;
             try {
-                fired = completion.take().get();
+                fired = awaitNext(completion).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return new WorkflowResult(journal, false, "run interrupted while waiting for a node to finish", sharedState);
+            } catch (TimeoutException e) {
+                return new WorkflowResult(journal, false, "deadline exceeded: " + e.getMessage(), sharedState);
             } catch (Exception e) {
                 return new WorkflowResult(journal, false, "node execution failed: " + e, sharedState);
             }
@@ -328,6 +356,30 @@ public final class DataflowScheduler {
         }
     }
 
+    /**
+     * P7/U20, 2026-09-23: {@link #deadline}-bounded replacement for a bare {@code
+     * completion.take()}, which blocked forever if no node ever finished — a hung node
+     * body (or {@code mapOver} child, see {@link #runMapOverChildren}) meant the whole run
+     * never returned. {@code null} {@link #deadline} keeps the original, still-default
+     * unbounded behaviour.
+     *
+     * @throws TimeoutException the deadline is already past, or no node finished before it
+     */
+    private Future<Fired> awaitNext(ExecutorCompletionService<Fired> completion) throws InterruptedException, TimeoutException {
+        if (deadline == null) {
+            return completion.take();
+        }
+        long remainingMs = Duration.between(Instant.now(), deadline).toMillis();
+        if (remainingMs <= 0) {
+            throw new TimeoutException("deadline already passed");
+        }
+        Future<Fired> future = completion.poll(remainingMs, TimeUnit.MILLISECONDS);
+        if (future == null) {
+            throw new TimeoutException("no node finished within " + remainingMs + "ms");
+        }
+        return future;
+    }
+
     /** @param mapOverChildren empty unless {@code node} declares a {@link WorkflowNode#mapOver()} (ADR-052 D4) */
     private record Fired(String nodeId, int occurrence, String input, NodeOutcome outcome,
                          List<MapOverChildResult> mapOverChildren) {
@@ -352,7 +404,7 @@ public final class DataflowScheduler {
                             "mapOver('" + node.id() + "') produced " + elements.size()
                                     + " element(s), exceeding maxActivations=" + spec.maxActivations()));
                 }
-                children = runMapOverChildren(node.id(), occurrence, spec, elements, pool);
+                children = runMapOverChildren(node.id(), occurrence, spec, elements, pool, deadline);
                 boolean anyChildFailed = children.stream().anyMatch(c -> !(c.outcome() instanceof NodeOutcome.Completed));
                 // FAIL_FAST and REQUIRE_ALL both fail the whole group once any child has —
                 // see MapOverSpec's own Javadoc for why the two collapse to one behaviour here.
@@ -401,7 +453,8 @@ public final class DataflowScheduler {
      * {@link #run} — this method only computes, it never touches scheduler state.
      */
     private static List<MapOverChildResult> runMapOverChildren(
-            String parentId, int parentOccurrence, WorkflowNode.MapOverSpec spec, List<String> elements, ExecutorService pool) {
+            String parentId, int parentOccurrence, WorkflowNode.MapOverSpec spec, List<String> elements,
+            ExecutorService pool, Instant deadline) {
 
         List<Future<MapOverChildResult>> futures = new ArrayList<>(elements.size());
         for (int i = 0; i < elements.size(); i++) {
@@ -415,13 +468,26 @@ public final class DataflowScheduler {
                     return new MapOverChildResult(childId, elementInput, new NodeOutcome.Suspended(e.getMessage()));
                 } catch (RuntimeException e) {
                     return new MapOverChildResult(childId, elementInput, new NodeOutcome.Failed(String.valueOf(e.getMessage())));
+                } finally {
+                    // P7/U20: defensive interrupt-flag hygiene for a caller-supplied pool
+                    // that might reuse platform threads (the two production callers —
+                    // WorkflowStrategy, AgentPipeline — both use a virtual-thread-per-task
+                    // executor, where this is moot: every task gets a brand-new Thread, so
+                    // there is no prior task's flag to leak in the first place; Workflow's
+                    // public run(..., ExecutorService) accepts any executor, though).
+                    Thread.interrupted();
                 }
             }));
         }
         List<MapOverChildResult> results = new ArrayList<>(futures.size());
         for (Future<MapOverChildResult> future : futures) {
             try {
-                results.add(future.get());
+                // P7/U20: bounded by the same run deadline as drive()'s own wait — a
+                // hung child no longer blocks this loop (and every other in-flight
+                // child's result behind it) forever.
+                results.add(deadline == null
+                        ? future.get()
+                        : future.get(Math.max(0, Duration.between(Instant.now(), deadline).toMillis()), TimeUnit.MILLISECONDS));
             } catch (Exception e) {
                 results.add(new MapOverChildResult("?", "", new NodeOutcome.Failed("execution error: " + e)));
             }

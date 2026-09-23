@@ -260,30 +260,37 @@ public final class SessionManager {
     }
 
     /**
-     * Shuts down the sweeper and releases every live session's wiring before clearing the
-     * map.
+     * Shuts down the sweeper and releases every live session's wiring.
      *
      * <p><b>P5/U16, 2026-09-23:</b> a session created via {@link #getOrCreate} concurrently
      * with — and strictly after — the snapshot below is not in it, so the drain loop never
-     * closes its wiring: a real, accepted residual leak. This is now narrow in practice
-     * because {@code AgentInstance} re-checks its own {@code closed} flag immediately after
-     * {@code getOrCreate} returns and tears down (rather than uses) any session created
-     * during exactly this race — the caller {@code shutdown()} exists to serve — but {@code
+     * closes its wiring: a real, accepted residual leak. This is narrow in practice because
+     * {@code AgentInstance} re-checks its own {@code closed} flag immediately after {@code
+     * getOrCreate} returns and tears down (rather than uses) any session created during
+     * exactly this race — the caller {@code shutdown()} exists to serve — but {@code
      * SessionManager} has no such flag of its own to enforce that for every possible caller.
-     * The final {@link Map#clear()} does not (cannot) close that orphan's wiring — nothing
-     * observed it — but at least drops the dangling {@link SessionEntry} reference instead
-     * of leaving it in {@link #sessions} for the rest of the JVM's lifetime.
+     *
+     * <p><b>Correction, found by stress-testing this same fix, 2026-09-23:</b> the original
+     * version of this method added a final {@code sessions.clear()} here, reasoned as a
+     * harmless safety net ("cannot close the orphan's wiring, but at least drops the
+     * dangling reference instead of leaking it in the map forever"). That reasoning missed
+     * a worse interaction: a {@code clear()} racing the exact scenario above — a caller
+     * concurrently publishing a new session and then, per its own guard, immediately
+     * invalidating it again (the very sequence {@code AgentInstance.execute()} runs) — can
+     * remove that entry out from under the caller's own {@link #invalidate}/{@code
+     * removeAndClose} call an instant later, which then finds nothing and closes nothing.
+     * Observed under stress: builds a session, closes zero — a leak {@code clear()}
+     * <em>caused</em> rather than merely failed to prevent, strictly worse than the
+     * "dangling but still-referenced, still-closeable-by-a-future-shutdown-call" state
+     * before it. Removed. What remains is exactly the single drain pass this method had
+     * before U16 — the residual leak in this method's own first paragraph is real and
+     * accepted, same as it always was, but nothing here worsens it anymore.
      */
     public void shutdown() {
         sweeper.shutdownNow();
-        // Drain key by key rather than clear()-then-close: with clear() alone, a session
-        // created concurrently between the clear and the close loop would be dropped from
-        // the map with its leases never released — draining first at least closes every
-        // session this snapshot could see.
         for (String key : List.copyOf(sessions.keySet())) {
             removeAndClose(key);
         }
-        sessions.clear();
     }
 
     /**

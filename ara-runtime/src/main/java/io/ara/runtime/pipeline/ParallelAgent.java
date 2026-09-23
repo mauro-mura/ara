@@ -123,7 +123,12 @@ public final class ParallelAgent implements AraAgent {
             List<AgentFuture> futures = members.stream()
                     .map(member -> AraAgents.executeAsync(member, task, executor))
                     .toList();
-            return AgentFuture.allOf(futures, merge, failurePolicy).get();
+            // P7/U20bis, 2026-09-23: bound the fan-out by this agent's own
+            // executionTimeout — without it, one hung member blocked the whole allOf()
+            // indefinitely (AgentFuture#get() -> delegate.join(), no timeout of its own).
+            // A slow member is abandoned past the deadline, not force-cancelled — see
+            // AgentFuture.allOf's own Javadoc for why.
+            return AgentFuture.allOf(futures, merge, failurePolicy, config.executionTimeout()).get();
         } catch (RuntimeException e) {
             log.warn("ParallelAgent [{}] fan-out failed", agentId.value(), e);
             return AgentResponse.failure(task.taskId(), agentId,

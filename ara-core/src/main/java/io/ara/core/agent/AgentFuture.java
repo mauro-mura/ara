@@ -9,6 +9,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -149,6 +151,34 @@ public final class AgentFuture {
     public static AgentFuture allOf(List<AgentFuture> futures,
                                     AgentChain.MergeStrategy merge,
                                     AgentChain.FailurePolicy failurePolicy) {
+        return allOf(futures, merge, failurePolicy, null);
+    }
+
+    /**
+     * Like {@link #allOf(List, AgentChain.MergeStrategy, AgentChain.FailurePolicy)}, with
+     * an optional wall-clock bound on the fan-out (P7/U20bis, 2026-09-23).
+     *
+     * <p>Without one, a single hung member — one of the unbounded-wait holes elsewhere in
+     * this codebase's own hardening effort, or simply a slow provider — blocks the whole
+     * fan-out indefinitely: {@link #get()} calls {@code delegate.join()}, which never
+     * times out on its own. {@code timeout}, when non-null, is applied via {@link
+     * CompletableFuture#orTimeout} to the <em>aggregate</em> future only — it makes the
+     * fan-out itself give up and report a failure past the deadline, but does not cancel
+     * or interrupt any individual member: a slow member keeps running in the background,
+     * abandoned rather than force-stopped, the same "abandon, don't force" choice {@code
+     * ReactExecutionSupport.runBounded} (U1) already made for the same reason (a tool/agent
+     * body is not always safely interruptible mid-call). {@link #get()} needs no change to
+     * surface this: {@code orTimeout}'s {@link TimeoutException} arrives wrapped in the
+     * same {@link CompletionException} {@code get()} already unwraps into an {@link
+     * AgentExecutionException}.
+     *
+     * @param timeout wall-clock bound on the whole fan-out; {@code null} for no bound
+     *                (the original, still-default behaviour)
+     */
+    public static AgentFuture allOf(List<AgentFuture> futures,
+                                    AgentChain.MergeStrategy merge,
+                                    AgentChain.FailurePolicy failurePolicy,
+                                    Duration timeout) {
         Objects.requireNonNull(futures, "futures must not be null");
         Objects.requireNonNull(merge, "merge must not be null");
         Objects.requireNonNull(failurePolicy, "failurePolicy must not be null");
@@ -165,7 +195,12 @@ public final class AgentFuture {
         CompletableFuture<?>[] cfs = futures.stream()
                 .map(f -> f.delegate).toArray(CompletableFuture[]::new);
 
-        return new AgentFuture(CompletableFuture.allOf(cfs).handle((__, ex) -> {
+        CompletableFuture<Void> aggregate = CompletableFuture.allOf(cfs);
+        if (timeout != null) {
+            aggregate = aggregate.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        }
+
+        return new AgentFuture(aggregate.handle((__, ex) -> {
             if (ex != null) {
                 // `ex.getCause()` is null for a CompletionException built without one —
                 // unwrapping blindly then calling getMessage() on it would turn an
@@ -188,6 +223,6 @@ public final class AgentFuture {
 
     /** Convenience with default policy {@link AgentChain.FailurePolicy#FAIL_FAST}. */
     public static AgentFuture allOf(List<AgentFuture> futures, AgentChain.MergeStrategy merge) {
-        return allOf(futures, merge, AgentChain.FailurePolicy.FAIL_FAST);
+        return allOf(futures, merge, AgentChain.FailurePolicy.FAIL_FAST, null);
     }
 }

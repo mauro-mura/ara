@@ -137,13 +137,16 @@ class AgentInstanceTerminateRaceTest {
             assertEquals(0, instance.activeSessionCount(),
                     "no session created during the terminate() race may remain registered");
             // getOrCreate retries after its first build is torn down mid-flight (U24), so
-            // this races two builds — the first, torn down while still building, and the
-            // second, torn down by this test's own U18bis fix after getOrCreate returns it
-            // to a caller that finds `closed` already true. Every build's wiring must be
-            // released; none may leak.
-            assertEquals(2, wiringFactory.builds.get(),
-                    "expected the U24 in-flight rebuild plus the U18bis post-getOrCreate teardown");
-            assertEquals(2, wiringFactory.releases.get(),
+            // this races at least two builds — the first, torn down while still building,
+            // and a later one, torn down by this test's own U18bis fix after getOrCreate
+            // returns it to a caller that finds `closed` already true. Exactly how many
+            // times it retries is itself timing-dependent (observed: usually 2, occasionally
+            // more under heavy contention) — the invariant that actually matters, and the
+            // one that failed before this phase's fix, is that every build's wiring gets
+            // released, however many retries the race happened to cause; not the exact count.
+            assertTrue(wiringFactory.builds.get() >= 2,
+                    "expected at least the U24 in-flight rebuild plus the U18bis post-getOrCreate teardown");
+            assertEquals(wiringFactory.builds.get(), wiringFactory.releases.get(),
                     "every build's wiring must be released — none may leak");
         } finally {
             executor.shutdown();

@@ -4,6 +4,7 @@ import io.ara.core.agent.AgentChain;
 import io.ara.core.budget.RunBudget;
 import io.ara.core.budget.Spend;
 
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -67,14 +68,28 @@ public final class Workflow {
         return new Builder();
     }
 
-    /** Runs the workflow from its entry node(s). */
+    /** Runs the workflow from its entry node(s), with no wall-clock bound. */
     public WorkflowResult run(String input, ExecutorService pool) {
         return new DataflowScheduler(graph, maxOccurrences, budget).run(input, pool);
+    }
+
+    /**
+     * Like {@link #run(String, ExecutorService)}, bounded by {@code deadline} (P7/U20,
+     * 2026-09-23) — see {@link DataflowScheduler}'s own deadline constructor Javadoc for
+     * what happens past it. {@code null} is the same as the unbounded overload above.
+     */
+    public WorkflowResult run(String input, ExecutorService pool, Instant deadline) {
+        return new DataflowScheduler(graph, maxOccurrences, budget, deadline).run(input, pool);
     }
 
     /** Resumes the workflow from a prior journal (ADR-052 D1) — see {@link DataflowScheduler#run(String, ExecutorService, List)}. */
     public WorkflowResult run(String input, ExecutorService pool, List<JournalEntry> priorJournal) {
         return new DataflowScheduler(graph, maxOccurrences, budget).run(input, pool, priorJournal);
+    }
+
+    /** Like {@link #run(String, ExecutorService, List)}, bounded by {@code deadline} — see {@link #run(String, ExecutorService, Instant)}. */
+    public WorkflowResult run(String input, ExecutorService pool, List<JournalEntry> priorJournal, Instant deadline) {
+        return new DataflowScheduler(graph, maxOccurrences, budget, deadline).run(input, pool, priorJournal);
     }
 
     public WorkflowGraph graph() {
