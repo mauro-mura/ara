@@ -90,6 +90,23 @@ public final class FailoverLlmClient implements LlmClient {
                             clients.size(), candidate.providerId(), ex.getMessage());
                 }
             }
+
+            // P8/U21bis, 2026-09-23: a deadline watchdog (ReactExecutionSupport
+            // .completeWithin, which interrupts the calling thread — this method runs on)
+            // firing mid-candidate must stop the failover loop here, not let it march
+            // through however many candidates remain, each paying its own full timeout —
+            // the "N×timeout amplification" this class had no defense against at all
+            // (zero references to interrupt/Thread.currentThread() before this fix). The
+            // deadline itself is never a parameter here — same conclusion as U6/U18 for
+            // the analogous LlmClient/MemoryManager interfaces: adding one would be a
+            // breaking change to LlmCallContext, touching every adapter, for a caller
+            // that already has an interrupt-based mechanism to say "stop" with.
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("LLM failover loop stopped after client '{}' — calling thread was "
+                                + "interrupted (deadline exceeded), not trying the remaining {} candidate(s)",
+                        candidate.providerId(), clients.size() - i - 1);
+                break;
+            }
         }
 
         if (lastLlmFailure != null) throw lastLlmFailure;

@@ -270,13 +270,17 @@ public final class QdrantSemanticStore implements SemanticStore {
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
+    /** P8/U21, 2026-09-23: this class's own historic hardcoded value, now the fallback when {@link QdrantConfig#requestTimeout()} is unset. */
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(15);
+
     private HttpResponse<String> send(String method, String path, ObjectNode body)
             throws Exception {
         String json = MAPPER.writeValueAsString(body);
 
+        Duration timeout = config.requestTimeout() != null ? config.requestTimeout() : DEFAULT_REQUEST_TIMEOUT;
         HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(config.baseUrl() + path))
-                .timeout(Duration.ofSeconds(15))
+                .timeout(timeout)
                 .header("Content-Type", "application/json");
 
         if (config.apiKey() != null) {

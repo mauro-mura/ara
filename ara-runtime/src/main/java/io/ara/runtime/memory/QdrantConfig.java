@@ -1,5 +1,6 @@
 package io.ara.runtime.memory;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -19,13 +20,19 @@ import java.util.Objects;
  * @param apiKey         optional API key (null for local deployments)
  * @param collectionName the collection that stores all ARA semantic entries
  * @param vectorSize     must match the dimension of the {@link io.ara.core.memory.EmbeddingClient}
+ * @param requestTimeout per-request HTTP timeout for {@link QdrantSemanticStore}/{@link
+ *                       DocumentStore} (P8/U21, 2026-09-23); {@code null} keeps each
+ *                       class's own historic hardcoded default (15s / 20s respectively —
+ *                       see their own {@code send()} javadoc) rather than imposing one
+ *                       shared value across two classes whose prior defaults differed.
  */
 public record QdrantConfig(
-        String host,
-        int    port,
-        String apiKey,
-        String collectionName,
-        int    vectorSize
+        String   host,
+        int      port,
+        String   apiKey,
+        String   collectionName,
+        int      vectorSize,
+        Duration requestTimeout
 ) {
 
     public QdrantConfig {
@@ -33,6 +40,14 @@ public record QdrantConfig(
         Objects.requireNonNull(collectionName, "collectionName must not be null");
         if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid port: " + port);
         if (vectorSize < 1)           throw new IllegalArgumentException("vectorSize must be >= 1");
+        if (requestTimeout != null && (requestTimeout.isZero() || requestTimeout.isNegative())) {
+            throw new IllegalArgumentException("requestTimeout must be positive when set");
+        }
+    }
+
+    /** Backward-compatible constructor — {@code requestTimeout} defaults to {@code null} (each caller's own historic default). */
+    public QdrantConfig(String host, int port, String apiKey, String collectionName, int vectorSize) {
+        this(host, port, apiKey, collectionName, vectorSize, null);
     }
 
     /** Base URL for Qdrant REST API calls. */

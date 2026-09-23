@@ -114,6 +114,17 @@ public final class FailoverSemanticStore implements SemanticStore {
                             replicas.size(), ex.getMessage());
                 }
             }
+
+            // P8/U21, 2026-09-23: same fix, same reasoning as FailoverLlmClient (U21bis) —
+            // a deadline watchdog interrupting this thread mid-replica must stop the
+            // failover loop here, not let it march through every remaining replica, each
+            // paying its own full request timeout.
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("Semantic-store search failover stopped after replica {} — calling thread "
+                                + "was interrupted (deadline exceeded), not trying the remaining {} replica(s)",
+                        i, replicas.size() - i - 1);
+                break;
+            }
         }
 
         throw lastFailure;

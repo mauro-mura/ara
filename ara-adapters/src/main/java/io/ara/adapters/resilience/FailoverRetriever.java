@@ -65,6 +65,17 @@ public final class FailoverRetriever implements Retriever {
                             candidates.size(), ex.getMessage());
                 }
             }
+
+            // P8/U21, 2026-09-23: same fix, same reasoning as FailoverLlmClient (U21bis)
+            // and FailoverSemanticStore — a deadline watchdog interrupting this thread
+            // mid-candidate must stop the failover loop here, not let it march through
+            // every remaining candidate, each paying its own full request timeout.
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("Retriever failover stopped after candidate {} — calling thread was "
+                                + "interrupted (deadline exceeded), not trying the remaining {} candidate(s)",
+                        i, candidates.size() - i - 1);
+                break;
+            }
         }
 
         throw lastFailure;
