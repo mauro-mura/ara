@@ -263,6 +263,15 @@ public final class AraRuntime implements AutoCloseable {
                     }
                 });
             } finally {
+                // P4/U14: close AgentFactory's own llmTransports/mcpTransports schedulers —
+                // separate from, and after, the per-agent destroy loop above, which already
+                // tears down each agent's *leased* LLM/MCP resources via retire/release.
+                try {
+                    factory.close();
+                } catch (RuntimeException e) {
+                    log.error("AraRuntime [{}] factory.close() failed — continuing shutdown",
+                            config.name(), e);
+                }
                 lifecycle.stop();
                 log.info("AraRuntime [{}] stopped", config.name());
             }
@@ -723,6 +732,9 @@ public final class AraRuntime implements AutoCloseable {
      * #destroyAgent(AraAgent)} or {@link #stop()}.
      */
     public InstanceContextStore instanceContextStore() { return instanceContextStore; }
+
+    /** Exposed for tests (same package) and diagnostics; see {@link AgentFactory#close()}. */
+    AgentFactory factory() { return factory; }
 
     /**
      * Returns the {@link ApprovalGate} configured on this runtime, or {@code null} if

@@ -377,6 +377,35 @@ class InMemoryApprovalGateTest {
         scheduler.shutdown();
     }
 
+    // ── close() lifecycle (P4/U12 hardening) ──────────────────────────────────
+
+    @Test
+    void close_shutsDownAnOwnedScheduler() {
+        InMemoryApprovalGate gate = new InMemoryApprovalGate();
+        gate.close();
+
+        // The no-arg constructor's scheduler is private, so assert indirectly: a request
+        // registered after close() can no longer be scheduled to time out — but must also
+        // not throw, since submitting a new schedule() to a shut-down executor throws
+        // RejectedExecutionException, and requestApproval() does not currently guard
+        // against that. This documents the actual, current post-close() behavior.
+        ApprovalRequest req = request(Duration.ofMillis(50));
+        assertThrows(java.util.concurrent.RejectedExecutionException.class,
+                () -> gate.requestApproval(req));
+    }
+
+    @Test
+    void close_onAGateWithACallerSuppliedScheduler_doesNotShutItDown() {
+        RecordingScheduler scheduler = new RecordingScheduler();
+        InMemoryApprovalGate gate = new InMemoryApprovalGate(scheduler);
+
+        gate.close();
+
+        assertFalse(scheduler.delegate.isShutdown(),
+                "a caller-supplied scheduler must not be shut down by close() — the caller owns it");
+        scheduler.shutdown();
+    }
+
     // ── argument validation ───────────────────────────────────────────────────
 
     @Test

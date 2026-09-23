@@ -62,13 +62,19 @@ public final class McpClientFactory {
      * Builds a synchronous SDK client over an already-configured transport, performs the
      * mandatory MCP {@code initialize()} handshake, and wraps it as an {@link AraMcpClientAdapter}.
      * Every factory method shares this tail — only the transport construction differs.
+     *
+     * @param ownsExecutor whether {@code executor} was created here (a fresh
+     *                     {@link #defaultExecutor()}, exclusively for this one client) rather
+     *                     than supplied by the caller — {@link AraMcpClientAdapter#close()}
+     *                     shuts it down only when this is {@code true}, never a caller's own
+     *                     executor that may be shared across other clients.
      */
-    private static AraMcpClientAdapter connect(McpClientTransport transport, Executor executor) {
+    private static AraMcpClientAdapter connect(McpClientTransport transport, Executor executor, boolean ownsExecutor) {
         McpSyncClient sdkClient = McpClient.sync(transport)
                 .requestTimeout(DEFAULT_TIMEOUT)
                 .build();
         sdkClient.initialize();
-        return new AraMcpClientAdapter(sdkClient, executor);
+        return new AraMcpClientAdapter(sdkClient, executor, ownsExecutor);
     }
 
     // ── SSE transport ─────────────────────────────────────────────────────────
@@ -79,17 +85,22 @@ public final class McpClientFactory {
      * @param serverUrl base URL of the MCP server (e.g. {@code http://localhost:3000/sse})
      */
     public static AraMcpClientAdapter fromSse(String serverUrl) {
-        return fromSse(serverUrl, defaultExecutor());
+        return fromSse(serverUrl, defaultExecutor(), true);
     }
 
     /**
-     * Connects to an MCP server via SSE using a custom executor.
+     * Connects to an MCP server via SSE using a custom executor. The caller keeps ownership
+     * of {@code executor} — {@link AraMcpClientAdapter#close()} never shuts it down.
      */
     public static AraMcpClientAdapter fromSse(String serverUrl, Executor executor) {
+        return fromSse(serverUrl, executor, false);
+    }
+
+    private static AraMcpClientAdapter fromSse(String serverUrl, Executor executor, boolean ownsExecutor) {
         var transport = HttpClientSseClientTransport.builder(serverUrl)
                 .jsonMapper(DEFAULT_JSON_MAPPER)
                 .build();
-        return connect(transport, executor);
+        return connect(transport, executor, ownsExecutor);
     }
 
     // ── Streamable HTTP transport ────────────────────────────────────────────
@@ -105,7 +116,7 @@ public final class McpClientFactory {
      *                  (no trailing {@code /mcp} — the transport appends it)
      */
     public static AraMcpClientAdapter fromStreamableHttp(String serverUrl) {
-        return fromStreamableHttp(serverUrl, null, defaultExecutor());
+        return fromStreamableHttp(serverUrl, null, defaultExecutor(), true);
     }
 
     /**
@@ -117,20 +128,26 @@ public final class McpClientFactory {
      * @param bearerToken bearer token, or {@code null}/blank if the server has no auth configured
      */
     public static AraMcpClientAdapter fromStreamableHttp(String serverUrl, String bearerToken) {
-        return fromStreamableHttp(serverUrl, bearerToken, defaultExecutor());
+        return fromStreamableHttp(serverUrl, bearerToken, defaultExecutor(), true);
     }
 
     /**
-     * Connects via Streamable HTTP using a custom executor.
+     * Connects via Streamable HTTP using a custom executor. The caller keeps ownership of
+     * {@code executor} — {@link AraMcpClientAdapter#close()} never shuts it down.
      */
     public static AraMcpClientAdapter fromStreamableHttp(String serverUrl, String bearerToken, Executor executor) {
+        return fromStreamableHttp(serverUrl, bearerToken, executor, false);
+    }
+
+    private static AraMcpClientAdapter fromStreamableHttp(
+            String serverUrl, String bearerToken, Executor executor, boolean ownsExecutor) {
         var transportBuilder = HttpClientStreamableHttpTransport.builder(serverUrl)
                 .jsonMapper(DEFAULT_JSON_MAPPER);
         if (bearerToken != null && !bearerToken.isBlank()) {
             transportBuilder.customizeRequest(request -> request.header("Authorization", "Bearer " + bearerToken));
         }
         var transport = transportBuilder.build();
-        return connect(transport, executor);
+        return connect(transport, executor, ownsExecutor);
     }
 
     // ── STDIO transport ───────────────────────────────────────────────────────
@@ -142,13 +159,19 @@ public final class McpClientFactory {
      * @param args    remaining arguments
      */
     public static AraMcpClientAdapter fromStdio(String command, String... args) {
-        return fromStdio(defaultExecutor(), command, args);
+        return fromStdio(defaultExecutor(), true, command, args);
     }
 
     /**
-     * Launches a local MCP server subprocess using a custom executor.
+     * Launches a local MCP server subprocess using a custom executor. The caller keeps
+     * ownership of {@code executor} — {@link AraMcpClientAdapter#close()} never shuts it down.
      */
     public static AraMcpClientAdapter fromStdio(Executor executor, String command, String... args) {
+        return fromStdio(executor, false, command, args);
+    }
+
+    private static AraMcpClientAdapter fromStdio(
+            Executor executor, boolean ownsExecutor, String command, String... args) {
         var fullCommand = new ArrayList<String>();
         fullCommand.add(command);
         fullCommand.addAll(List.of(args));
@@ -157,6 +180,6 @@ public final class McpClientFactory {
                 .args(fullCommand.subList(1, fullCommand.size()))
                 .build();
         var transport = new StdioClientTransport(params, DEFAULT_JSON_MAPPER);
-        return connect(transport, executor);
+        return connect(transport, executor, ownsExecutor);
     }
 }

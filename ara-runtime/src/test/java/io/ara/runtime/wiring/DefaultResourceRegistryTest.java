@@ -209,6 +209,34 @@ class DefaultResourceRegistryTest {
         assertEquals(0, useAfterCloseErrors.get());
     }
 
+    // ── close()/isClosed() — P4/U14 ─────────────────────────────────────────────
+
+    @Test
+    void close_shutsDownAnOwnedScheduler_reflectedInIsClosed() {
+        var registry = newRegistry(new AtomicInteger());
+
+        assertFalse(registry.isClosed());
+        registry.close();
+        assertTrue(registry.isClosed());
+    }
+
+    @Test
+    void close_onARegistryWithACallerSuppliedScheduler_doesNotShutItDownOrReportClosed() {
+        ExecutorService callerScheduler = Executors.newSingleThreadScheduledExecutor();
+        var registry = new DefaultResourceRegistry<String, CountingResource>(
+                spec -> new CountingResource(spec),
+                CountingResource::close,
+                (java.util.concurrent.ScheduledExecutorService) callerScheduler);
+
+        registry.close();
+
+        assertFalse(registry.isClosed(),
+                "isClosed() must stay false for a caller-supplied scheduler — close() never touches it");
+        assertFalse(callerScheduler.isShutdown(),
+                "a caller-supplied scheduler must not be shut down by close() — the caller owns it");
+        callerScheduler.shutdownNow();
+    }
+
     private static void awaitTrue(java.util.function.BooleanSupplier condition, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {

@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 
 /**
  * ARA {@link McpClient} that delegates to the official MCP Java SDK's
@@ -22,10 +23,20 @@ public class AraMcpClientAdapter implements McpClient {
 
     private final McpSyncClient sdkClient;
     private final Executor executor;
+    private final boolean ownsExecutor;
 
-    AraMcpClientAdapter(McpSyncClient sdkClient, Executor executor) {
-        this.sdkClient = sdkClient;
-        this.executor  = executor;
+    /**
+     * @param ownsExecutor whether this adapter created {@code executor} itself (a fresh,
+     *                     single-client {@link McpClientFactory#defaultExecutor()}) rather
+     *                     than receiving a caller-supplied one — see {@link #close()}
+     *                     (concurrency hardening P4/U13: an executor this adapter created
+     *                     for itself must not outlive it; a caller's own executor, possibly
+     *                     shared across other clients, must never be shut down by us).
+     */
+    AraMcpClientAdapter(McpSyncClient sdkClient, Executor executor, boolean ownsExecutor) {
+        this.sdkClient    = sdkClient;
+        this.executor     = executor;
+        this.ownsExecutor = ownsExecutor;
     }
 
     @Override
@@ -44,8 +55,20 @@ public class AraMcpClientAdapter implements McpClient {
                 executor);
     }
 
+    /**
+     * Closes the underlying SDK client and, only when this adapter owns it (P4/U13), shuts
+     * down the executor too — {@code shutdownNow()}, matching {@code DefaultResourceRegistry
+     * .close()}'s own choice (U23/N1's precedent): no graceful drain here, so {@code close()}
+     * itself never blocks.
+     */
     @Override
     public void close() {
-        sdkClient.close();
+        try {
+            sdkClient.close();
+        } finally {
+            if (ownsExecutor && executor instanceof ExecutorService es) {
+                es.shutdownNow();
+            }
+        }
     }
 }

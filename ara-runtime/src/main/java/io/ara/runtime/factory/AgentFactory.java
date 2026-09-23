@@ -76,7 +76,7 @@ import org.slf4j.LoggerFactory;
  *     .build());
  * }</pre>
  */
-public final class AgentFactory implements AgentLifecycleManager {
+public final class AgentFactory implements AgentLifecycleManager, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(AgentFactory.class);
 
@@ -152,6 +152,31 @@ public final class AgentFactory implements AgentLifecycleManager {
         this.mcpTransports = mcpServers.isEmpty()
                 ? null
                 : DefaultResourceRegistry.forCloseable(Supplier::get);
+    }
+
+    /**
+     * Shuts down the internal drain-deadline schedulers owned by {@link #llmTransports} and
+     * {@link #mcpTransports} (concurrency hardening P4/U14) — one virtual thread each,
+     * otherwise leaked for the JVM's lifetime since nothing previously called
+     * {@link DefaultResourceRegistry#close()} on either.
+     *
+     * <p>Does <em>not</em> close any leased LLM/MCP resource itself: those are ref-counted
+     * and torn down through the ordinary {@code retire}/{@code release} path as each agent
+     * that references them is destroyed — {@code AraRuntime.stop()} already does that,
+     * separately, before calling this. Safe to call more than once or without ever calling
+     * {@link #create}.
+     */
+    @Override
+    public void close() {
+        llmTransports.close();
+        if (mcpTransports != null) {
+            mcpTransports.close();
+        }
+    }
+
+    /** {@code true} once {@link #close()} has shut down both transport registries. */
+    public boolean transportsAreClosed() {
+        return llmTransports.isClosed() && (mcpTransports == null || mcpTransports.isClosed());
     }
 
     /**

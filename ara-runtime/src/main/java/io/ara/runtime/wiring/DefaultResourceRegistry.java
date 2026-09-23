@@ -284,6 +284,16 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         }
     }
 
+    /**
+     * {@code true} once {@link #close()} has shut down the internal scheduler — always
+     * {@code false} for a registry built with a caller-supplied scheduler (see the
+     * caller-supplied-scheduler constructor), since {@link #close()} is then a no-op and the
+     * caller remains responsible for that scheduler's own lifecycle.
+     */
+    public boolean isClosed() {
+        return ownsScheduler && scheduler.isShutdown();
+    }
+
     private static final class Entry<R> {
         // ReentrantLock, not a monitor — see the class javadoc's N1/U23 note. A virtual
         // thread parks while blocked here instead of pinning its carrier.

@@ -159,6 +159,16 @@ final class RuntimeLifecycle {
     int inFlightCount() { return quiescenceTracker.inFlightCount(); }
 
     /**
+     * P4/U14: short, fixed bound for {@link #awaitForcedTermination} — see its javadoc.
+     * Deliberately small and independent of {@code shutdownTimeoutSec}: {@code
+     * AraRuntimeLifecycleTest.stop_honorsConfiguredShutdownTimeout} asserts {@code stop()}
+     * returns well under 6s even against a task that never responds to interrupt at all —
+     * this is a grace period for a cooperating straggler's cleanup, not a second full drain
+     * budget.
+     */
+    private static final long POST_SHUTDOWN_NOW_WAIT_SECONDS = 2;
+
+    /**
      * Shuts the shared executor down gracefully, waiting up to
      * {@code shutdownTimeoutSec} seconds for in-flight tasks to finish
      * before forcing {@code shutdownNow()}.
@@ -171,10 +181,38 @@ final class RuntimeLifecycle {
                 log.warn("AraRuntime [{}] executor did not drain within {}s — forcing shutdownNow",
                         name, shutdownTimeoutSec);
                 es.shutdownNow();
+                awaitForcedTermination(es);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             es.shutdownNow();
+            awaitForcedTermination(es);
+        }
+    }
+
+    /**
+     * P4/U14: a second, short, bounded wait after {@code shutdownNow()} — which only
+     * <em>requests</em> cancellation (interrupts running tasks) and returns immediately,
+     * without waiting for them to actually stop. Without this, {@link #stop()} could return
+     * — and the caller could treat the runtime as fully torn down — while a cooperative task
+     * is still mid-unwind from its interrupt. A non-cooperative task (one that swallows or
+     * ignores the interrupt) is a real, accepted leak either way — this only makes it
+     * <em>observable</em>, via the warning below, instead of silent.
+     *
+     * <p>Deliberately a short fixed bound, not a second {@code shutdownTimeoutSec}: the full
+     * budget was already spent in the wait that preceded {@code shutdownNow()}, and every
+     * task still running past that point has already been asked to stop cooperating with a
+     * graceful drain.
+     */
+    private void awaitForcedTermination(ExecutorService es) {
+        try {
+            if (!es.awaitTermination(POST_SHUTDOWN_NOW_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                log.warn("AraRuntime [{}] executor still has running tasks {}s after shutdownNow() — "
+                        + "at least one task is not responding to interrupt and will leak its thread",
+                        name, POST_SHUTDOWN_NOW_WAIT_SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }

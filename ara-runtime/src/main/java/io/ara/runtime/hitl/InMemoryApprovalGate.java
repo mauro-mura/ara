@@ -35,8 +35,23 @@ import java.util.concurrent.TimeUnit;
  * point.
  *
  * <p>This class is intended to be used as a singleton by {@code AraRuntime}.
+ *
+ * <p><b>Lifecycle (P4/U12):</b> the no-arg constructor creates and owns its own
+ * scheduler thread — call {@link #close()} when done with this gate, or it leaks for the
+ * JVM's lifetime. {@code AraRuntime.stop()} does <em>not</em> call it: the gate is always
+ * caller-supplied (via {@code AraRuntime.Builder#approvalGate}, never constructed by
+ * {@code AraRuntime} itself — verified: no {@code new InMemoryApprovalGate()} exists
+ * anywhere in {@code AraRuntime}/{@code AgentFactory}), the same way {@code sessionStore},
+ * {@code mediaStore}, {@code toolRegistry} and every other externally-supplied collaborator
+ * is never closed by {@code stop()} either. A gate is also explicitly documented (see
+ * {@code Builder#approvalGate}'s own javadoc) to be shared with an external surface — an
+ * HTTP gateway, a CLI — that lists and resolves pending approvals independently of any one
+ * {@code AraRuntime} instance's lifetime; closing it out from under that surface on
+ * {@code stop()} would be a correctness bug, not a cleanup. The caller that constructs a
+ * gate is the one that must close it, e.g. in its own shutdown sequence or via
+ * try-with-resources.
  */
-public class InMemoryApprovalGate implements ApprovalGate {
+public class InMemoryApprovalGate implements ApprovalGate, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryApprovalGate.class);
 
@@ -44,6 +59,7 @@ public class InMemoryApprovalGate implements ApprovalGate {
             new ConcurrentHashMap<>();
     private final Map<String, ApprovalRequest> pendingRequests = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler;
+    private final boolean ownsScheduler;
 
     public InMemoryApprovalGate() {
         this(Executors.newSingleThreadScheduledExecutor(r -> {
@@ -51,11 +67,17 @@ public class InMemoryApprovalGate implements ApprovalGate {
             t.setName("ara-hitl-timeout");
             t.setDaemon(true);
             return t;
-        }));
+        }), true);
     }
 
+    /** Creates a gate using a caller-supplied, caller-owned scheduler (not shut down by {@link #close()}). */
     InMemoryApprovalGate(ScheduledExecutorService scheduler) {
-        this.scheduler = scheduler;
+        this(scheduler, false);
+    }
+
+    private InMemoryApprovalGate(ScheduledExecutorService scheduler, boolean ownsScheduler) {
+        this.scheduler     = scheduler;
+        this.ownsScheduler = ownsScheduler;
     }
 
     @Override
@@ -102,6 +124,20 @@ public class InMemoryApprovalGate implements ApprovalGate {
     @Override
     public List<ApprovalRequest> getPendingRequests() {
         return List.copyOf(pendingRequests.values());
+    }
+
+    /**
+     * Shuts down the internal timeout scheduler, if this gate created its own (the no-arg
+     * constructor) — a no-op for a gate built with a caller-supplied scheduler. Does not
+     * resolve any still-pending request: those simply stop being able to time out on their
+     * own past this point, the same residual behavior a caller-supplied scheduler already
+     * had if the caller shut it down independently.
+     */
+    @Override
+    public void close() {
+        if (ownsScheduler) {
+            scheduler.shutdownNow();
+        }
     }
 
     private ScheduledFuture<?> scheduleTimeout(ApprovalRequest request, CompletableFuture<ApprovalDecision> future) {
