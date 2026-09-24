@@ -215,4 +215,68 @@ class LocalAgentSchedulerHardeningTest {
         assertEquals(countAtCancel, fireCount.get(),
                 "no firing after cancel() — an orphaned duplicate job from the race would still be firing here");
     }
+
+    // ── P2 (cron self-reschedule): pause() racing scheduleCron's own reschedule step ──
+
+    /**
+     * {@link LocalAgentScheduler#rescheduleCronAfterFire} used to read {@code entries.get(id)}
+     * and separately {@code entries.put(id, ...)} — the identical get-then-put race already
+     * fixed for {@code register}/{@code pause}/{@code resume} above, but reachable here too: a
+     * {@code pause()} landing between the read and the write could be clobbered by the
+     * reschedule's {@code put()}, resurrecting a schedule that had just been turned off. Fixed
+     * via {@code entries.compute}. A real cron's reschedule step only runs after a delay of up
+     * to a minute ({@link LocalAgentScheduler.CronEvaluator}), so this races the extracted,
+     * package-private {@code rescheduleCronAfterFire} directly instead of waiting on real cron
+     * timing — deterministic and fast, same testability reasoning as {@code safeFire} above.
+     *
+     * <p>With the fix, {@code entries.compute} serializes {@code pause} and {@code
+     * rescheduleCronAfterFire} for the same id: whichever runs first is always fully observed
+     * by the other, so no matter which wins the race, a {@code pause()} that ran at all must
+     * leave the schedule paused once both have completed — {@code rescheduleCronAfterFire}
+     * either sees the pause and declines to resurrect it, or runs first and installs a future
+     * that the subsequent {@code pause()} then correctly cancels.
+     */
+    @Test
+    void cronReschedule_racingPause_neverResurrectsAPausedSchedule() throws InterruptedException {
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("cron-racer")));
+        // "every minute" so CronEvaluator's scan is O(1) (200 rounds re-run it) — the real
+        // ~1-60s one-shot future it schedules never actually fires within this test's lifetime.
+        String cronExpression = "* * * * *";
+        AgentSchedule schedule = AgentSchedule.builder()
+                .scheduleId("cron-race")
+                .agentId(AgentId.of("cron-racer"))
+                .cron(cronExpression)
+                .withInput("go")
+                .build();
+        scheduler.register(schedule);
+
+        for (int round = 0; round < 200; round++) {
+            CountDownLatch go = new CountDownLatch(1);
+            Thread pauser = Thread.ofVirtual().start(() -> {
+                await(go);
+                scheduler.pause("cron-race");
+            });
+            Thread rescheduler = Thread.ofVirtual().start(() -> {
+                await(go);
+                scheduler.rescheduleCronAfterFire(schedule, cronExpression);
+            });
+            go.countDown();
+            pauser.join(TimeUnit.SECONDS.toMillis(5));
+            rescheduler.join(TimeUnit.SECONDS.toMillis(5));
+
+            assertTrue(scheduler.isPaused("cron-race"),
+                    "round " + round + ": pause() ran, so the schedule must end up paused "
+                            + "regardless of interleaving with the concurrent reschedule");
+
+            scheduler.resume("cron-race"); // reset for the next round
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 }

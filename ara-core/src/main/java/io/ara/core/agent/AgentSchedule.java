@@ -83,7 +83,9 @@ public record AgentSchedule(
          *
          * <p>Only the single-JVM {@code LocalAgentScheduler} interprets this
          * expression; the string itself is validated for non-blankness here and
-         * fully parsed when the schedule is registered.
+         * fully parsed when the schedule is registered. To validate an expression and
+         * inspect its next fire time <em>ahead of</em> registration (e.g. before
+         * persisting a schedule), use {@code LocalAgentScheduler.CronEvaluator}.
          */
         record Cron(String expression) implements Trigger {
             public Cron {

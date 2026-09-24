@@ -7,6 +7,7 @@ import io.ara.core.agent.AgentSchedule.Trigger;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.AraAgents;
+import io.ara.core.common.AgentId;
 import io.ara.runtime.agent.AgentRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,22 +50,25 @@ import java.util.concurrent.TimeUnit;
  * another schedule's trigger.
  *
  * <p><b>P2, 2026-09-22 — {@code entries} mutations are atomic per id.</b> {@link #register},
- * {@link #pause} and {@link #resume} each used to read {@code entries.get(id)} and then
- * separately {@code entries.put(id, ...)} — two non-atomic map operations. Two concurrent
- * calls for the <em>same</em> id (e.g. two {@code register} calls racing on startup, or a
- * {@code resume} racing a concurrent {@code register}) could both observe the same starting
- * entry, both start their own new {@link ScheduledFuture} (via {@link #scheduleJob}), and
- * then overwrite each other's map entry — whichever {@code put} lands last wins in {@code
- * entries}, silently orphaning the other call's job: it keeps firing forever, no longer
- * reachable from {@link #list}/{@link #pause}/{@link #cancel} since the map only ever
- * tracks one {@code Entry} per id. Every mutating method below now goes through a single
- * {@code entries.compute}/{@code remove} call per id instead, which {@link ConcurrentHashMap}
- * serializes per-bin — the two racing calls above are now fully
- * ordered, and the second one always observes (and correctly cancels) the first one's job
- * before installing its own. Safe to do work inside the remapping function here specifically
- * because {@link #scheduleJob}/{@link #scheduleCron} never block (they only register a task
- * with {@link #tickExecutor} and return) — the same "short, no I/O" exception N1's own
- * findings call out, not the general "don't do slow work inside a map's per-bin lock"
+ * {@link #pause}, {@link #resume} and {@link #rescheduleCronAfterFire} (the cron self-reschedule step) each
+ * used to read {@code entries.get(id)} and then separately {@code entries.put(id, ...)} — two
+ * non-atomic map operations. Two concurrent calls for the <em>same</em> id (e.g. two {@code
+ * register} calls racing on startup, a {@code resume} racing a concurrent {@code register}, or
+ * a {@code pause}/{@code cancel} racing a cron schedule's own reschedule right after it fires)
+ * could both observe the same starting entry, both start their own new {@link ScheduledFuture}
+ * (via {@link #scheduleJob}/{@link #scheduleCron}), and then overwrite each other's map entry —
+ * whichever {@code put} lands last wins in {@code entries}, silently orphaning the other call's
+ * job: it keeps firing forever, no longer reachable from {@link #list}/{@link #pause}/{@link
+ * #cancel} since the map only ever tracks one {@code Entry} per id — or, in the cron case,
+ * resurrecting a schedule a concurrent {@code pause}/{@code cancel} had just turned off. Every
+ * mutating method below (and the cron reschedule step) now goes through a single {@code
+ * entries.compute}/{@code remove} call per id instead, which {@link ConcurrentHashMap}
+ * serializes per-bin — the racing calls above are now fully
+ * ordered, and the second one always observes (and correctly cancels, or declines to resurrect)
+ * the first one's job before installing its own. Safe to do work inside the remapping function
+ * here specifically because {@link #scheduleJob}/{@link #scheduleCron} never block (they only
+ * register a task with {@link #tickExecutor} and return) — the same "short, no I/O" exception
+ * N1's own findings call out, not the general "don't do slow work inside a map's per-bin lock"
  * pinning risk those findings are otherwise about.
  */
 public final class LocalAgentScheduler implements AgentScheduler {
@@ -74,6 +78,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
     private final AgentRegistry            registry;
     private final ScheduledExecutorService tickExecutor;
     private final ExecutorService          agentExecutor;
+    private final ScheduleExecutionListener listener;
 
     /** Holds the AgentSchedule definition and its active ScheduledFuture — a {@code null} future means paused. */
     private record Entry(AgentSchedule schedule, ScheduledFuture<?> future) {}
@@ -81,7 +86,19 @@ public final class LocalAgentScheduler implements AgentScheduler {
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
 
     public LocalAgentScheduler(AgentRegistry registry) {
+        this(registry, null);
+    }
+
+    /**
+     * Creates a scheduler with an optional {@link ScheduleExecutionListener} observing
+     * fires and outcomes (see the listener's contract: callbacks are best-effort and
+     * exceptions from them never propagate).
+     *
+     * @param listener the listener to notify, or {@code null} for no notifications
+     */
+    public LocalAgentScheduler(AgentRegistry registry, ScheduleExecutionListener listener) {
         this.registry = Objects.requireNonNull(registry, "registry must not be null");
+        this.listener = listener;
         this.tickExecutor = Executors.newScheduledThreadPool(
                 Math.max(2, Runtime.getRuntime().availableProcessors()),
                 Thread.ofVirtual().name("ara-scheduler-tick-", 0).factory());
@@ -209,16 +226,48 @@ public final class LocalAgentScheduler implements AgentScheduler {
             // above swallowed a failure or not (P1): one bad trigger must not also prevent
             // every future one from ever being scheduled.
             try {
-                Entry current = entries.get(schedule.scheduleId());
-                if (current != null && current.future() != null) {
-                    ScheduledFuture<?> next = scheduleCron(schedule, expression);
-                    entries.put(schedule.scheduleId(), new Entry(schedule, next));
-                }
+                rescheduleCronAfterFire(schedule, expression);
             } catch (Throwable t) {
                 log.error("[Scheduler] '{}' failed to reschedule after its cron trigger — "
                         + "this schedule will not fire again until re-registered", schedule.scheduleId(), t);
             }
         }, delaySeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Re-arms a cron schedule's next occurrence right after it fires, unless it was
+     * concurrently paused or cancelled.
+     *
+     * <p>P2, 2026-09-22: used to read {@code entries.get(id)} and then separately {@code
+     * entries.put(id, ...)} — two non-atomic map operations. A {@link #pause}/{@link #cancel}
+     * landing between the two could be clobbered by this step's {@code put()} re-inserting a
+     * freshly-scheduled future right after, resurrecting a schedule that had just been turned
+     * off. Now goes through a single {@code entries.compute} call, same fix as {@link
+     * #register}/{@link #pause}/{@link #resume} (see the class javadoc's P2 note).
+     *
+     * <p>Package-private (not {@code private}) so {@code LocalAgentSchedulerHardeningTest} can
+     * race it against {@link #pause}/{@link #cancel} directly and deterministically — the real
+     * path only reaches here from inside {@link #scheduleCron}'s one-shot {@link
+     * java.util.concurrent.ScheduledFuture}, whose delay (from {@link CronEvaluator}) can be up
+     * to a minute, making the race untestable through real cron timing.
+     */
+    void rescheduleCronAfterFire(AgentSchedule schedule, String expression) {
+        entries.compute(schedule.scheduleId(), (id, current) -> {
+            if (current == null || current.future() == null) {
+                // cancelled or paused concurrently — do not resurrect it.
+                return current;
+            }
+            return new Entry(schedule, scheduleCron(schedule, expression));
+        });
+    }
+
+    /**
+     * Package-private test hook: {@code true} if {@code scheduleId} is registered but
+     * currently paused (no active {@link ScheduledFuture}).
+     */
+    boolean isPaused(String scheduleId) {
+        Entry e = entries.get(scheduleId);
+        return e != null && e.future() == null;
     }
 
     /**
@@ -253,31 +302,92 @@ public final class LocalAgentScheduler implements AgentScheduler {
     }
 
     private AgentFuture fire(AgentSchedule schedule) {
+        notifyFire(schedule.scheduleId(), schedule.agentId());
+        log.debug("[Scheduler] firing '{}' agent={}", schedule.scheduleId(), schedule.agentId().value());
         return registry.findById(schedule.agentId())
                 .map(agent -> {
-                    AgentTask task = AgentTask.of(schedule.inputTemplate());
-                    AgentFuture future = AraAgents.executeAsync(agent, task, agentExecutor);
-                    future.async().whenComplete((r, ex) -> {
-                        if (ex != null) {
-                            log.warn("[Scheduler] '{}' threw: {}", schedule.scheduleId(), ex.getMessage());
-                        } else if (r.isSuccess()) {
-                            log.debug("[Scheduler] '{}' completed successfully", schedule.scheduleId());
-                        } else {
-                            log.warn("[Scheduler] '{}' failed: {}", schedule.scheduleId(), r.failureReason());
-                        }
-                    });
+                    AgentFuture future;
+                    try {
+                        AgentTask task = AgentTask.of(schedule.inputTemplate());
+                        future = AraAgents.executeAsync(agent, task, agentExecutor);
+                        future.async().whenComplete((r, ex) -> onFireOutcome(schedule, task, r, ex));
+                    } catch (Throwable t) {
+                        // Task construction / dispatch failed synchronously — before whenComplete
+                        // was ever registered. Without this catch, onFire would have already fired
+                        // with no matching onComplete ever following it: a schedule with a blank
+                        // inputTemplate (AgentSchedule does not validate it) would violate the
+                        // listener's "one onFire, one onComplete" contract on every single tick.
+                        AgentResponse failure = AgentResponse.failure(
+                                "scheduler-" + schedule.scheduleId(),
+                                schedule.agentId(),
+                                "scheduled execution failed to dispatch: " + t.getMessage(),
+                                Duration.ZERO);
+                        notifyComplete(schedule.scheduleId(), failure);
+                        log.warn("[Scheduler] '{}' failed to dispatch: {}", schedule.scheduleId(), t.getMessage());
+                        future = AgentFuture.completed(failure);
+                    }
                     return future;
                 })
                 .orElseGet(() -> {
                     log.warn("[Scheduler] agent {} not found for schedule '{}' — skipping",
                             schedule.agentId().value(), schedule.scheduleId());
-                    return AgentFuture.completed(
-                            AgentResponse.failure(
-                                    "scheduler-" + schedule.scheduleId(),
-                                    schedule.agentId(),
-                                    "agent not found",
-                                    Duration.ZERO));
+                    AgentResponse failure = AgentResponse.failure(
+                            "scheduler-" + schedule.scheduleId(),
+                            schedule.agentId(),
+                            "agent not found",
+                            Duration.ZERO);
+                    notifyComplete(schedule.scheduleId(), failure);
+                    return AgentFuture.completed(failure);
                 });
+    }
+
+    /** Reports the terminal outcome of a dispatched execution — the normal-path counterpart
+     *  of the synchronous-dispatch-failure handling in {@link #fire}. */
+    private void onFireOutcome(AgentSchedule schedule, AgentTask task, AgentResponse r, Throwable ex) {
+        AgentResponse outcome = r;
+        if (outcome == null && ex != null) {
+            outcome = AgentResponse.failure(
+                    task.taskId(),
+                    schedule.agentId(),
+                    "scheduled execution failed unexpectedly: " + ex.getMessage(),
+                    Duration.ZERO);
+        }
+        notifyComplete(schedule.scheduleId(), outcome);
+        if (ex != null) {
+            log.warn("[Scheduler] '{}' threw: {}", schedule.scheduleId(), ex.getMessage());
+        } else if (r.isSuccess()) {
+            log.debug("[Scheduler] '{}' completed successfully", schedule.scheduleId());
+        } else {
+            log.warn("[Scheduler] '{}' failed: {}", schedule.scheduleId(), r.failureReason());
+        }
+    }
+
+    // ── listener ────────────────────────────────────────────────────────────────
+
+    /**
+     * Best-effort {@link ScheduleExecutionListener#onFire}: a faulty listener must never
+     * break the fire it is observing nor stall the scheduling thread it runs on.
+     */
+    private void notifyFire(String scheduleId, AgentId agentId) {
+        if (listener == null) return;
+        try {
+            listener.onFire(scheduleId, agentId);
+        } catch (Throwable t) {
+            log.error("[Scheduler] onFire listener for '{}' threw — ignored", scheduleId, t);
+        }
+    }
+
+    /**
+     * Best-effort {@link ScheduleExecutionListener#onComplete}: a faulty listener must
+     * never affect the agent run it reports on.
+     */
+    private void notifyComplete(String scheduleId, AgentResponse response) {
+        if (listener == null) return;
+        try {
+            listener.onComplete(scheduleId, response);
+        } catch (Throwable t) {
+            log.error("[Scheduler] onComplete listener for '{}' threw — ignored", scheduleId, t);
+        }
     }
 
     private Entry require(String scheduleId) {
@@ -299,6 +409,11 @@ public final class LocalAgentScheduler implements AgentScheduler {
     /**
      * Minimal 5-field cron evaluator (minute hour dom month dow).
      *
+     * <p><b>Public API.</b> Applications may use this class to validate a cron expression
+     * {@em before} registering a schedule and to compute how far in the future its next
+     * fire lies — both useful for persistence-backed schedulers that want to fail fast on
+     * bad expressions at input time rather than when the schedule is registered.
+     *
      * <p>Every field accepts:
      * <ul>
      *   <li>{@code *} — any value</li>
@@ -315,7 +430,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
      * (neither is {@code *}) an instant matches if it satisfies <em>either</em>
      * field. When only one is restricted, only that one is applied.
      */
-    static final class CronEvaluator {
+    public static final class CronEvaluator {
 
         // A leap-cycle-safe upper bound: scanning minute-by-minute over ~4 years and 1 day
         // guarantees we reach the next "Feb 29" for expressions like "0 0 29 2 *".
@@ -323,7 +438,16 @@ public final class LocalAgentScheduler implements AgentScheduler {
 
         private CronEvaluator() {}
 
-        static long secondsUntilNext(String expression) {
+        /**
+         * Returns the number of seconds between now and the next fire of {@code expression}.
+         * The expression is fully parsed first, so malformed input throws immediately.
+         *
+         * @param expression a 5-field cron expression
+         * @throws IllegalArgumentException if the expression is syntactically invalid
+         * @throws IllegalStateException    if no next occurrence can be found (should not
+         *                                  happen for any well-formed expression)
+         */
+        public static long secondsUntilNext(String expression) {
             String[] fields = expression.trim().split("\\s+");
             if (fields.length != 5)
                 throw new IllegalArgumentException(
@@ -361,6 +485,19 @@ public final class LocalAgentScheduler implements AgentScheduler {
             }
 
             throw new IllegalStateException("Could not find next occurrence for cron: " + expression);
+        }
+
+        /**
+         * Validates {@code expression} without returning a value. Equivalent to
+         * {@link #secondsUntilNext} discarding the result — a convenience for input
+         * validation ("does this cron parse?") where the delay is not needed.
+         *
+         * @param expression a 5-field cron expression
+         * @throws IllegalArgumentException if the expression is syntactically invalid
+         * @throws IllegalStateException    if no next occurrence can be found
+         */
+        public static void validate(String expression) {
+            secondsUntilNext(expression);
         }
 
         /**

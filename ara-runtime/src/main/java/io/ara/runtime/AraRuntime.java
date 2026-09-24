@@ -57,6 +57,7 @@ import io.ara.runtime.strategy.ReSpActStrategy;
 import io.ara.runtime.strategy.ReflActStrategy;
 import io.ara.runtime.scheduler.AgentScheduler;
 import io.ara.runtime.scheduler.LocalAgentScheduler;
+import io.ara.runtime.scheduler.ScheduleExecutionListener;
 import io.ara.runtime.stubs.InMemoryMemoryManager;
 import io.ara.runtime.hitl.ApprovalToolRegistry;
 import io.ara.runtime.telemetry.TelemetryToolRegistry;
@@ -938,6 +939,7 @@ public final class AraRuntime implements AutoCloseable {
         private AraRuntimeConfig runtimeConfig;
         private List<AgentInterceptor>    interceptors     = List.of();
         private final List<ExecutionStrategy> extraStrategies = new java.util.ArrayList<>();
+        private ScheduleExecutionListener scheduleExecutionListener;
         private LlmClientFactory          llmClientFactory;
         private LlmRouter                 reflectionRouter;
         private final java.util.Map<String, McpServerBinding> mcpServers = new java.util.LinkedHashMap<>();
@@ -1292,6 +1294,18 @@ public final class AraRuntime implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Attaches an optional {@link ScheduleExecutionListener} to the scheduler created
+         * by the resulting runtime: it observes every scheduled fire and its outcome (see
+         * the listener contract — callbacks are best-effort, exceptions from them never
+         * propagate). {@code null} (the default) disables notifications. Has no effect on
+         * schedules registered manually against a scheduler obtained some other way.
+         */
+        public Builder scheduleExecutionListener(ScheduleExecutionListener listener) {
+            this.scheduleExecutionListener = Objects.requireNonNull(listener, "listener must not be null");
+            return this;
+        }
+
         public AraRuntime build() {
             // Validate configuration early to fail fast.
             validate();
@@ -1308,7 +1322,7 @@ public final class AraRuntime implements AutoCloseable {
             Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
             AgentFactory agentFactory = buildAgentFactory(
                     instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry);
-            AgentScheduler scheduler = new LocalAgentScheduler(registry);
+            AgentScheduler scheduler = new LocalAgentScheduler(registry, scheduleExecutionListener);
             return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
                     approvalGate, temporaryScopeRegistry, abacPolicyEngine,
                     Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),

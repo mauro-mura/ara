@@ -1,11 +1,14 @@
 package io.ara.examples.scheduler;
 
+import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentSchedule;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.AraAgents;
 import io.ara.core.common.AgentId;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.scheduler.AgentScheduler;
+import io.ara.runtime.scheduler.LocalAgentScheduler;
+import io.ara.runtime.scheduler.ScheduleExecutionListener;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 
 import java.time.Duration;
@@ -57,8 +60,19 @@ public final class AgentSchedulerExample {
         // ── 2. Build the runtime and register the agent so the scheduler can find it ─
         // The runtime requires at least one LlmClient even when nothing uses it: the
         // scheduled agent is deterministic, so this scripted stub is never actually called.
+        // A ScheduleExecutionListener observes every fire and its outcome — the hook an
+        // application uses to persist e.g. a "last run" status on its own store.
         try (AraRuntime runtime = AraRuntime.builder()
                 .llmClient("unused", ScriptedLlmClient.script().build())
+                .scheduleExecutionListener(new ScheduleExecutionListener() {
+                    @Override public void onFire(String scheduleId, AgentId agentId) {
+                        System.out.println("    [listener] firing '" + scheduleId + "' → " + agentId.value());
+                    }
+                    @Override public void onComplete(String scheduleId, AgentResponse response) {
+                        System.out.println("    [listener] '" + scheduleId + "' completed: "
+                                + (response.isSuccess() ? "success" : "failure"));
+                    }
+                })
                 .build()) {
 
             runtime.start();
@@ -102,6 +116,13 @@ public final class AgentSchedulerExample {
                     scheduler.list().size());
 
             // ── 8. A cron schedule — registered but not awaited (fires weekdays 09:00) ─
+            // Cron expressions can be validated ahead of registration via the public
+            // CronEvaluator — useful before persisting a schedule to a database.
+            System.out.println("\nValidating cron \"0 9 * * MON-FRI\" (next fire in "
+                    + LocalAgentScheduler.CronEvaluator.secondsUntilNext("0 9 * * MON-FRI")
+                    + "s from now):");
+            LocalAgentScheduler.CronEvaluator.validate("0 9 * * MON-FRI");
+            System.out.println("  valid.");
             scheduler.register(AgentSchedule.builder()
                     .scheduleId("morning-report")
                     .agentId(heartbeatId)
