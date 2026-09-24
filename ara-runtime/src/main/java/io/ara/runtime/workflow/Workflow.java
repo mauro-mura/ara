@@ -1,6 +1,8 @@
 package io.ara.runtime.workflow;
 
 import io.ara.core.agent.AgentChain;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AraAgent;
 import io.ara.core.budget.RunBudget;
 import io.ara.core.budget.Spend;
 
@@ -28,11 +30,13 @@ import java.util.function.Function;
  * entry point ADR-054 D6 writes against.
  *
  * <p>It is deliberately <em>not</em> the {@code AgentPipeline.Builder → WorkflowGraph}
- * compiler (that is the larger ADR-052 D2 job, and needs agent-shaped nodes): nodes here
- * are still plain functions, exactly what {@link DataflowScheduler} takes. What this adds
- * is one place for the graph shape, the per-node {@link WorkflowNode#cost()}, the
- * occurrence cap, and the {@link RunBudget} to be declared together — and, per D7's FF-6,
- * it adds no {@code case}/{@code instanceof} on node type anywhere: it only assembles.
+ * compiler (that is the larger ADR-052 D2 job, and lives in {@code AgentPipeline}): a node
+ * here is either a plain function ({@link Builder#node}) or an <b>agent-shaped</b> node
+ * ({@link Builder#agent}, ADR-052 D2), which runs a real {@code AraAgent} and captures its
+ * {@code AgentResponse} so token/cost reach the journal. What this adds is one place for
+ * the graph shape, the per-node {@link WorkflowNode#cost()}, the occurrence cap, and the
+ * {@link RunBudget} to be declared together — and, per D7's FF-6, it adds no
+ * {@code case}/{@code instanceof} on node type anywhere: it only assembles.
  *
  * <p>A {@link Workflow} is reusable — every {@link #run} builds a fresh single-use
  * scheduler, the invariant {@link DataflowScheduler} documents.
@@ -120,6 +124,32 @@ public final class Workflow {
         /** Adds a plain node: {@code body} maps its composed input to its output. */
         public Builder node(String id, Function<String, String> body) {
             return put(WorkflowNode.of(id, body));
+        }
+
+        /**
+         * Adds an <b>agent-shaped node</b> (ADR-052 D2): the node's work is {@code agent},
+         * executed as {@code agent.execute(AgentTask.of(input))}, and the node's outcome is
+         * its {@link io.ara.core.agent.AgentResponse} — so token usage and cost are captured
+         * in the journal and reach {@code WorkflowResult}/{@code WorkflowStrategy} instead
+         * of vanishing into a plain string. A non-success response fails the node, the same
+         * contract {@code AgentPipeline} gives a failed step.
+         *
+         * <p>Use the {@link #agent(String, AraAgent, Function)} overload when the agent's
+         * task must carry something the raw input string does not — a {@code RunContext},
+         * attachments, a session id.
+         */
+        public Builder agent(String id, AraAgent agent) {
+            return agent(id, agent, null);
+        }
+
+        /**
+         * See {@link #agent(String, AraAgent)}. {@code taskShaper} maps the node's composed
+         * input to the agent's {@link AgentTask}; {@code null} means the plain
+         * {@code AgentTask.of(input)}.
+         */
+        public Builder agent(String id, AraAgent agent, Function<String, AgentTask> taskShaper) {
+            Objects.requireNonNull(agent, "agent must not be null");
+            return put(WorkflowNode.agent(id, new AgentBinding(agent, taskShaper)));
         }
 
         /**
@@ -309,8 +339,11 @@ public final class Workflow {
         // node's selector is an arbitrary function — AgentPipeline's own compiler enforces
         // its equivalent separately, on its own richer step/router model); #5 (HITL
         // presence) and #6 (tool declaration) need agent-shaped nodes carrying an
-        // AgentConfig's tags()/enabledTools(), which WorkflowNode does not — it stays a
-        // plain Function<String,String> (see WorkflowNode's own Javadoc); #7 (state-key
+        // AgentConfig's tags()/enabledTools(). Those nodes now exist (Builder#agent,
+        // ADR-052 D2): WorkflowNode#agent() exposes the binding, so the controls can read
+        // binding.agent().config().tags()/enabledTools(). They are not written yet because
+        // they are ADR-052 D5's, not D2's — the node model was the blocker, and it is
+        // removed; the checks themselves remain a separate increment; #7 (state-key
         // compatibility) needs declared reads/writes per node, which don't exist before
         // ADR-052 D3 gives nodes a RunState channel to declare them against; #8
         // (termination: a back edge needs a declared maxVisits) would require adding a

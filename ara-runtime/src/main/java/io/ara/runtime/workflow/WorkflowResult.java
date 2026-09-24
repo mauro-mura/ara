@@ -1,8 +1,11 @@
 package io.ara.runtime.workflow;
 
+import io.ara.core.budget.Spend;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * The outcome of a {@link DataflowScheduler} run: the append-only journal, plus whether
@@ -57,5 +60,42 @@ public record WorkflowResult(List<JournalEntry> journal, boolean ok, String fail
     /** The journal as {@code "nodeId#occurrence"} tokens, in write order — for assertions and logs. */
     public List<String> order() {
         return journal.stream().map(JournalEntry::toString).toList();
+    }
+
+    /**
+     * Prompt tokens consumed by the run's agent-shaped nodes (ADR-052 D2), summed from
+     * each {@link NodeOutcome.Completed}'s {@link io.ara.core.agent.AgentResponse}. Zero
+     * for a graph of opaque nodes — there is no agent to report from.
+     */
+    public int totalPromptTokens() {
+        return agentResponses().mapToInt(r -> r.inputTokens()).sum();
+    }
+
+    /** Output tokens consumed by the run's agent-shaped nodes — the {@link #totalPromptTokens()} counterpart. */
+    public int totalOutputTokens() {
+        return agentResponses().mapToInt(r -> r.outputTokens()).sum();
+    }
+
+    /**
+     * The spend the run's agent-shaped nodes drew, summed across occurrences, or empty
+     * when the graph has no agent-shaped node. Money carries its own currency and each
+     * response's totals are added axis by axis — a mixed-currency graph is a caller error
+     * {@link io.ara.core.common.Money#plus} surfaces, not one to paper over here.
+     */
+    public Optional<Spend> totalSpend() {
+        return agentResponses()
+                .map(r -> Spend.of(r.estimatedCost(), r.totalTokens(), 1))
+                .reduce(Spend::plus);
+    }
+
+    private java.util.stream.Stream<io.ara.core.agent.AgentResponse> agentResponses() {
+        return journal.stream()
+                .filter(JournalEntry.Finished.class::isInstance)
+                .map(JournalEntry.Finished.class::cast)
+                .map(JournalEntry.Finished::outcome)
+                .filter(NodeOutcome.Completed.class::isInstance)
+                .map(NodeOutcome.Completed.class::cast)
+                .map(NodeOutcome.Completed::response)
+                .filter(Objects::nonNull);
     }
 }

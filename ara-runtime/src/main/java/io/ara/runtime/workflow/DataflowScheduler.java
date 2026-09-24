@@ -3,6 +3,7 @@ package io.ara.runtime.workflow;
 import io.ara.core.agent.AgentChain;
 import io.ara.core.budget.RunBudget;
 import io.ara.core.budget.Spend;
+import io.ara.core.common.Money;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -393,7 +394,11 @@ public final class DataflowScheduler {
 
     private Fired fire(WorkflowNode node, int occurrence, String input, ExecutorService pool) {
         try {
-            String output = node.body().apply(input);
+            // node.run(input) is the single execution path (ADR-052 D2): for an opaque node
+            // it is body(), for an agent-shaped one it executes the agent and hands back its
+            // AgentResponse, so the scheduler never branches on the node's kind (FF-6).
+            NodeOutput out = node.run(input);
+            String output = out.content();
 
             List<MapOverChildResult> children = List.of();
             if (node.mapOver() != null) {
@@ -427,7 +432,7 @@ public final class DataflowScheduler {
                     ? graph.out(node.id()).stream().map(WorkflowEdge::to).toList()
                     : graph.out(node.id()).stream().map(WorkflowEdge::to)
                             .filter(node.selector().apply(output)::contains).toList();
-            return new Fired(node.id(), occurrence, input, new NodeOutcome.Completed(output, selected), children);
+            return new Fired(node.id(), occurrence, input, new NodeOutcome.Completed(output, selected, out.response()), children);
         } catch (WorkflowNodeSuspendedException e) {
             return new Fired(node.id(), occurrence, input, new NodeOutcome.Suspended(e.getMessage()));
         } catch (RuntimeException e) {
@@ -510,9 +515,22 @@ public final class DataflowScheduler {
         }
         Spend spend = Spend.zero(budget.currency());
         if (completed != null) {
-            var cost = graph.node(nodeId).cost();
-            if (cost != null) {
-                spend = cost.apply(completed.content());
+            if (completed.response() != null) {
+                // Agent-shaped node (ADR-052 D2): the AgentResponse is the source of truth
+                // for what the occurrence drew — a caller-declared cost() on the same node
+                // would only under- or over-state it. Money is re-based onto the budget's
+                // currency when the response's differs, rather than letting Money.plus
+                // surface a currency mismatch as a run failure.
+                var response = completed.response();
+                Money money = response.estimatedCost().currency().equals(budget.currency())
+                        ? response.estimatedCost()
+                        : Money.zero(budget.currency());
+                spend = Spend.of(money, response.totalTokens(), 1);
+            } else {
+                var cost = graph.node(nodeId).cost();
+                if (cost != null) {
+                    spend = cost.apply(completed.content());
+                }
             }
         }
         RunBudget.Charge result = budget.charge(spend);

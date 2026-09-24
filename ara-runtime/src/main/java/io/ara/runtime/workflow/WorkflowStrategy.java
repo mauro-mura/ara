@@ -29,16 +29,16 @@ import java.util.concurrent.Executors;
  * <p>Ignores {@code llm}, {@code memory}, and {@code tools} entirely — same reasoning as
  * {@code PipelineStrategy}: a workflow's real work happens inside its own nodes.
  *
- * <p><b>What this cannot report yet.</b> {@link WorkflowNode#body()} is a plain {@code
- * Function<String,String>} — D1/D2 do not require it to be agent-shaped — so there is no
- * {@code AgentResponse} anywhere to read token usage or cost from, unlike {@code
- * PipelineStrategy} aggregating each step's own response. {@link
- * ExecutionResult#promptTokens()}/{@link ExecutionResult#outputTokens()} are always
- * {@code 0} here; a node that declares a {@link WorkflowNode#cost()} still has it charged
- * to the run's {@link io.ara.core.budget.RunBudget} if one is configured (ADR-054 D6) —
- * that spend just is not surfaced through this {@code ExecutionResult} today. Making it
- * so needs {@link Workflow#run} to hand back the budget's final {@code Spend}, which is a
- * separate, later increment.
+ * <p><b>Token and cost reporting.</b> For a graph of opaque nodes there is no
+ * {@code AgentResponse} to read from, so {@link ExecutionResult#promptTokens()}/
+ * {@link ExecutionResult#outputTokens()} are {@code 0} — the node's work is a plain
+ * function with no usage to report. An <b>agent-shaped</b> node (ADR-052 D2, {@link
+ * Workflow.Builder#agent}) is different: the agent's {@code AgentResponse} is captured in
+ * the journal, so those totals are summed here from {@link WorkflowResult} and the split is
+ * real. A node that declares a {@link WorkflowNode#cost()} is still charged to the run's
+ * {@link io.ara.core.budget.RunBudget} if one is configured (ADR-054 D6); surfacing that
+ * declared spend through this {@code ExecutionResult} is a separate increment — it needs
+ * {@link Workflow#run} to hand back the budget's final {@code Spend}.
  *
  * <p>Package-private for the same reason as {@code PipelineStrategy}: {@link
  * WorkflowAgents#of} builds a fresh, single-strategy planner dedicated to one workflow
@@ -112,7 +112,8 @@ final class WorkflowStrategy implements ExecutionStrategy {
         }
 
         return result.ok()
-                ? ExecutionResult.success(output, iteration, 0, 0, steps)
-                : ExecutionResult.failure(result.failureReason(), output, iteration, 0, 0, steps);
+                ? ExecutionResult.success(output, iteration, result.totalPromptTokens(), result.totalOutputTokens(), steps)
+                : ExecutionResult.failure(result.failureReason(), output, iteration,
+                        result.totalPromptTokens(), result.totalOutputTokens(), steps);
     }
 }

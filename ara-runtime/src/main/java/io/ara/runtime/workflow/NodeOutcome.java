@@ -1,5 +1,7 @@
 package io.ara.runtime.workflow;
 
+import io.ara.core.agent.AgentResponse;
+
 import java.util.List;
 import java.util.Objects;
 
@@ -23,11 +25,23 @@ import java.util.Objects;
  */
 public sealed interface NodeOutcome {
 
-    record Completed(String content, List<String> selectedTargets) implements NodeOutcome {
+    /**
+     * A node that returned normally. {@code response} is non-{@code null} only for an
+     * agent-shaped node (ADR-052 D2) — it is the {@link AgentResponse} the node's agent
+     * produced, carried so the scheduler can charge the run budget from its token/cost
+     * totals and {@code WorkflowStrategy} can report the prompt/output split. An opaque
+     * {@link WorkflowNode#body()} node has no response, only {@code content}.
+     */
+    record Completed(String content, List<String> selectedTargets, AgentResponse response) implements NodeOutcome {
         public Completed {
             Objects.requireNonNull(content, "content must not be null");
             Objects.requireNonNull(selectedTargets, "selectedTargets must not be null");
             selectedTargets = List.copyOf(selectedTargets);
+        }
+
+        /** Backwards-compatible constructor: an opaque node, with no agent response. */
+        public Completed(String content, List<String> selectedTargets) {
+            this(content, selectedTargets, null);
         }
     }
 

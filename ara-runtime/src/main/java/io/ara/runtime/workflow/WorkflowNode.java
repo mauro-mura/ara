@@ -1,6 +1,7 @@
 package io.ara.runtime.workflow;
 
 import io.ara.core.agent.AgentChain;
+import io.ara.core.agent.AgentResponse;
 import io.ara.core.budget.Spend;
 
 import java.util.List;
@@ -18,7 +19,10 @@ import java.util.function.Function;
  * {@code AraAgent.execute}, {@code RunState} writes, tool calls) is ADR-052 D2's job:
  * D1 only has to prove the scheduler's activation rule holds, and an opaque function is
  * the smallest thing that can exercise it without dragging in a facade this increment
- * deliberately does not build yet.
+ * deliberately does not build yet. That increment is now layered on top: a node declared
+ * through {@link #agent(String, AgentBinding)} carries an {@link AgentBinding}, and
+ * {@link #run(String)} executes the agent and captures its {@link AgentResponse} — so
+ * token usage and cost reach the journal instead of vanishing into a string.
  *
  * @param id                 the node's identifier, unique within its {@link WorkflowGraph}
  * @param body               input (composed from incoming edges) to output; throwing
@@ -33,9 +37,10 @@ import java.util.function.Function;
  *                           tokens, LLM calls), charged to the run's {@code RunBudget}
  *                           (ADR-054 D6); {@code null} means "declares no cost" — the
  *                           node still counts as one activation but adds nothing on the
- *                           token / money axes. D1 nodes are opaque functions with no
- *                           LLM call, so this stays opt-in until D2 makes nodes
- *                           agent-shaped and the {@code Spend} comes from {@code AgentResponse}.
+ *                           token / money axes. For an agent-shaped node this is ignored
+ *                           in favour of the {@link AgentResponse}'s own totals: the
+ *                           response is the source of truth once there is one, and a
+ *                           caller-declared {@code cost} can only under- or over-state it.
  * @param write              output to a {@link Write}, merged into the run's shared
  *                           state under a declared reducer (ADR-052 D3); {@code null}
  *                           means "writes nothing" — most nodes.
@@ -53,6 +58,11 @@ import java.util.function.Function;
  *                           cheap: a composer is for <em>shaping</em> the several inputs
  *                           into one, never for the work of deciding between them — that
  *                           belongs in {@link #body()}, which does run on the pool.
+ * @param agent              the agent this node runs, when it is agent-shaped (ADR-052
+ *                           D2); {@code null} for an ordinary opaque node. When set,
+ *                           {@link #run(String)} executes it and the resulting
+ *                           {@link AgentResponse} — not {@link #body()} — is the node's
+ *                           outcome, so tokens/cost are captured rather than lost.
  */
 public record WorkflowNode(
         String id,
@@ -62,13 +72,21 @@ public record WorkflowNode(
         Function<String, Spend> cost,
         Write write,
         MapOverSpec mapOver,
-        Function<List<String>, String> composer
+        Function<List<String>, String> composer,
+        AgentBinding agent
 ) {
 
     public WorkflowNode {
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(body, "body must not be null");
         Objects.requireNonNull(onUncertainResume, "onUncertainResume must not be null");
+    }
+
+    /** Backwards-compatible constructor: a node that is not agent-shaped (no {@link AgentBinding}). */
+    public WorkflowNode(String id, Function<String, String> body, Function<String, Set<String>> selector,
+                        UncertainResumePolicy onUncertainResume, Function<String, Spend> cost, Write write,
+                        MapOverSpec mapOver, Function<List<String>, String> composer) {
+        this(id, body, selector, onUncertainResume, cost, write, mapOver, composer, null);
     }
 
     /** Backwards-compatible constructor: a node that declares no {@link #composer}. */
@@ -105,27 +123,41 @@ public record WorkflowNode(
                 UncertainResumePolicy.RETRY, null, null, null);
     }
 
+    /**
+     * An agent-shaped node (ADR-052 D2): {@code binding}'s agent is the node's work, and
+     * its {@link AgentResponse} — tokens, cost, content — is what {@link #run(String)}
+     * produces. The derived {@link #body()} runs the same agent, so a caller that reaches
+     * for the raw function (there is none in the runtime today, but the accessor is public)
+     * still gets the agent's content rather than a dead node; the scheduler never calls it
+     * for an agent-shaped node, only {@link #run(String)}.
+     */
+    public static WorkflowNode agent(String id, AgentBinding binding) {
+        Objects.requireNonNull(binding, "binding must not be null");
+        return new WorkflowNode(id, input -> executeAgent(id, binding, input).content(), null,
+                UncertainResumePolicy.RETRY, null, null, null, null, binding);
+    }
+
     /** Returns a copy of this node with its {@link #onUncertainResume} policy replaced. */
     public WorkflowNode withOnUncertainResume(UncertainResumePolicy policy) {
-        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer);
+        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer, agent);
     }
 
     /** Returns a copy of this node with a {@link #cost} function that maps its output to the {@link Spend} it drew. */
     public WorkflowNode withCost(Function<String, Spend> cost) {
         return new WorkflowNode(id, body, selector, onUncertainResume,
-                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer);
+                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer, agent);
     }
 
     /** Returns a copy of this node with a {@link #write} that maps its output to a shared-state entry. */
     public WorkflowNode withWrite(Write write) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost,
-                Objects.requireNonNull(write, "write must not be null"), mapOver, composer);
+                Objects.requireNonNull(write, "write must not be null"), mapOver, composer, agent);
     }
 
     /** Returns a copy of this node with a {@link #mapOver} spec (ADR-052 D4). */
     public WorkflowNode withMapOver(MapOverSpec mapOver) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write,
-                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer);
+                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer, agent);
     }
 
     /**
@@ -134,7 +166,31 @@ public record WorkflowNode(
      */
     public WorkflowNode withComposer(Function<List<String>, String> composer) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver,
-                Objects.requireNonNull(composer, "composer must not be null"));
+                Objects.requireNonNull(composer, "composer must not be null"), agent);
+    }
+
+    /**
+     * The single execution path the scheduler takes (ADR-052 D2). For an opaque node it is
+     * just {@link #body()}; for an agent-shaped one it executes the agent and returns its
+     * {@link AgentResponse} alongside the content, so the scheduler can charge the budget
+     * and {@code WorkflowStrategy} can report the token split without either knowing what
+     * kind of node it is.
+     *
+     * <p>An agent whose {@link AgentResponse} is not a success throws, so the scheduler
+     * records a {@link NodeOutcome.Failed} — the same contract {@code AgentPipeline} gives
+     * a failed step, rather than a node that "completes" with a failure payload.
+     */
+    NodeOutput run(String input) {
+        return agent == null ? NodeOutput.of(body.apply(input)) : executeAgent(id, agent, input);
+    }
+
+    private static NodeOutput executeAgent(String id, AgentBinding binding, String input) {
+        AgentResponse response = binding.agent().execute(binding.taskFor(input));
+        if (!response.isSuccess()) {
+            throw new IllegalStateException("node '" + id + "' agent '" + binding.agent().agentId().value()
+                    + "' failed: " + response.failureReason());
+        }
+        return new NodeOutput(response.content(), response);
     }
 
     /**

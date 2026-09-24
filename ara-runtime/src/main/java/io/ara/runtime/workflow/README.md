@@ -25,7 +25,8 @@ the complete input, with no step boundary anywhere.
 |---|---|
 | `Workflow` | The builder facade + run governor: declares the `WorkflowGraph`, the per-node occurrence cap and an optional `RunBudget` in one fluent place, and each `run(...)` constructs a fresh single-use `DataflowScheduler`. Deliberately *not* the `AgentPipeline.Builder → WorkflowGraph` compiler. |
 | `WorkflowGraph` | The graph model itself (ADR-052 D1): `List<WorkflowNode>`, `List<WorkflowEdge>`, and — since D3 — `Map<String, BinaryOperator<Object>>` of declared reducers. Enforces referential integrity: no dangling edge endpoints, no duplicate ids. |
-| `WorkflowNode` | One unit of work: `id`, `body` (composed input → output), optional routing `selector`, resume `UncertainResumePolicy`, `cost`, `Write`, `MapOverSpec`, `composer`. Deliberately opaque — `body` is a plain `Function`, not an `AraAgent`. |
+| `WorkflowNode` | One unit of work: `id`, `body` (composed input → output), optional routing `selector`, resume `UncertainResumePolicy`, `cost`, `Write`, `MapOverSpec`, `composer`, and an optional `AgentBinding`. An opaque node's `body` is a plain `Function`; an **agent-shaped** node (ADR-052 D2) carries an `AgentBinding` and `run(...)` executes the agent, capturing its `AgentResponse`. |
+| `AgentBinding` | An `AraAgent` wired as a node (ADR-052 D2): the agent plus an optional task shaper. `WorkflowNode.run` executes it and turns its `AgentResponse` into the node's outcome, so token/cost reach the journal. |
 | `WorkflowEdge` | A directed edge between two node *ids*. `back` is **the one place cycles are expressed**: a `back` edge carries OR-merge semantics, a forward edge AND-join. |
 | `DataflowScheduler` | The engine (ADR-052 D1): dataflow activation, per-node two-phase journal, shared-state writes, budget charging, and a replay path for resume. Single-run, single-use. |
 | `WorkflowResult` | The outcome of a run: the append-only `journal`, `ok`/`failureReason`, and `state` — every `Write` merged through its reducer, present even on a failed/partial run. |
@@ -66,11 +67,13 @@ to that story, not a prerequirement to reading the code:
 
 ## The graph model: nodes and edges
 
-`WorkflowNode` is the unit of work. Its `body` is an opaque function from its composed
-input to its output — deliberately *not* an `AraAgent`; wiring agent-shaped nodes is
-ADR-052 D2's much larger job (it is what the `AgentPipeline.Builder → WorkflowGraph`
-compiler needs, and it does not exist yet). D1 only has to prove the scheduler's
-activation rule, and an opaque function is the smallest thing that exercises it.
+`WorkflowNode` is the unit of work. It comes in two shapes. An **opaque** node's `body` is
+a function from its composed input to its output — the smallest thing that exercises the
+scheduler's activation rule (D1). An **agent-shaped** node (ADR-052 D2, `Builder.agent(...)`)
+instead carries an `AgentBinding` and runs a real `AraAgent`: `WorkflowNode.run(...)` is the
+single execution path, so the scheduler never branches on the node's kind (FF-6), and the
+agent's `AgentResponse` is captured into the journal — tokens and cost included. A
+non-success response fails the node, the same contract `AgentPipeline` gives a failed step.
 
 - **`selector`** — output → the subset of outgoing edges to activate. `null` = activate
   every outgoing edge.
@@ -206,7 +209,8 @@ worker executions interleaved. `lastWriteWins()` is the explicit opt-out from AD
 default — "I know two nodes may write this key, and I don't care which wins."
 
 This is the declarative replacement for `ara-graph`'s retired `SharedWorkspace`: the
-same channel `RunState` will serve once D2 makes nodes agent-shaped.
+same channel `RunState` serves now that agent-shaped nodes exist (ADR-052 D2), and that an
+agent node's task shaper can thread into the agent's `RunContext`.
 
 ## Dynamic fan-out: `mapOver`
 
@@ -262,10 +266,12 @@ ungoverned run (only the per-node `maxOccurrences` backstop applies).
 
 The other six are documented deferrals, each with its filed reason in `Workflow.java`: #4
 (routing shape / mandatory else-arc — needs an `IntentRouter`-like abstraction), #5 (HITL
-presence) and #6 (tool declaration) need agent-shaped nodes, which `WorkflowNode`
-deliberately is not; #7 (state-key compatibility) needs declared reads before D3's channel
-exists; #8 (termination: mandatory `maxVisits` per back edge) would break every existing
-back edge — the per-node `maxOccurrences` backstop covers it at coarser grain.
+presence) and #6 (tool declaration) now have the node model they need — agent-shaped nodes
+exist and expose `WorkflowNode.agent().agent().config()`, so `tags()`/`enabledTools()` are
+readable — but the checks themselves are ADR-052 **D5**'s, a separate increment; #7
+(state-key compatibility) needs declared reads before D3's channel exists; #8
+(termination: mandatory `maxVisits` per back edge) would break every existing back edge —
+the per-node `maxOccurrences` backstop covers it at coarser grain.
 
 ## Patterns — specs that compile, never scheduler cases
 
@@ -415,12 +421,14 @@ inside nodes. And like `PipelineAgents`, the strategy is **package-private** and
 `WorkflowAgents` builds a fresh single-strategy `ExecutionPlanner` per agent, registering
 the strategy under whatever name `config.plannerStrategy()` already carries, so
 `planner.select(config)` always finds an exact match instead of falling through to
-`"react"` (the convenience `of(workflow)` sets `"workflow"` itself). One documented
-limitation today: `body()` is a plain function, so there is no `AgentResponse` to read
-token usage from — `promptTokens()`/`outputTokens()` are always `0`. A node's declared
-`cost()` is still charged to the run's `RunBudget` if configured; surfacing that spend
-through `ExecutionResult` is a separate, later increment (it needs `Workflow.run` to hand
-back the budget's final `Spend`).
+`"react"` (the convenience `of(workflow)` sets `"workflow"` itself). Token/cost reporting
+depends on the nodes: an opaque node's `body` is a plain function with no `AgentResponse`,
+so it contributes nothing to the totals, while an **agent-shaped** node (ADR-052 D2) does —
+`WorkflowResult` sums the captured responses and `WorkflowStrategy` reports the real
+`promptTokens()`/`outputTokens()` split. A node's declared `cost()` is still charged to the
+run's `RunBudget` if configured; surfacing that declared spend through `ExecutionResult` is
+a separate, later increment (it needs `Workflow.run` to hand back the budget's final
+`Spend`).
 
 ## Usage
 
@@ -497,7 +505,7 @@ AraAgent named = WorkflowAgents.of(AgentId.of("research-flow"), cfg, workflow);
 - **Only *terminal*-declared graphs get the dead-end and reachability checks.** With no
   `terminal(...)`, `build()` skips controls #1/#2/#3 for backward compatibility with
   graphs that always had a sink — a missed `terminal(...)` there is not a build error.
-- **`WorkflowStrategy` reports zero prompt/output tokens** until nodes become
-  agent-shaped (D2): there is no `AgentResponse` to read from today. Declared `cost()`s
-  still govern budgeted runs — they just are not surfaced through the produced
-  `ExecutionResult` yet.
+- **`WorkflowStrategy` reports real prompt/output tokens for agent-shaped nodes** (ADR-052
+  D2), summed from each captured `AgentResponse`; an opaque-node graph still reports `0`.
+  Declared `cost()`s still govern budgeted runs — they just are not surfaced through the
+  produced `ExecutionResult` yet.
