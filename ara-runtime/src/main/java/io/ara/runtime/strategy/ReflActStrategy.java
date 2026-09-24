@@ -8,10 +8,8 @@ import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.agent.ExecutionTimeoutException;
 import io.ara.core.agent.StepType;
 import io.ara.core.agent.StrategyConfig;
-import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
-import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmRouter;
 import io.ara.core.memory.MemoryManager;
@@ -20,8 +18,6 @@ import io.ara.core.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -117,100 +113,41 @@ public final class ReflActStrategy implements ExecutionStrategy {
         Objects.requireNonNull(tools,  "tools must not be null");
         Objects.requireNonNull(config, "config must not be null");
 
-        StrategyConfig.ReflAct rc = (config.strategyConfig() instanceof StrategyConfig.ReflAct r)
-                ? r : StrategyConfig.ReflAct.defaults();
+        return new ReflActLoop(task, llm, memory, tools, config).run();
+    }
 
-        int     iterations          = 0;
-        int     totalPromptTokens   = 0;
-        int     totalOutputTokens   = 0;
-        int     reflectionsUsed     = 0;
-        int     unproductiveStreak  = 0;
-        boolean synthesisModeActive = false;
-        final boolean logIo         = config.logLlmIo();
-        final int     logIoMaxChars = config.logLlmIoMaxChars();
-        final boolean nativeTools   = llm.supportsNativeTools();
-        List<ExecutionStep> steps = new ArrayList<>();
-        Instant deadline = Instant.now().plus(config.executionTimeout());
+    /**
+     * The ReflAct-specific pieces over the shared {@link ReActLoop}: the two reflection
+     * triggers layered on the plain ReAct decision, plus the per-run reflection budget.
+     */
+    private final class ReflActLoop extends ReActLoop {
 
-        LlmCallContext ctx = LlmCallContext.of(config, task);
-        List<AraTool> resolvedTools = tools.resolveEnabled(config.enabledTools());
+        private final StrategyConfig.ReflAct rc;
+        private int reflectionsUsed;
+        private int unproductiveStreak;
 
-        // Same as ReactStrategy: stepCtx only varies by which tools are exposed (full set
-        // normally, empty on forced-final iterations), so precompute both variants once.
-        LlmCallContext stepCtx  = ctx.withResolvedTools(resolvedTools);
-        LlmCallContext forcedCtx = ctx.withResolvedTools(List.of());
-
-        // Same hoisting for the text catalog (see ReactStrategy): recomputing
-        // ToolCatalogFormatter.format per iteration would re-serialise every tool schema.
-        String toolCatalog = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
-        // The message list grows incrementally across iterations — see MessageBuffer.
-        ReactExecutionSupport.MessageBuffer messageBuffer = new ReactExecutionSupport.MessageBuffer();
-
-        if (log.isDebugEnabled()) {
-            log.debug("ReflActStrategy starting for task [{}] maxIterations={} maxReflections={} tools={}",
-                    task.taskId(), config.maxIterations(), rc.maxReflections(),
-                    resolvedTools.stream().map(AraTool::toolId).toList());
+        ReflActLoop(AgentTask task, LlmClient llm, MemoryManager memory, ToolRegistry tools, AgentConfig config) {
+            super(task, llm, memory, tools, config);
+            this.rc = (config.strategyConfig() instanceof StrategyConfig.ReflAct r)
+                    ? r : StrategyConfig.ReflAct.defaults();
         }
 
-        while (iterations < config.maxIterations()) {
-            if (Thread.currentThread().isInterrupted()) {
-                log.debug("Task [{}] cancelled at iteration {} (thread interrupted)", task.taskId(), iterations);
-                return ExecutionResult.failure("Cancelled", iterations, totalPromptTokens, totalOutputTokens, steps);
+        @Override
+        String systemSuffix() {
+            return ReactExecutionSupport.REACT_SYSTEM_SUFFIX;
+        }
+
+        @Override
+        void logStart() {
+            if (log.isDebugEnabled()) {
+                log.debug("ReflActStrategy starting for task [{}] maxIterations={} maxReflections={} tools={}",
+                        task.taskId(), config.maxIterations(), rc.maxReflections(),
+                        resolvedTools.stream().map(AraTool::toolId).toList());
             }
-            if (Instant.now().isAfter(deadline)) {
-                throw new ExecutionTimeoutException(config.executionTimeout());
-            }
+        }
 
-            ExecutionResult budgetExceeded = ReactExecutionSupport.checkBudget(
-                    config, task.taskId(), totalPromptTokens, totalOutputTokens, iterations, steps);
-            if (budgetExceeded != null) {
-                return budgetExceeded;
-            }
-
-            iterations++;
-            synthesisModeActive = ReactExecutionSupport.maybeInjectSynthesis(
-                    memory, config, task, iterations, synthesisModeActive, resolvedTools, nativeTools);
-
-            boolean forceFinal = iterations >= config.maxIterations() - 1;
-            List<LlmMessage> messages = messageBuffer.build(memory, forceFinal ? "" : toolCatalog,
-                    ReactExecutionSupport.REACT_SYSTEM_SUFFIX);
-            LlmCallContext iterationCtx = forceFinal ? forcedCtx : stepCtx;
-
-            LlmCompletion completion;
-            try {
-                completion = ReactExecutionSupport.callLlm(llm, messages, iterationCtx, task, deadline, config);
-            } catch (ExecutionTimeoutException te) {
-                throw te;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();   // restore the flag for our caller
-                log.debug("Task [{}] cancelled during the LLM call at iteration {}", task.taskId(), iterations);
-                return ExecutionResult.failure("Cancelled", iterations, totalPromptTokens, totalOutputTokens, steps);
-            } catch (Exception e) {
-                log.warn("LLM call failed on iteration {} for task [{}]: {}",
-                        iterations, task.taskId(), e.getMessage());
-                log.debug("LLM exception detail", e);
-                return ExecutionResult.failure(ReactExecutionSupport.describeLlmFailure(e),
-                        iterations, totalPromptTokens, totalOutputTokens, steps);
-            }
-
-            if (Instant.now().isAfter(deadline)) {
-                throw new ExecutionTimeoutException(config.executionTimeout());
-            }
-
-            totalPromptTokens += completion.promptTokens();
-            totalOutputTokens += completion.outputTokens();
-            String output = completion.text();
-
-            ExecutionResult runBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                    config, task, completion.promptTokens(), completion.outputTokens(),
-                    iterations, totalPromptTokens, totalOutputTokens, steps);
-            if (runBudgetExceeded != null) {
-                return runBudgetExceeded;
-            }
-
-            ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
-            ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
-
+        @Override
+        ExecutionResult decide(String output, LlmCompletion completion, boolean forceFinal, int iteration) {
             // forceFinal picks which sealed decision type governs this iteration — see
             // ReactStrategy for why DispatchTools not existing on the forced branch matters.
             // Reflection triggers are suppressed on that branch simply by living in the
@@ -222,9 +159,9 @@ public final class ReflActStrategy implements ExecutionStrategy {
                         ReactExecutionSupport.decideForcedFinal(output, completion);
                 switch (decision) {
                     case ReactExecutionSupport.ForcedFinalDecision.FinalAnswer(String answer) -> {
-                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ReactExecutionSupport.ForcedFinalDecision.Continue ignored ->
                         log.debug("Forced-final iteration: skipping tool dispatch for task [{}]", task.taskId());
@@ -234,148 +171,121 @@ public final class ReflActStrategy implements ExecutionStrategy {
                         output, completion, task, resolvedTools.isEmpty());
                 switch (decision) {
                     case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
-                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
                         unproductiveStreak = 0;   // an action was taken — the "thinking in circles" trigger does not apply
-                        ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
-                                tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
-                        boolean anyFailed;
-                        if (calls.size() == 1) {
-                            anyFailed = ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
-                        } else {
-                            log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
-                            anyFailed = ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
-                        }
+                        boolean anyFailed = dispatch(calls, completion, iteration);
                         if (anyFailed && rc.reflectOnToolFailure() && reflectionsUsed < rc.maxReflections()) {
-                            var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
-                                    "A tool call failed. Diagnose why and suggest what to try instead.", iterations,
-                                    deadline, config);
-                            totalPromptTokens += usage.promptTokens();
-                            totalOutputTokens += usage.outputTokens();
-                            reflectionsUsed++;
-                            ExecutionResult reflectionBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                                    config, task, usage.promptTokens(), usage.outputTokens(),
-                                    iterations, totalPromptTokens, totalOutputTokens, steps);
-                            if (reflectionBudgetExceeded != null) {
-                                return reflectionBudgetExceeded;
+                            ExecutionResult budget = reflectAndCharge(
+                                    "A tool call failed. Diagnose why and suggest what to try instead.", iteration);
+                            if (budget != null) {
+                                return budget;
                             }
                         }
                     }
                     case ReactExecutionSupport.StepDecision.Continue ignored -> {
                         unproductiveStreak++;
                         if (unproductiveStreak >= rc.unproductiveStreak() && reflectionsUsed < rc.maxReflections()) {
-                            var usage = reflect(memory, steps, task, ctx, llm, rc.reflectionProvider(),
+                            ExecutionResult budget = reflectAndCharge(
                                     unproductiveStreak + " steps in a row produced neither a tool call nor a final "
                                             + "answer. Diagnose why the approach is stalled and suggest a concrete next action.",
-                                    iterations, deadline, config);
-                            totalPromptTokens += usage.promptTokens();
-                            totalOutputTokens += usage.outputTokens();
-                            reflectionsUsed++;
+                                    iteration);
                             unproductiveStreak = 0;
-                            ExecutionResult reflectionBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                                    config, task, usage.promptTokens(), usage.outputTokens(),
-                                    iterations, totalPromptTokens, totalOutputTokens, steps);
-                            if (reflectionBudgetExceeded != null) {
-                                return reflectionBudgetExceeded;
+                            if (budget != null) {
+                                return budget;
                             }
                         }
                     }
                 }
             }
+            return null;
         }
 
-        log.warn("Task [{}] hit maxIterations={} without a final answer ({} reflection(s) used)",
-                task.taskId(), config.maxIterations(), reflectionsUsed);
-        return ExecutionResult.failure(
-                "Max iterations (%d) reached without a final answer".formatted(config.maxIterations()),
-                iterations, totalPromptTokens, totalOutputTokens, steps);
+        @Override
+        ExecutionResult onMaxIterations() {
+            log.warn("Task [{}] hit maxIterations={} without a final answer ({} reflection(s) used)",
+                    task.taskId(), config.maxIterations(), reflectionsUsed);
+            return ExecutionResult.failure(
+                    "Max iterations (%d) reached without a final answer".formatted(config.maxIterations()),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+        }
+
+        // ── Reflection ─────────────────────────────────────────────────────────
+
+        /** Runs one reflection and folds its usage into the totals and the run budget. */
+        private ExecutionResult reflectAndCharge(String trigger, int iteration) {
+            ReflectionUsage usage = reflect(trigger, iteration);
+            totalPromptTokens += usage.promptTokens();
+            totalOutputTokens += usage.outputTokens();
+            reflectionsUsed++;
+            return ReactExecutionSupport.chargeRunBudget(
+                    config, task, usage.promptTokens(), usage.outputTokens(),
+                    iteration, totalPromptTokens, totalOutputTokens, steps);
+        }
+
+        /**
+         * Generates a short course-correction, appends it to working memory as a {@code
+         * "user"} turn (no reset — the next Think call simply sees one more message in
+         * context), and records it as a {@link StepType#REFLECTION} step.
+         * Failures degrade to a generic nudge rather than propagating — a broken reflection
+         * call must not abort a task that could otherwise still succeed — except an {@link
+         * ExecutionTimeoutException}: once the shared deadline has passed the task cannot
+         * succeed anyway, so the timeout propagates as-is.
+         *
+         * <p><b>P0/U3, 2026-09-22:</b> the reflection call now runs through {@link
+         * ReactExecutionSupport#completeWithRetry} — bounded by {@code deadline} with the same
+         * interrupt-watchdog {@link ReactExecutionSupport#callLlm} uses for the main loop's own
+         * LLM calls — instead of a raw {@code reflectionLlm.complete(...)} with no deadline at
+         * all. A cancellation ({@link InterruptedException}) still degrades to a fallback
+         * critique rather than propagating, consistent with every other failure here — this
+         * method has no {@code ExecutionResult} to report "Cancelled" through — but the
+         * interrupt flag is restored first so the main loop's own {@code isInterrupted()} check
+         * at the top of its next iteration still observes the cancellation instead of losing it.
+         */
+        private ReflectionUsage reflect(String trigger, int iteration) {
+            String scratchpad = recentScratchpad(steps);
+            String prompt = "Recent trace:\n" + scratchpad + "\n\nWhy it looks stuck: " + trigger;
+            List<LlmMessage> messages = List.of(
+                    new LlmMessage("system", REFLECTION_SYSTEM),
+                    new LlmMessage("user", prompt));
+
+            LlmClient reflectionLlm = ReactExecutionSupport.resolveReflectionLlm(
+                    reflectionRouter, llm, ctx, rc.reflectionProvider(), task.taskId(), "ReflAct");
+
+            String critique;
+            int promptTokens = 0;
+            int outputTokens = 0;
+            try {
+                LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
+                        reflectionLlm, messages, ctx, deadline, config, task.taskId());
+                promptTokens = completion.promptTokens();
+                outputTokens = completion.outputTokens();
+                String text = completion.text();
+                critique = (text != null && !text.isBlank()) ? text.strip() : fallbackCritique();
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                log.warn("ReflAct: reflection call cancelled for task [{}]", task.taskId());
+                critique = fallbackCritique();
+            } catch (ExecutionTimeoutException e) {
+                throw e;
+            } catch (Exception e) {
+                log.warn("ReflAct: reflection call failed for task [{}]: {}", task.taskId(), e.getMessage());
+                critique = fallbackCritique();
+            }
+
+            log.debug("ReflAct [iteration={}, task={}]: {}", iteration, task.taskId(), critique);
+            memory.appendToWorkingMemory("user", "SELF-REFLECTION: " + critique);
+            steps.add(ExecutionStep.reflection(critique, iteration));
+            return new ReflectionUsage(promptTokens, outputTokens);
+        }
     }
 
-    // ── Reflection ─────────────────────────────────────────────────────────────
+    // ── Reflection helpers ─────────────────────────────────────────────────────
 
     private record ReflectionUsage(int promptTokens, int outputTokens) {}
-
-    /**
-     * Generates a short course-correction, appends it to working memory as a {@code
-     * "user"} turn (no reset — the next Think call simply sees one more message in
-     * context), and records it as a {@link StepType#REFLECTION} step.
-     * Failures degrade to a generic nudge rather than propagating — a broken reflection
-     * call must not abort a task that could otherwise still succeed — except an {@link
-     * ExecutionTimeoutException}: once the shared deadline has passed the task cannot
-     * succeed anyway, so the timeout propagates as-is.
-     *
-     * <p><b>P0/U3, 2026-09-22:</b> the reflection call now runs through {@link
-     * ReactExecutionSupport#completeWithRetry} — bounded by {@code deadline} with the same
-     * interrupt-watchdog {@link ReactExecutionSupport#callLlm} uses for the main loop's own
-     * LLM calls — instead of a raw {@code reflectionLlm.complete(...)} with no deadline at
-     * all. A cancellation ({@link InterruptedException}) still degrades to a fallback
-     * critique rather than propagating, consistent with every other failure here — this
-     * method has no {@code ExecutionResult} to report "Cancelled" through — but the
-     * interrupt flag is restored first so the main loop's own {@code isInterrupted()} check
-     * at the top of its next iteration still observes the cancellation instead of losing it.
-     */
-    private ReflectionUsage reflect(
-            MemoryManager memory, List<ExecutionStep> steps, AgentTask task, LlmCallContext ctx,
-            LlmClient mainLlm, String reflectionProvider, String trigger, int iteration,
-            Instant deadline, AgentConfig config) {
-
-        String scratchpad = recentScratchpad(steps);
-        String prompt = "Recent trace:\n" + scratchpad + "\n\nWhy it looks stuck: " + trigger;
-        List<LlmMessage> messages = List.of(
-                new LlmMessage("system", REFLECTION_SYSTEM),
-                new LlmMessage("user", prompt));
-
-        LlmClient reflectionLlm = resolveReflectionLlm(mainLlm, ctx, reflectionProvider, task.taskId());
-
-        String critique;
-        int promptTokens = 0;
-        int outputTokens = 0;
-        try {
-            LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
-                    reflectionLlm, messages, ctx, deadline, config, task.taskId());
-            promptTokens = completion.promptTokens();
-            outputTokens = completion.outputTokens();
-            String text = completion.text();
-            critique = (text != null && !text.isBlank()) ? text.strip() : fallbackCritique();
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.warn("ReflAct: reflection call cancelled for task [{}]", task.taskId());
-            critique = fallbackCritique();
-        } catch (ExecutionTimeoutException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("ReflAct: reflection call failed for task [{}]: {}", task.taskId(), e.getMessage());
-            critique = fallbackCritique();
-        }
-
-        log.debug("ReflAct [iteration={}, task={}]: {}", iteration, task.taskId(), critique);
-        memory.appendToWorkingMemory("user", "SELF-REFLECTION: " + critique);
-        steps.add(ExecutionStep.reflection(critique, iteration));
-        return new ReflectionUsage(promptTokens, outputTokens);
-    }
-
-    /**
-     * Resolves the {@link LlmClient} for the reflection call: {@code reflectionProvider}
-     * routed through {@link #reflectionRouter} when both are available, otherwise {@code
-     * fallback} (the main loop's own model) — same fallback chain as {@code
-     * ReflexionStrategy.resolveReflectionLlm}.
-     */
-    private LlmClient resolveReflectionLlm(LlmClient fallback, LlmCallContext ctx,
-                                            String reflectionProvider, String taskId) {
-        if (reflectionRouter == null || reflectionProvider == null || reflectionProvider.isBlank()) {
-            return fallback;
-        }
-        try {
-            return reflectionRouter.select(LlmConfig.of(reflectionProvider), ctx);
-        } catch (Exception e) {
-            log.warn("ReflAct: failed to resolve reflectionProvider '{}' for task [{}] — "
-                    + "falling back to the main loop's model: {}", reflectionProvider, taskId, e.getMessage());
-            return fallback;
-        }
-    }
 
     private static String fallbackCritique() {
         return "The current approach does not appear to be making progress. Try a different angle.";

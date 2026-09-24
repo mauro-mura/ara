@@ -10,6 +10,7 @@ import io.ara.core.memory.EpisodeLabel;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticEntry;
 import io.ara.core.memory.SemanticStore;
+import io.ara.core.memory.TokenCounter;
 import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
@@ -27,15 +28,18 @@ import java.util.stream.Collectors;
  * entries when the estimated token count exceeds {@code maxTokens}.
  *
  * <h2>Token estimation</h2>
- * Uses a char-based approximation for text: {@code tokens ≈ chars / 4}. This matches
+ * Defaults to a char-based approximation for text: {@code tokens ≈ chars / 4}. This matches
  * GPT-family tokenisers within ~15 % for Latin-script text — accurate enough for budget
- * enforcement.
+ * enforcement, far worse for CJK and dense JSON. A real tokenizer can be supplied instead via
+ * the {@link TokenCounter} constructor parameter (ADR-0087, e.g. {@code JtokkitTokenCounter}
+ * in {@code ara-adapters}); a manager built without one keeps exactly the historic
+ * {@code chars / 4} behaviour.
  *
- * <p>The estimate is maintained as a running counter (chars + flat media constants)
- * charged on every mutation and discharged on eviction — {@code O(1)} per append instead
- * of a full-window recount per append, which made a long conversation quadratic in the
- * number of entries. {@link #estimatedTokens()} is package-private so tests can verify the
- * counter against a fresh full recount.
+ * <p>The estimate is maintained as a running counter (text tokens/chars, depending on which
+ * mode is active, plus flat media constants) charged on every mutation and discharged on
+ * eviction — {@code O(1)} per append instead of a full-window recount per append, which made
+ * a long conversation quadratic in the number of entries. {@link #estimatedTokens()} is
+ * package-private so tests can verify the counter against a fresh full recount.
  *
  * <p>Media on an entry adds a <em>flat constant per category</em>, not a function of the
  * payload size. That is a deliberately coarse choice, and it is safe because the collapse it
@@ -96,8 +100,20 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     private final int            maxTokens;
     private final EvictionPolicy policy;
 
-    /** Running {@code (role+content)} char count across the window, for {@link #estimatedTokens()}. */
+    /**
+     * Running {@code (role+content)} char count across the window, for
+     * {@link #estimatedTokens()}. Only maintained — and only meaningful — when
+     * {@link #tokenCounter} is {@code null}; see {@link #tokenCount}.
+     */
     private int charCount;
+    /**
+     * Running token count across the window as reported by {@link #tokenCounter}
+     * (ADR-0087), for {@link #estimatedTokens()}. Only maintained — and only meaningful —
+     * when {@link #tokenCounter} is non-null; mutually exclusive with {@link #charCount},
+     * never both at once, so switching which one backs {@link #estimatedTokens()} needs no
+     * reconciliation between them.
+     */
+    private int tokenCount;
     /** Running sum of the flat per-media constants across the window, for {@link #estimatedTokens()}. */
     private int mediaTokenCount;
 
@@ -108,6 +124,8 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     private final EmbeddingClient embeddingClient;
     private final String          agentId;
     private final AraTelemetry    telemetry;
+    /** ADR-0087 — nullable; {@code null} keeps the historic {@code chars / 4} estimate. */
+    private final TokenCounter    tokenCounter;
 
     /**
      * @param maxTokens token budget for working memory (0 = unlimited)
@@ -146,6 +164,17 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     public SlidingWindowMemoryManager(int maxTokens, EvictionPolicy policy, AraAgent summarizerAgent,
                                       SemanticStore offloadStore, EmbeddingClient embeddingClient, String agentId,
                                       AraTelemetry telemetry) {
+        this(maxTokens, policy, summarizerAgent, offloadStore, embeddingClient, agentId, telemetry, null);
+    }
+
+    /**
+     * Full form plus a {@link TokenCounter} (ADR-0087). {@code null} keeps the historic
+     * {@code chars / 4} estimate this class always used before this parameter existed — see
+     * {@link TokenCounter#approximate()} and the class javadoc's "Token estimation" section.
+     */
+    public SlidingWindowMemoryManager(int maxTokens, EvictionPolicy policy, AraAgent summarizerAgent,
+                                      SemanticStore offloadStore, EmbeddingClient embeddingClient, String agentId,
+                                      AraTelemetry telemetry, TokenCounter tokenCounter) {
         if (maxTokens < 0) throw new IllegalArgumentException("maxTokens must be >= 0");
         this.maxTokens       = maxTokens;
         this.policy          = policy != null ? policy : EvictionPolicy.DROP_MIDDLE;
@@ -154,6 +183,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         this.embeddingClient = embeddingClient;
         this.agentId         = agentId;
         this.telemetry       = telemetry != null ? telemetry : AraTelemetry.noop();
+        this.tokenCounter    = tokenCounter;
     }
 
     private boolean offloadEnabled() {
@@ -179,6 +209,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     public void clearWorkingMemory() {
         working.clear();
         charCount       = 0;
+        tokenCount      = 0;
         mediaTokenCount = 0;
     }
 
@@ -195,19 +226,34 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
      * rather than a full-window recount — see class javadoc.
      */
     private void charge(MemoryEntry e) {
-        charCount += (e.role()    != null ? e.role().length()    : 0)
-                   + (e.content() != null ? e.content().length() : 0);
+        if (tokenCounter != null) {
+            tokenCount += tokenCounter.count(entryText(e));
+        } else {
+            charCount += (e.role()    != null ? e.role().length()    : 0)
+                       + (e.content() != null ? e.content().length() : 0);
+        }
         for (MediaRef ref : e.media()) {
             mediaTokenCount += tokensFor(ref);
         }
     }
 
     private void discharge(MemoryEntry e) {
-        charCount -= (e.role()    != null ? e.role().length()    : 0)
-                   + (e.content() != null ? e.content().length() : 0);
+        if (tokenCounter != null) {
+            tokenCount -= tokenCounter.count(entryText(e));
+        } else {
+            charCount -= (e.role()    != null ? e.role().length()    : 0)
+                       + (e.content() != null ? e.content().length() : 0);
+        }
         for (MediaRef ref : e.media()) {
             mediaTokenCount -= tokensFor(ref);
         }
+    }
+
+    /** {@code role + " " + content}, the text handed to {@link #tokenCounter} (ADR-0087). */
+    private static String entryText(MemoryEntry e) {
+        String role    = e.role()    != null ? e.role()    : "";
+        String content = e.content() != null ? e.content() : "";
+        return role + " " + content;
     }
 
     // ── Eviction ──────────────────────────────────────────────────────────────
@@ -477,11 +523,13 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     }
 
     /**
-     * Returns the running token estimate for the whole window — chars/4 plus the flat
+     * Returns the running token estimate for the whole window — {@link #tokenCounter}'s
+     * running total when one is configured, otherwise {@code chars / 4} — plus the flat
      * media constants. Package-private so tests can assert it equals a fresh full recount.
      */
     int estimatedTokens() {
-        return charCount / CHARS_PER_TOKEN + mediaTokenCount;
+        int textTokens = tokenCounter != null ? tokenCount : charCount / CHARS_PER_TOKEN;
+        return textTokens + mediaTokenCount;
     }
 
     private static int tokensFor(MediaRef ref) {

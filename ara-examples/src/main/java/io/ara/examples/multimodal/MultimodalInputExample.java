@@ -40,10 +40,15 @@ import java.util.List;
  * <p>Both runs need something listening: a {@code MISTRAL_API_KEY} for the first, a local
  * Ollama with a vision model (e.g. {@code llava}) for the second. Pass the file paths as
  * arguments, or drop a {@code contract.pdf} and a {@code scan.png} next to where you run it.
+ *
+ * <p>Each run is independent and best-effort: a missing file, a missing API key, or a
+ * provider that is not listening skips or reports that run with a clear message and lets the
+ * other one proceed. One broken prerequisite must not hide the demonstration behind an
+ * uncaught exception.
  */
 public class MultimodalInputExample {
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
         Path pdf   = Path.of(args.length > 0 ? args[0] : "contract.pdf");
         Path image = Path.of(args.length > 1 ? args[1] : "scan.png");
 
@@ -51,27 +56,33 @@ public class MultimodalInputExample {
         // would let two agents in one delegation chain disagree about where a document is.
         MediaStore mediaStore = MediaStore.inMemory();
 
-        if (Files.exists(pdf)) {
-            LlmClient mistral = MistralLlmClient.builder()
-                    .apiKey(requireEnv("MISTRAL_API_KEY"))
-                    .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
-                    .build();
-
-            // No words at all: the document *is* the request.
-            analyse("pdf-analyst", mistral, mediaStore, pdf, "application/pdf", "");
-        } else {
+        if (!Files.exists(pdf)) {
             System.out.println("Skipping the PDF run: " + pdf.toAbsolutePath() + " not found");
+        } else if (envOrNull("MISTRAL_API_KEY") == null) {
+            System.out.println("Skipping the PDF run: MISTRAL_API_KEY is not set");
+        } else {
+            runGuarded("PDF run", () -> {
+                LlmClient mistral = MistralLlmClient.builder()
+                        .apiKey(System.getenv("MISTRAL_API_KEY"))
+                        .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
+                        .build();
+
+                // No words at all: the document *is* the request.
+                analyse("pdf-analyst", mistral, mediaStore, pdf, "application/pdf", "");
+            });
         }
 
-        if (Files.exists(image)) {
-            LlmClient ollama = OllamaLlmClient.builder()
-                    .modelName("llava")          // any local vision-capable model
-                    .build();
-
-            analyse("image-analyst", ollama, mediaStore, image, "image/png",
-                    "What is written on this document?");
-        } else {
+        if (!Files.exists(image)) {
             System.out.println("Skipping the image run: " + image.toAbsolutePath() + " not found");
+        } else {
+            runGuarded("image run", () -> {
+                LlmClient ollama = OllamaLlmClient.builder()
+                        .modelName("llava")          // any local vision-capable model
+                        .build();
+
+                analyse("image-analyst", ollama, mediaStore, image, "image/png",
+                        "What is written on this document?");
+            });
         }
     }
 
@@ -126,11 +137,31 @@ public class MultimodalInputExample {
         }
     }
 
-    private static String requireEnv(String name) {
+    /** The environment variable's value, or {@code null} when unset or blank. */
+    private static String envOrNull(String name) {
         String value = System.getenv(name);
-        if (value == null || value.isBlank()) {
-            throw new IllegalStateException("Missing environment variable " + name);
+        return (value == null || value.isBlank()) ? null : value;
+    }
+
+    /**
+     * Runs one provider's demo, reporting instead of propagating anything it throws — so a
+     * provider that is not configured or not listening cannot abort the other run. The
+     * runtime already turns a rejected media type or a refused connection into a failed
+     * {@code AgentResponse} (printed by {@link #analyse}); this guard covers the earlier
+     * steps: building the client, reading the file, building the runtime.
+     */
+    private static void runGuarded(String label, Analysis analysis) {
+        try {
+            analysis.run();
+        } catch (Exception e) {
+            System.out.printf("%n=== %s failed before reaching the model ===%n", label);
+            System.out.printf("%-13s : %s%n", e.getClass().getSimpleName(), e.getMessage());
         }
-        return value;
+    }
+
+    /** A runnable body that may throw checked exceptions (file I/O, client construction). */
+    @FunctionalInterface
+    private interface Analysis {
+        void run() throws Exception;
     }
 }

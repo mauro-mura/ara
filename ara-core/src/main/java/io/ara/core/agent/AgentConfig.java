@@ -114,6 +114,27 @@ public record AgentConfig(
     public static Builder defaults() { return new Builder(); }
 
     /**
+     * Shorthand for the two fields almost every first agent sets — a role and a system
+     * prompt — with everything else left at its default. Exactly equivalent to
+     * {@code AgentConfig.defaults().agentType(agentType).systemPrompt(systemPrompt).build()},
+     * so it adds no behavior of its own; it exists only to keep the common case on one line.
+     *
+     * <p>Use {@link #defaults()} instead as soon as a third field is needed (tools, model,
+     * strategy, limits): this factory cannot express it, and chaining one setter off it
+     * would be the moment the explicit builder is the clearer shape.
+     *
+     * @param agentType    logical role of the agent; required, must not be blank
+     * @param systemPrompt system prompt sent on every LLM call; {@code null} falls back to
+     *                     the default prompt
+     * @return a fully defaulted config carrying only {@code agentType} and {@code systemPrompt}
+     * @throws NullPointerException     if {@code agentType} is {@code null}
+     * @throws IllegalArgumentException if {@code agentType} is blank
+     */
+    public static AgentConfig of(String agentType, String systemPrompt) {
+        return defaults().agentType(agentType).systemPrompt(systemPrompt).build();
+    }
+
+    /**
      * Returns a {@link Builder} pre-populated with every field of this config — the
      * starting point for a hot reconfiguration (ADR-039):
      * {@code config.toBuilder().temperature(0.7).build()}.

@@ -7,6 +7,7 @@ import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
+import io.ara.core.agent.AraAgents;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.auth.ExecutionContext;
@@ -19,9 +20,9 @@ import io.ara.core.llm.LlmTransport;
 import io.ara.core.llm.LlmRouter;
 import io.ara.core.mcp.McpClient;
 import io.ara.core.memory.EmbeddingClient;
-import io.ara.core.memory.MemoryConfig;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.memory.SemanticStore;
+import io.ara.core.memory.TokenCounter;
 import io.ara.core.provider.AgentProvider;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.tool.AraTool;
@@ -35,31 +36,18 @@ import io.ara.runtime.agent.SessionScoped;
 import io.ara.runtime.auth.AuthorizationService;
 import io.ara.runtime.auth.TemporaryScopeRegistry;
 import io.ara.runtime.bus.AgentDelegationTool;
-import io.ara.runtime.bus.DelegatingToolRegistry;
 import io.ara.runtime.bus.LocalMessageBus;
 import io.ara.runtime.config.AraRuntimeConfig;
 import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
-import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.media.MediaStore;
 import io.ara.runtime.llm.InstrumentedLlmClient;
-import io.ara.runtime.memory.EvictionPolicy;
 import io.ara.runtime.memory.SlidingWindowMemoryManager;
-import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.core.retriever.Retriever;
 import io.ara.core.retriever.RetrieverRouter;
-import io.ara.runtime.strategy.PlanExecuteStrategy;
-import io.ara.runtime.strategy.ReflexionStrategy;
-import io.ara.runtime.strategy.RetrievalAugmentedStrategy;
-import io.ara.runtime.strategy.ReactStrategy;
-import io.ara.runtime.strategy.ReSpActStrategy;
-import io.ara.runtime.strategy.ReflActStrategy;
 import io.ara.runtime.scheduler.AgentScheduler;
-import io.ara.runtime.scheduler.LocalAgentScheduler;
 import io.ara.runtime.scheduler.ScheduleExecutionListener;
-import io.ara.runtime.stubs.InMemoryMemoryManager;
-import io.ara.runtime.hitl.ApprovalToolRegistry;
 import io.ara.runtime.telemetry.TelemetryToolRegistry;
 import io.ara.runtime.wiring.AggregatingToolRegistry;
 import io.ara.runtime.wiring.DrainPolicy;
@@ -138,8 +126,15 @@ public final class AraRuntime implements AutoCloseable {
     private final Map<String, LlmClient> llmClients;
     private final ToolRegistry     toolRegistry;
     private final Map<String, Retriever> retrievers;
+    /**
+     * The shared agent behind {@link #ask}/{@link #askText}, created on first use. Volatile
+     * so the common read is lock-free; {@link #defaultAgent()} guards the create with
+     * double-checked locking. Cleared by {@link #stop()}, because that call destroys every
+     * registered agent, this one included.
+     */
+    private volatile AraAgent defaultAgent;
 
-    private AraRuntime(
+    AraRuntime(
             AraRuntimeConfig config,
             AgentFactory factory,
             AgentRegistry registry,
@@ -247,6 +242,9 @@ public final class AraRuntime implements AutoCloseable {
         try {
             if (!lifecycle.isStarted()) return;
             log.info("AraRuntime [{}] stopping", config.name());
+            // This call destroys every registered agent below, the default one included, so
+            // drop the reference now rather than hand the next ask() a destroyed instance.
+            defaultAgent = null;
             try {
                 try {
                     scheduler.stop();
@@ -337,6 +335,56 @@ public final class AraRuntime implements AutoCloseable {
             return factory.create(config, contract);
         } finally {
             lifecycle.getLock().unlock();
+        }
+    }
+
+    /**
+     * Runs {@code prompt} on a shared default agent and returns the full response — the
+     * shortest path from a runtime to an answer, for scripts, tests and the first ten
+     * minutes with ARA.
+     *
+     * <p>The default agent is {@link AgentConfig#defaults()} with no overrides, created on
+     * first use and reused by every later call on this runtime, so several prompts cost one
+     * agent rather than one each. It is deliberately unremarkable: the moment the agent
+     * needs a role, a system prompt, tools or a specific model, create your own with
+     * {@link #createAgent(AgentConfig)} and call {@link AraAgents#ask} on it directly. If
+     * the default agent has left the registry (a {@link #stop()}, or an explicit {@link
+     * #destroyAgent(AraAgent)}), the next call transparently creates a fresh one.
+     *
+     * @throws NullPointerException  if {@code prompt} is {@code null}
+     * @throws IllegalStateException if the runtime was explicitly stopped (see {@link #createAgent})
+     */
+    public AgentResponse ask(String prompt) {
+        return AraAgents.ask(defaultAgent(), prompt);
+    }
+
+    /**
+     * As {@link #ask(String)}, returning only the answer text — the empty string when the
+     * run failed, matching {@link AraAgents#askText}.
+     */
+    public String askText(String prompt) {
+        return AraAgents.askText(defaultAgent(), prompt);
+    }
+
+    /**
+     * The shared agent behind {@link #ask}/{@link #askText}. Double-checked locking on the
+     * volatile {@link #defaultAgent} field keeps the common case lock-free — the runtime is
+     * used from many threads. No lock is held across {@code createAgent}, which takes the
+     * lifecycle lock itself; a second thread that races the first simply observes the
+     * winning agent and discards its own.
+     */
+    private AraAgent defaultAgent() {
+        AraAgent agent = defaultAgent;
+        if (agent != null && registry.findById(agent.agentId()).isPresent()) {
+            return agent;
+        }
+        synchronized (this) {
+            agent = defaultAgent;
+            if (agent == null || registry.findById(agent.agentId()).isEmpty()) {
+                agent = createAgent(AgentConfig.defaults().build());
+                defaultAgent = agent;
+            }
+            return agent;
         }
     }
 
@@ -914,35 +962,40 @@ public final class AraRuntime implements AutoCloseable {
      */
     public static final class Builder {
 
-        private final java.util.Map<String, LlmClient> namedClients = new java.util.LinkedHashMap<>();
-        private String defaultClientId = "default";
-        private final java.util.Map<String, Retriever> namedRetrievers = new java.util.LinkedHashMap<>();
-        private String defaultRetrieverId;
-        private RetrieverRouter retrieverRouter;
-        private Function<AgentConfig, MemoryManager> memoryManagerFactory;
-        private EmbeddingClient embeddingClient;
-        private SemanticStore   semanticStore;
-        private ToolRegistry toolRegistry;
-        private Function<AgentConfig, ToolRegistry> toolRegistryFactory;
-        private InstanceContextStore instanceContextStore;
-        private AraTelemetry telemetry = AraTelemetry.noop();
-        private SessionStore sessionStore = SessionStore.noop();
-        private io.ara.core.trace.TraceStore traceStore;
-        private io.ara.core.trace.BlobStore  traceBlobStore;
-        private MediaStore   mediaStore   = MediaStore.noop();
-        private ApprovalGate approvalGate;
-        private io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
+        // Fields are package-private rather than private so RuntimeAssembler (same package)
+        // can build the object graph from them. Keeping the assembly logic out of this class
+        // leaves it focused on the fluent configuration surface; the fields are still only
+        // reachable within io.ara.runtime.
+        final java.util.Map<String, LlmClient> namedClients = new java.util.LinkedHashMap<>();
+        String defaultClientId = "default";
+        final java.util.Map<String, Retriever> namedRetrievers = new java.util.LinkedHashMap<>();
+        String defaultRetrieverId;
+        RetrieverRouter retrieverRouter;
+        Function<AgentConfig, MemoryManager> memoryManagerFactory;
+        EmbeddingClient embeddingClient;
+        SemanticStore   semanticStore;
+        TokenCounter    tokenCounter;
+        ToolRegistry toolRegistry;
+        Function<AgentConfig, ToolRegistry> toolRegistryFactory;
+        InstanceContextStore instanceContextStore;
+        AraTelemetry telemetry = AraTelemetry.noop();
+        SessionStore sessionStore = SessionStore.noop();
+        io.ara.core.trace.TraceStore traceStore;
+        io.ara.core.trace.BlobStore  traceBlobStore;
+        MediaStore   mediaStore   = MediaStore.noop();
+        ApprovalGate approvalGate;
+        io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
                 new io.ara.runtime.auth.InMemoryTemporaryScopeRegistry();
-        private io.ara.core.auth.AbacPolicyEngine abacPolicyEngine;
-        private Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
-        private AgentProvider agentProvider;
-        private AraRuntimeConfig runtimeConfig;
-        private List<AgentInterceptor>    interceptors     = List.of();
-        private final List<ExecutionStrategy> extraStrategies = new java.util.ArrayList<>();
-        private ScheduleExecutionListener scheduleExecutionListener;
-        private LlmClientFactory          llmClientFactory;
-        private LlmRouter                 reflectionRouter;
-        private final java.util.Map<String, McpServerBinding> mcpServers = new java.util.LinkedHashMap<>();
+        io.ara.core.auth.AbacPolicyEngine abacPolicyEngine;
+        Duration delegationTimeout = Duration.ofSeconds(AgentDelegationTool.DEFAULT_TIMEOUT_SEC);
+        AgentProvider agentProvider;
+        AraRuntimeConfig runtimeConfig;
+        List<AgentInterceptor>    interceptors     = List.of();
+        final List<ExecutionStrategy> extraStrategies = new java.util.ArrayList<>();
+        ScheduleExecutionListener scheduleExecutionListener;
+        LlmClientFactory          llmClientFactory;
+        LlmRouter                 reflectionRouter;
+        final java.util.Map<String, McpServerBinding> mcpServers = new java.util.LinkedHashMap<>();
 
         private Builder() {}
 
@@ -1100,6 +1153,20 @@ public final class AraRuntime implements AutoCloseable {
          */
         public Builder semanticStore(SemanticStore semanticStore) {
             this.semanticStore = semanticStore;
+            return this;
+        }
+
+        /**
+         * Token counter for the default working-memory manager's budget accounting
+         * (ADR-0087) — used only when {@link #memoryManagerFactory} is never called, same
+         * scope as {@link #embeddingClient}/{@link #semanticStore}. Defaults to {@code null},
+         * which keeps the built-in {@link SlidingWindowMemoryManager}'s historic
+         * {@code chars / 4} estimate ({@link TokenCounter#approximate()}); pass a real
+         * tokenizer (e.g. {@code JtokkitTokenCounter} in {@code ara-adapters}) to make
+         * eviction decisions on an actual token count instead of an approximation.
+         */
+        public Builder tokenCounter(TokenCounter tokenCounter) {
+            this.tokenCounter = tokenCounter;
             return this;
         }
 
@@ -1307,240 +1374,9 @@ public final class AraRuntime implements AutoCloseable {
         }
 
         public AraRuntime build() {
-            // Validate configuration early to fail fast.
-            validate();
-
-            // Resolve core components into separate helpers for readability.
-            AraRuntimeConfig cfg = resolveConfig();
-            InstanceContextStore ctxStore = resolveInstanceContextStore();
-            AgentRegistry registry = new AgentRegistry();
-            Function<AgentConfig, MemoryManager> memFactory = resolveMemoryFactory(registry);
-            LocalMessageBus messageBus = new LocalMessageBus(registry, telemetry, approvalGate, temporaryScopeRegistry);
-            Map<String, LlmClient> instrumentedClients = instrumentClients();
-            ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
-            Map<String, ToolRegistry> perAgentRegistries = new java.util.concurrent.ConcurrentHashMap<>();
-            Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
-            AgentFactory agentFactory = buildAgentFactory(
-                    instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry);
-            AgentScheduler scheduler = new LocalAgentScheduler(registry, scheduleExecutionListener);
-            return new AraRuntime(cfg, agentFactory, registry, agentProvider, scheduler, ctxStore,
-                    approvalGate, temporaryScopeRegistry, abacPolicyEngine,
-                    Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
-                    Map.copyOf(namedRetrievers));
-        }
-
-        // ── helper methods for build() ───────────────────────────────────────────────
-
-        /** Resolve the runtime configuration, falling back to defaults. */
-        private AraRuntimeConfig resolveConfig() {
-            return runtimeConfig != null ? runtimeConfig : AraRuntimeConfig.defaults();
-        }
-
-        /** Resolve the instance context store, creating a default one if none supplied. */
-        private InstanceContextStore resolveInstanceContextStore() {
-            return instanceContextStore != null ? instanceContextStore : new InstanceContextStore();
-        }
-
-        /** Resolve the memory manager factory, using the default if none was set. */
-        private Function<AgentConfig, MemoryManager> resolveMemoryFactory(AgentRegistry registry) {
-            return memoryManagerFactory != null
-                    ? memoryManagerFactory
-                    : agentCfg -> defaultMemoryManager(agentCfg, registry);
-        }
-
-        /**
-         * The default {@link MemoryManager} for an agent whose builder never called
-         * {@link #memoryManagerFactory}: {@link InMemoryMemoryManager} (today's behaviour,
-         * unlimited window) when {@code agentCfg.memory().workingMemoryTokenBudget()} is 0,
-         * or a fully wired {@link SlidingWindowMemoryManager} otherwise (ADR-0086). The
-         * summariser agent is resolved by id from {@code registry} on every call rather than
-         * once, since it may not be registered yet the first time an agent that names it is
-         * created — {@code registry} is mutated in place by {@code create(...)} after
-         * {@code build()} returns.
-         */
-        private MemoryManager defaultMemoryManager(AgentConfig agentCfg, AgentRegistry registry) {
-            MemoryConfig memory = agentCfg.memory();
-            if (memory.workingMemoryTokenBudget() <= 0) {
-                return new InMemoryMemoryManager();
-            }
-            AraAgent summarizer = null;
-            String summarizerId = memory.contextSummarizerAgentId();
-            if (summarizerId != null && !summarizerId.isBlank()) {
-                summarizer = registry.findById(AgentId.of(summarizerId)).orElse(null);
-            }
-            return new SlidingWindowMemoryManager(
-                    memory.workingMemoryTokenBudget(),
-                    EvictionPolicy.from(memory.workingMemoryEviction()),
-                    summarizer, semanticStore, embeddingClient, agentCfg.agentId().value(), telemetry);
-        }
-
-        /** Fails fast on configurations {@link #build()} could not wire correctly. */
-        private void validate() {
-            if (namedClients.isEmpty()) {
-                throw new IllegalStateException(
-                        "AraRuntime.Builder: at least one llmClient must be registered");
-            }
-            if (!namedClients.containsKey(defaultClientId)) {
-                throw new IllegalStateException(
-                        "AraRuntime.Builder: default LLM client '" + defaultClientId
-                                + "' is not among the registered clients " + namedClients.keySet()
-                                + " — register it via llmClient(id, client) or fix defaultLlmClient(id)");
-            }
-            if (!namedRetrievers.isEmpty() && defaultRetrieverId != null
-                    && !namedRetrievers.containsKey(defaultRetrieverId)) {
-                throw new IllegalStateException(
-                        "AraRuntime.Builder: default retriever '" + defaultRetrieverId
-                                + "' is not among the registered retrievers " + namedRetrievers.keySet()
-                                + " — register it via retriever(id, retriever) or fix defaultRetriever(id)");
-            }
-            if (retrieverRouter != null && !namedRetrievers.isEmpty()) {
-                throw new IllegalStateException(
-                        "AraRuntime.Builder: set either retriever(...)/retriever(id, ...) or "
-                                + "retrieverRouter(...), not both — a custom router supersedes the named map");
-            }
-            if (toolRegistry != null && toolRegistryFactory != null) {
-                throw new IllegalStateException(
-                        "AraRuntime.Builder: set either toolRegistry(...) or toolRegistryFactory(...), not both");
-            }
-        }
-
-        /** Wraps every registered client so every LLM call — including reflection — is instrumented. */
-        private Map<String, LlmClient> instrumentClients() {
-            Map<String, LlmClient> instrumentedClients = new java.util.LinkedHashMap<>();
-            namedClients.forEach((id, client) ->
-                    instrumentedClients.put(id, new InstrumentedLlmClient(client, telemetry)));
-            return instrumentedClients;
-        }
-
-        /**
-         * Resolves the tool-registry-per-agent function from whichever of the two mutually
-         * exclusive options was set. When {@link #toolRegistryFactory} is in play, wraps it
-         * so every invocation (one per agent, in {@code AgentFactory}) also records its
-         * result into {@code perAgentRegistries} — the accumulator {@link
-         * #discoveryRegistry} later reads from, since the factory itself is invoked deep
-         * inside {@code AgentFactory}, out of {@code AraRuntime}'s direct reach otherwise.
-         */
-        private Function<AgentConfig, ToolRegistry> resolvePerAgentToolRegistry(
-                Map<String, ToolRegistry> perAgentRegistries) {
-            if (toolRegistryFactory != null) {
-                return agentCfg -> {
-                    ToolRegistry resolved = toolRegistryFactory.apply(agentCfg);
-                    perAgentRegistries.put(agentCfg.agentId().value(), resolved);
-                    return resolved;
-                };
-            }
-            ToolRegistry baseRegistry = toolRegistry != null ? toolRegistry : ToolRegistry.empty();
-            return agentCfg -> baseRegistry;
-        }
-
-        /**
-         * Builds the {@link ToolRegistry} exposed via {@link AraRuntime#toolRegistry()} for
-         * discovery purposes — see that method's javadoc for the three cases.
-         */
-        private ToolRegistry discoveryRegistry(Map<String, ToolRegistry> perAgentRegistries) {
-            if (toolRegistry != null) return toolRegistry;
-            if (toolRegistryFactory != null) return new AggregatingToolRegistry(perAgentRegistries);
-            return ToolRegistry.empty();
-        }
-
-        /** Registers the built-in strategies (react, respact, plan_execute, reflexion, reflact), RAG variants, and any extras. */
-        private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients) {
-            LlmRouter reflection = reflectionRouter != null
-                    ? reflectionRouter
-                    : new DefaultLlmRouter(instrumentedClients, defaultClientId, llmClientFactory);
-
-            ReactStrategy       reactStrategy     = new ReactStrategy();
-            ReSpActStrategy     respactStrategy   = new ReSpActStrategy();
-            PlanExecuteStrategy planStrategy      = new PlanExecuteStrategy();
-            ReflexionStrategy   reflexionStrategy = new ReflexionStrategy(reactStrategy, reflection);
-            // Same reflection router as ReflexionStrategy — both support routing the
-            // critique call to a different provider than the main loop's own model.
-            ReflActStrategy     reflactStrategy   = new ReflActStrategy(reflection);
-
-            ExecutionPlanner.Builder plannerBuilder = ExecutionPlanner.builder()
-                    .register(reactStrategy)
-                    .register(respactStrategy)
-                    .register(planStrategy)
-                    .register(reflexionStrategy)
-                    .register(reflactStrategy);
-
-            if (retrieverRouter != null || !namedRetrievers.isEmpty()) {
-                RetrieverRouter rr = retrieverRouter != null
-                        ? retrieverRouter
-                        : new DefaultRetrieverRouter(namedRetrievers, defaultRetrieverId);
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reactStrategy,   rr));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(respactStrategy, rr));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(planStrategy,    rr));
-                plannerBuilder.register(RetrievalAugmentedStrategy.wrap(reflactStrategy, rr));
-            }
-
-            extraStrategies.forEach(plannerBuilder::register);
-            return plannerBuilder.build();
-        }
-
-        /** Assembles the {@link AgentFactory}: LLM clients, MCP servers, tool registry, and cross-cutting concerns. */
-        private AgentFactory buildAgentFactory(
-                Map<String, LlmClient> instrumentedClients,
-                ExecutionPlanner planner,
-                Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
-                LocalMessageBus messageBus,
-                Function<AgentConfig, MemoryManager> memFactory,
-                AgentRegistry registry) {
-
-            AgentFactory.Builder factoryBuilder = AgentFactory.builder()
-                    .defaultLlmClient(defaultClientId);
-            // Reuses instrumentedClients (built once in build()) — one wrapped instance per
-            // registered client, not two. InstrumentedLlmClient adds no overhead beyond an
-            // interface dispatch when telemetry is AraTelemetry.noop().
-            instrumentedClients.forEach(factoryBuilder::llmClient);
-            if (llmClientFactory != null) factoryBuilder.llmClientFactory(llmClientFactory);
-            mcpServers.forEach((id, binding) ->
-                    factoryBuilder.mcpServer(id, binding.connector(), binding.toolsAdapter()));
-            if (traceStore != null) factoryBuilder.traceEmission(traceStore, traceBlobStore);   // ADR-0068 D1
-
-            return factoryBuilder
-                    .toolRegistryFactory(agentCfg ->
-                            buildToolChain(agentCfg, perAgentToolRegistry, messageBus))
-                    .memoryManagerFactory(memFactory)
-                    .executionPlanner(planner)
-                    .telemetry(telemetry)
-                    .sessionStore(sessionStore)
-                    .mediaStore(mediaStore)
-                    .interceptors(interceptors)
-                    .registry(registry)
-                    .build();
-        }
-
-        /**
-         * Composes the full per-agent tool registry: the resolved base, wrapped for
-         * delegation (ADR-0077 D2), then gated for HITL when a gate is configured
-         * (ADR-0067 D6), then instrumented for OTel spans.
-         *
-         * <p>ADR-0077 D2's declared gap, closed: ownGrantedScopes now reflects this
-         * agent's own {@code AgentConfig.grantedScopes()} instead of the implicit
-         * {@code ScopeSet.EMPTY} every caller got before — the attenuation
-         * {@code AgentDelegationTool} already performs (incoming ∩ ownGrantedScopes) had
-         * a real ceiling to narrow against only when constructed directly; every agent
-         * created through AraRuntime saw EMPTY regardless of what it declared. agentView
-         * stays null (unchanged): wiring {@code registry.viewFor(...)} here is a separate
-         * decision (ADR-033 Fase 3 §3.3's pre-check), not part of this fix.
-         *
-         * <p>ADR-0067 D6: insert the approval decorator whenever a gate is configured, and
-         * let it decide per call whether a gate is needed (agent flag OR the tool's own
-         * {@code ToolSpec.approvalRequired()}) — so a high-risk tool is gated even when
-         * the agent's flag is false.
-         */
-        private ToolRegistry buildToolChain(AgentConfig agentCfg,
-                                            Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
-                                            LocalMessageBus messageBus) {
-            ToolRegistry base = new DelegatingToolRegistry(
-                    perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
-                    delegationTimeout, agentCfg.delegateStateAccess(), sessionStore,
-                    io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
-            ToolRegistry withApproval = approvalGate != null
-                    ? new ApprovalToolRegistry(base, approvalGate, agentCfg)
-                    : base;
-            return new TelemetryToolRegistry(withApproval, telemetry);
+            // Configuration is validated and the object graph assembled by RuntimeAssembler,
+            // keeping this class a pure fluent configuration surface.
+            return new RuntimeAssembler(this).assemble();
         }
     }
 }

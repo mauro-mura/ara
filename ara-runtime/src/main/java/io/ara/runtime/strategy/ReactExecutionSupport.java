@@ -13,8 +13,10 @@ import io.ara.core.common.Money;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
+import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.llm.LlmRouter;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.memory.ToolCallMetadata;
@@ -141,6 +143,52 @@ final class ReactExecutionSupport {
     private static final String ANSWER_MARKER = "Answer:";
 
     private ReactExecutionSupport() {}
+
+    /**
+     * The agent's own system prompt — the first working-memory entry when it is a system
+     * turn, else the empty string. Shared by the strategies that snapshot memory to
+     * re-seed it after a reset ({@link ReflexionStrategy}) or to rebuild an isolated
+     * per-step prompt ({@link PlanExecuteStrategy}) — both previously carried their own
+     * identical copy.
+     */
+    static String extractSystemPrompt(MemoryManager memory) {
+        List<MemoryEntry> entries = memory.workingMemory();
+        if (!entries.isEmpty() && "system".equals(entries.get(0).role())) {
+            return entries.get(0).content();
+        }
+        return "";
+    }
+
+    /**
+     * Resolves the {@link LlmClient} for a reflection call: {@code reflectionProvider}
+     * routed through {@code router} when both are available, otherwise {@code fallback}
+     * (the agent's own model). A routing failure degrades to {@code fallback} rather than
+     * aborting the task — a broken optional provider must not take down a run that could
+     * still succeed.
+     *
+     * <p>{@code logPrefix} names the caller in the warning ({@code "Reflexion"} /
+     * {@code "ReflAct"}), so one shared implementation still produces a log line that
+     * points at the strategy that actually tried to route.
+     *
+     * @param router             the reflection router; {@code null} disables routing
+     * @param fallback           the client to use when no provider is set or routing fails
+     * @param provider           the provider id to resolve; {@code null}/blank disables routing
+     * @param taskId             for the warning message
+     * @param logPrefix          the strategy name prefixed to the warning
+     */
+    static LlmClient resolveReflectionLlm(LlmRouter router, LlmClient fallback, LlmCallContext ctx,
+                                          String provider, String taskId, String logPrefix) {
+        if (router == null || provider == null || provider.isBlank()) {
+            return fallback;
+        }
+        try {
+            return router.select(LlmConfig.of(provider), ctx);
+        } catch (Exception e) {
+            log.warn("{}: failed to resolve reflectionProvider '{}' for task [{}] — "
+                    + "falling back to the agent's own model: {}", logPrefix, provider, taskId, e.getMessage());
+            return fallback;
+        }
+    }
 
     // ── Plain ReAct decision logic (shared by ReactStrategy and ReflActStrategy) ───
 
@@ -314,7 +362,7 @@ final class ReactExecutionSupport {
      * the working-memory prefix they were built from is untouched, appending only the
      * entries that are new.
      *
-* <p>Reuse is allowed only when two conditions hold:
+         * <p>Reuse is allowed only when two conditions hold:
          * <ul>
          *   <li><b>the tool-catalog variant is unchanged</b> — the first-system-message
          *       enhancement differs between normal iterations and forced-final ones (empty
@@ -645,26 +693,10 @@ final class ReactExecutionSupport {
 
     // ── Tool dispatch and streaming ─────────────────────────────────────────────
 
-    /**
-     * State shared by every tool-dispatch call within one reasoning iteration. Introduced
-     * because {@link #dispatchSingle}, {@link #dispatchParallel}, and {@link
-     * #recordObservation} were each taking the same 6-7 parameters positionally — the
-     * classic setup for an accidental argument-order bug (two adjacent {@code boolean}/
-     * {@code int} parameters of the same type are easy to swap without the compiler
-     * noticing). {@code recordObservation} does not need {@code tools}/{@code deadline}
-     * from this bundle; a context object carrying more than any one consumer uses is
-     * normal and simpler than three separate parameter lists.
-     */
-    record DispatchContext(
-            ToolRegistry tools,
-            MemoryManager memory,
-            List<ExecutionStep> steps,
-            AgentTask task,
-            int iteration,
-            Instant deadline,
-            boolean logIo,
-            int logIoMaxChars) {
-    }
+    // Tool-dispatch state is the public {@link ReActSupport.DispatchContext} record rather
+    // than a second, internal copy: {@link ReActSupport} re-publishes it for external
+    // strategy authors, and keeping one record instead of two plus a converter removes a
+    // place where the two shapes could silently drift apart.
 
     /**
      * Dispatches a single tool call and appends the observation to memory.
@@ -675,7 +707,7 @@ final class ReactExecutionSupport {
      *         observation text {@link #recordObservation} writes to memory, which would
      *         couple them to wording that is free to change here.
      */
-    static boolean dispatchSingle(ToolCallParser.ToolCallRequest tcr, String legacyToolCallId, DispatchContext ctx) {
+    static boolean dispatchSingle(ToolCallParser.ToolCallRequest tcr, String legacyToolCallId, ReActSupport.DispatchContext ctx) {
         log.debug("Dispatching tool [{}] for task [{}]", tcr.toolId(), ctx.task().taskId());
         // Prefer the per-call toolCallId from ToolCallRequest; fall back to the legacy
         // top-level field on LlmCompletion for single-call adapters. Resolved into the
@@ -697,7 +729,7 @@ final class ReactExecutionSupport {
      * @return {@code !result.success()}
      */
     private static boolean recordObservation(
-            ToolCallParser.ToolCallRequest tcr, String callId, ToolResult result, DispatchContext ctx) {
+            ToolCallParser.ToolCallRequest tcr, String callId, ToolResult result, ReActSupport.DispatchContext ctx) {
 
         String observation = result.success()
                 ? result.output()
@@ -734,7 +766,7 @@ final class ReactExecutionSupport {
      *
      * @return {@code true} if any of the dispatched calls failed
      */
-    static boolean dispatchParallel(List<ToolCallParser.ToolCallRequest> calls, DispatchContext ctx) {
+    static boolean dispatchParallel(List<ToolCallParser.ToolCallRequest> calls, ReActSupport.DispatchContext ctx) {
         return dispatchBounded(calls, ctx);
     }
 
@@ -749,7 +781,7 @@ final class ReactExecutionSupport {
      * output) blocked the whole agent indefinitely, ignoring {@code executionTimeout}.
      * Starting a virtual thread costs microseconds; an unbounded wait costs the session.
      */
-    private static boolean dispatchBounded(List<ToolCallParser.ToolCallRequest> calls, DispatchContext ctx) {
+    private static boolean dispatchBounded(List<ToolCallParser.ToolCallRequest> calls, ReActSupport.DispatchContext ctx) {
         int n = calls.size();
         Map<Integer, ToolResult> results = new ConcurrentHashMap<>(n);
         CountDownLatch latch = new CountDownLatch(n);

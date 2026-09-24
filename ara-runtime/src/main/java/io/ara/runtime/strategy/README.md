@@ -16,11 +16,10 @@ ExecutionResult execute(AgentTask task, LlmClient llm, MemoryManager memory,
 **One call, one complete pass.** `AgentInstance` invokes `execute(...)` **exactly once**
 per task — it does not loop around it. Every strategy in this package owns its *own*
 internal iteration loop up to `config.maxIterations()` and returns only once, with a
-final `ExecutionResult.success(...)` or `.failure(...)`. (The `ExecutionResult`/
-`ExecutionStrategy` Javadoc in `ara-core` describes a re-invoke-on-`goalAchieved==false`
-protocol; none of the strategies here use `ExecutionResult.intermediate(...)` or the
-`goalAchieved` field, and `AgentInstance` only ever reads `isSuccess()`. Treat that part
-of the core Javadoc as aspirational/legacy, not the current contract.)
+final `ExecutionResult.success(...)` or `.failure(...)`. This is also what the
+`ExecutionStrategy`/`ExecutionResult` Javadoc in `ara-core` now states: `AgentInstance`
+reads only `isSuccess()`, and no strategy here uses `ExecutionResult.intermediate(...)`
+or the `goalAchieved` field.
 
 ## Strategies
 

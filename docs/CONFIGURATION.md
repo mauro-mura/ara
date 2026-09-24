@@ -30,6 +30,10 @@ through the flat builder: `AgentConfig.defaults()...build()`.
 | `systemPrompt(String)` | `"You are a helpful AI agent."` | System prompt sent on every LLM call (further shaped by `PromptShaper`s) |
 | `promptCatalogId(String)` | `null` | Resolve the system prompt from a prompt catalog instead of inlining it |
 
+For an agent that sets nothing but a role and a prompt, `AgentConfig.of(agentType,
+systemPrompt)` builds that config in one call — the same result as
+`defaults().agentType(...).systemPrompt(...).build()`.
+
 ## LLM — which model(s) to use and how to select them
 
 | Builder method | Default | Description |
@@ -73,13 +77,17 @@ the shorthand) carries the per-model settings:
 
 ## Memory — working memory and conversation
 
+> Two methods in this table are **inert**: setting them has no effect. They are kept only
+> so existing source still compiles, and will be removed at a future version bump. Use
+> `StrategyConfig` instead — see the note below the table.
+
 | Builder method | Default | Description |
 |---|---|---|
 | `workingMemoryTokenBudget(int)` | `0` | Token budget for working memory; `0` = unbounded |
 | `workingMemoryEviction(String)` | `"drop_middle"` | Eviction policy when the budget is exceeded: `"drop_oldest"`, `"drop_middle"`, or `"summarize"` |
 | `maxConversationTurns(int)` | `0` | Max conversation turns kept per session; `0` = unbounded |
-| `maxReflections(int)` | `2` | **Inert — no strategy reads it.** Superseded by `StrategyConfig.Reflexion.maxReflections()` / `StrategyConfig.ReflAct.maxReflections()`; kept only for source compatibility |
-| `reflectionPrompt(String)` | `null` | **Inert — no strategy reads it.** Superseded by `StrategyConfig.Reflexion.reflectionPrompt()`; kept only for source compatibility |
+| `maxReflections(int)` | `2` | **Inert — setting it has no effect.** Superseded by `StrategyConfig.Reflexion.maxReflections()` / `StrategyConfig.ReflAct.maxReflections()`; kept only for source compatibility |
+| `reflectionPrompt(String)` | `null` | **Inert — setting it has no effect.** Superseded by `StrategyConfig.Reflexion.reflectionPrompt()`; kept only for source compatibility |
 
 > To configure reflection behaviour, pass a `StrategyConfig` — the flat `maxReflections` /
 > `reflectionPrompt` builder methods above are leftovers from before `StrategyConfig`

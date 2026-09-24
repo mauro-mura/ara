@@ -5,11 +5,13 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * The outcome of one pass of an {@link ExecutionStrategy}.
+ * The outcome of one complete pass of an {@link ExecutionStrategy}.
  *
- * <p>A strategy pass may or may not produce a final answer. If the goal was
- * not yet reached ({@code goalAchieved == false}), the {@code AgentInstance}
- * will invoke the strategy again (up to {@code AgentConfig.maxIterations()}).
+ * <p>A strategy pass returns once, with either a final answer or a fatal failure —
+ * {@code AgentInstance} does not invoke the strategy again when {@code goalAchieved} is
+ * {@code false}. It reads only {@link #isSuccess()}; {@code goalAchieved} is carried for
+ * strategies that want to expose their own notion of completion, and no built-in strategy
+ * returns {@link #intermediate}.
  *
  * @param goalAchieved   {@code true} when the strategy believes the task is complete
  * @param output         the text produced in this pass (partial or final)
@@ -126,7 +128,13 @@ public record ExecutionResult(
         return new ExecutionResult(true, output, iterations, 0, tokens, null, steps);
     }
 
-    /** Creates an intermediate result — goal not yet achieved, iteration continues. */
+    /**
+     * Creates an intermediate result — goal not yet achieved. Unused by the runtime:
+     * {@code AgentInstance} reads only {@link #isSuccess()} and never re-invokes a
+     * strategy on {@code goalAchieved == false}, so a strategy that must continue
+     * iterating does so inside its own {@code execute(...)} call. Kept for API
+     * completeness.
+     */
     public static ExecutionResult intermediate(String output, int iterations, int tokens) {
         return new ExecutionResult(false, output, iterations, 0, tokens, null, List.of());
     }

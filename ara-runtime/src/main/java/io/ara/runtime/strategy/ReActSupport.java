@@ -147,8 +147,9 @@ public final class ReActSupport {
     // ── Tool dispatch ─────────────────────────────────────────────────────────
 
     /**
-     * The parameters the shared dispatch helpers need. A public mirror of the internal
-     * context record, converted at the call boundary.
+     * The parameters the shared dispatch helpers need — also the canonical record the
+     * internal {@link ReactExecutionSupport} dispatch methods take, so there is a single
+     * shape rather than a public mirror plus an internal copy converted at the boundary.
      *
      * <p>{@code steps} must be a <em>mutable</em> list: dispatch appends the tool-call and
      * observation steps it produces. Pass the same accumulator list the caller returns in
@@ -163,11 +164,6 @@ public final class ReActSupport {
             Instant deadline,
             boolean logIo,
             int logIoMaxChars) {
-
-        ReactExecutionSupport.DispatchContext toInternal() {
-            return new ReactExecutionSupport.DispatchContext(
-                    tools, memory, steps, task, iteration, deadline, logIo, logIoMaxChars);
-        }
     }
 
     /**
@@ -177,7 +173,7 @@ public final class ReActSupport {
      */
     public static boolean dispatchSingle(
             ToolCallParser.ToolCallRequest tcr, String legacyToolCallId, DispatchContext ctx) {
-        return ReactExecutionSupport.dispatchSingle(tcr, legacyToolCallId, ctx.toInternal());
+        return ReactExecutionSupport.dispatchSingle(tcr, legacyToolCallId, ctx);
     }
 
     /**
@@ -188,7 +184,7 @@ public final class ReActSupport {
      */
     public static boolean dispatchParallel(
             List<ToolCallParser.ToolCallRequest> calls, DispatchContext ctx) {
-        return ReactExecutionSupport.dispatchParallel(calls, ctx.toInternal());
+        return ReactExecutionSupport.dispatchParallel(calls, ctx);
     }
 
     // ── Budget ────────────────────────────────────────────────────────────────

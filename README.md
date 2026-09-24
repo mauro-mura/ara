@@ -81,6 +81,22 @@ try (AraRuntime runtime = AraRuntime.builder()
 }
 ```
 
+> Virtual threads are lightweight JVM threads.
+
+That is the whole loop. **What just happened:** the runtime auto-started on
+`createAgent` (call `start()` yourself only when you also want to drive the lifecycle
+explicitly, and `stop()`/`close()` to shut it down); `agent.execute(...)` ran the default
+`react` strategy, which called the LLM, ended at a final answer, and returned it inside an
+`AgentResponse` that also carries the iteration count, token usage, cost and full step
+trace. For a one-liner instead of an `AgentResponse`, use
+`AraAgents.askText(agent, "Explain virtual threads")` — same execution, just the answer
+string.
+
+When all you set is a role and a prompt, `AgentConfig.of("assistant", "...")` is the same
+config on one line; reach for `AgentConfig.defaults()` as soon as a third field is involved.
+And when you do not even need that, `runtime.askText("...")` runs the prompt on a shared
+default agent — the two-line version, runnable as `basics/MinimalAgentExample`.
+
 **3. Swap in a real model** — one line changes, everything else stays:
 
 ```java
@@ -107,6 +123,29 @@ mvn clean install -DskipTests
 ```
 
 </details>
+
+---
+
+## One step further — three agents at once
+
+`crew/CodeReviewCrewExample` is the same runtime doing multi-agent work. Three specialist
+reviewers — security, performance, style — run **concurrently on virtual threads**, then a
+lead agent merges their findings into a prioritised report. The fan-out is a pipeline step;
+there are no threads to wire up:
+
+```java
+AgentPipeline pipeline = AgentPipeline.builder()
+        .parallel("review", List.of(security, performance, style),
+                  runtime.executor(), AgentChain.MergeStrategy.joining("\n\n"))
+        .step("synthesize", lead)
+        .build();
+
+AraAgent crew = PipelineAgents.of(AgentId.of("code-review-crew"), config, pipeline);
+```
+
+Run it offline with `main()`: the console shows the three reviewers starting together on
+different threads and finishing in an order decided by their work, then the lead's report
+and the crew's token/cost summary. Pass `live` to run the same crew against a real model.
 
 ---
 
@@ -159,6 +198,7 @@ mvn clean install -DskipTests
 - Single agents on any LLM (OpenAI, Anthropic, Ollama, Mistral, LM Studio, Groq, …)
 - Deterministic I/O contracts: sanitize input, validate output, strip markdown fences — zero tokens consumed
 - Multi-agent pipelines with conditional routing and FSM-style state machines
+- Parallel specialist crews: a fan-out step runs several agents at once on virtual threads and merges their answers with a pluggable strategy
 - Classify-and-act triage: one classification decides the single worker that handles the task, escalating from keyword rules to a model to a human as confidence drops — the whole dispatch table loadable as a JSON document
 - Tool calling from LLM responses, including parallel dispatch on virtual threads
 - Conversational agents that ask clarifying questions mid-task (`"respact"`) and self-correcting ones that recover from failed tool calls without restarting (`"reflact"`)
@@ -306,13 +346,14 @@ Everything below lives in `ara-examples` and runs with `main()`.
 
 | Class | LLM | What it shows |
 |---|---|---|
+| `basics/MinimalAgentExample` | stub | The smallest program: runtime + `askText(...)` — two lines |
 | `basics/AraSimpleExample` | stub | End-to-end: ReAct loop, tool call, interceptor, agent reuse |
-| `basics/AraSimpleExampleLive` | **live** | The same run against a real model |
 | `basics/SimpleStreamingExample` | stub / **live** | The smallest streaming agent, tokens printed as they arrive |
 | `basics/StreamingWithToolExample` | stub / **live** | Token streaming through a ReAct loop that calls a tool |
 | `basics/InterceptorEventsExample` | stub | Every `AgentInterceptor` event in order, around one run |
 | `pipeline/ClassifyAndActExample` | none | Classify-and-act at its smallest — no model, no API key |
 | `pipeline/TicketTriageCascadeExample` | stub | The three-tier cascade: rules → model → human |
+| `crew/CodeReviewCrewExample` | stub / **live** | Three specialist reviewers fan out on virtual threads; a lead agent merges their findings |
 | `hitl/HumanInTheLoopExample` | stub | A tool call parked on an `ApprovalGate` until an operator decides |
 | `memory/MemoryAgentExample` | stub | Token-budgeted working memory: summarise, offload, and recall |
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus delegation |
@@ -323,16 +364,21 @@ Everything below lives in `ara-examples` and runs with `main()`.
 
 ---
 
-## Documentation
+## Documentation — read it in this order
 
-| Guide | Covers |
-|---|---|
-| [Providers & resilience](docs/PROVIDERS.md) | Connecting OpenAI / Anthropic / Ollama / Mistral / OpenAI-compatible endpoints, multi-provider runtimes, `LlmException`, failover, circuit breaker, LLM I/O logging, OpenTelemetry |
-| [Contracts & processors](docs/CONTRACTS.md) | `AgentContract`, the built-in validator/transform/security processors, `PromptShaper`, multimodal input and media limits |
-| [Configuration reference](docs/CONFIGURATION.md) | Every `AgentConfig` and `LlmProfile` field, sessions and concurrency, cancellation, agent instance context, scheduling |
-| [RAG & human-in-the-loop](docs/HITL-AND-RAG.md) | Knowledge bases (in-memory or Qdrant), retrieval as a strategy vs. as a tool, embedding failover, approval gates and notifiers |
-| [Advanced usage](docs/ADVANCED.md) | Custom strategies, extension points |
-| [Coding guidelines](docs/CODING-GUIDELINES.md) | What a PR is expected to look like |
+The guides form a path, not a reference dump. Start at the top and stop when your use
+case is covered.
+
+| Step | Guide | What you'll be able to do |
+|---|---|---|
+| 1 | [Quick start](#quick-start--60-seconds-no-api-key) + [Runnable examples](#runnable-examples) | Run your first agent offline, then read the example closest to your goal |
+| 2 | [Tool calling](docs/TOOLS.md) | Give an agent a tool, with parallel dispatch on virtual threads |
+| 3 | [Contracts & processors](docs/CONTRACTS.md) | Validate, sanitise and transform I/O without spending tokens; `PromptShaper`, multimodal input |
+| 4 | [Configuration reference](docs/CONFIGURATION.md) | Every `AgentConfig` and `LlmProfile` field: sessions, concurrency, cancellation, instance context, scheduling |
+| 5 | [RAG & human-in-the-loop](docs/HITL-AND-RAG.md) | Knowledge bases (in-memory or Qdrant), retrieval as a strategy vs. a tool, approval gates and notifiers |
+| 6 | [Providers & resilience](docs/PROVIDERS.md) | Real endpoints (OpenAI / Anthropic / Ollama / Mistral / compatible), failover, circuit breaker, I/O logging, OpenTelemetry |
+| 7 | [Advanced usage](docs/ADVANCED.md) | Custom strategies and extension points |
+| — | [Coding guidelines](docs/CODING-GUIDELINES.md) | What a PR is expected to look like |
 
 ---
 

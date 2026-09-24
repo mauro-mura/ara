@@ -5,8 +5,8 @@ import io.ara.core.tool.ToolResult;
 
 /**
  * Demo tools shared by sibling examples — the {@code echo} tool used by
- * {@code AraSimpleExample} and its live variant — so the live sibling does not
- * import the stub example's nested classes.
+ * {@code AraSimpleExample} — kept in {@code support} so an example that wants it does
+ * not have to import another example's nested classes.
  */
 public final class DemoTools {
 

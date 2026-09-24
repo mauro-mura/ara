@@ -92,6 +92,12 @@
       <artifactId>langchain4j-mistral-ai</artifactId>
     </dependency>
 
+    <!-- jtokkit — JtokkitTokenCounter -->
+    <dependency>
+      <groupId>com.knuddels</groupId>
+      <artifactId>jtokkit</artifactId>
+    </dependency>
+
     <!-- MCP SDK
          Older Jackson transitives excluded so LangChain4j's versions win:
            - jackson-annotations:2.20 from mcp-core (vs 2.21 from LC4j)

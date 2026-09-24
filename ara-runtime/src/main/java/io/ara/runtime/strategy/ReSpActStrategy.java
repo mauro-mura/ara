@@ -5,18 +5,14 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionStrategy;
-import io.ara.core.agent.ExecutionTimeoutException;
-import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
-import io.ara.core.llm.LlmMessage;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -129,95 +125,47 @@ public final class ReSpActStrategy implements ExecutionStrategy {
         Objects.requireNonNull(tools,  "tools must not be null");
         Objects.requireNonNull(config, "config must not be null");
 
-        int     iterations        = 0;
-        int     totalPromptTokens = 0;
-        int     totalOutputTokens = 0;
-        final boolean logIo         = config.logLlmIo();
-        final int     logIoMaxChars = config.logLlmIoMaxChars();
-        final boolean nativeTools   = llm.supportsNativeTools();
-        List<ExecutionStep> steps = new ArrayList<>();
-        Instant deadline = Instant.now().plus(config.executionTimeout());
+        return new ReSpActLoop(task, llm, memory, tools, config).run();
+    }
 
-        LlmCallContext ctx = LlmCallContext.of(config, task);
-        List<AraTool> resolvedTools = tools.resolveEnabled(config.enabledTools());
+    /**
+     * The ReSpAct-specific pieces over the shared {@link ReActLoop}: the three-branch
+     * decision (final answer / speak / tool call) and its sentinel parsing. The synthesis
+     * nudge and per-iteration logging are opted out of, matching this strategy's
+     * pre-refactor behaviour.
+     */
+    private final class ReSpActLoop extends ReActLoop {
 
-        // Same pattern as ReactStrategy: stepCtx only varies by which tools are exposed
-        // (full set normally, empty on forced-final iterations), so precompute the two
-        // variants once instead of copying every field per iteration.
-        LlmCallContext stepCtx  = ctx.withResolvedTools(resolvedTools);
-        LlmCallContext forcedCtx = ctx.withResolvedTools(List.of());
-
-        // Same hoisting for the text catalog (see ReactStrategy).
-        String toolCatalog = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
-        // The message list grows incrementally across iterations — see MessageBuffer.
-        ReactExecutionSupport.MessageBuffer messageBuffer = new ReactExecutionSupport.MessageBuffer();
-
-        if (log.isDebugEnabled()) {
-            log.debug("ReSpActStrategy starting for task [{}] maxIterations={} tools={}",
-                    task.taskId(), config.maxIterations(),
-                    resolvedTools.stream().map(AraTool::toolId).toList());
+        ReSpActLoop(AgentTask task, LlmClient llm, MemoryManager memory, ToolRegistry tools, AgentConfig config) {
+            super(task, llm, memory, tools, config);
         }
 
-        while (iterations < config.maxIterations()) {
-            if (Thread.currentThread().isInterrupted()) {
-                log.debug("Task [{}] cancelled at iteration {} (thread interrupted)", task.taskId(), iterations);
-                return ExecutionResult.failure("Cancelled", iterations, totalPromptTokens, totalOutputTokens, steps);
+        @Override
+        String systemSuffix() {
+            return RESPACT_SYSTEM_SUFFIX;
+        }
+
+        @Override
+        boolean injectSynthesis() {
+            return false;
+        }
+
+        @Override
+        boolean logIterations() {
+            return false;
+        }
+
+        @Override
+        void logStart() {
+            if (log.isDebugEnabled()) {
+                log.debug("ReSpActStrategy starting for task [{}] maxIterations={} tools={}",
+                        task.taskId(), config.maxIterations(),
+                        resolvedTools.stream().map(AraTool::toolId).toList());
             }
-            if (Instant.now().isAfter(deadline)) {
-                throw new ExecutionTimeoutException(config.executionTimeout());
-            }
+        }
 
-            ExecutionResult budgetExceeded = ReactExecutionSupport.checkBudget(
-                    config, task.taskId(), totalPromptTokens, totalOutputTokens, iterations, steps);
-            if (budgetExceeded != null) {
-                return budgetExceeded;
-            }
-
-            iterations++;
-
-            // Hard stop: on the final iteration(s) withhold tools so the model cannot
-            // emit a structured tool call and MUST produce plain text — decideForcedFinal's
-            // implicit-SPEAK fallback then guarantees termination even for a model that
-            // never emits either sentinel. Same rationale as ReactStrategy's forceFinal.
-            boolean forceFinal = iterations >= config.maxIterations() - 1;
-            List<LlmMessage> messages = messageBuffer.build(memory, forceFinal ? "" : toolCatalog,
-                    RESPACT_SYSTEM_SUFFIX);
-            LlmCallContext iterationCtx = forceFinal ? forcedCtx : stepCtx;
-
-            LlmCompletion completion;
-            try {
-                completion = ReactExecutionSupport.callLlm(llm, messages, iterationCtx, task, deadline, config);
-            } catch (ExecutionTimeoutException te) {
-                throw te;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();   // restore the flag for our caller
-                log.debug("Task [{}] cancelled during the LLM call at iteration {}", task.taskId(), iterations);
-                return ExecutionResult.failure("Cancelled", iterations, totalPromptTokens, totalOutputTokens, steps);
-            } catch (Exception e) {
-                log.warn("LLM call failed on iteration {} for task [{}]: {}",
-                        iterations, task.taskId(), e.getMessage());
-                log.debug("LLM exception detail", e);
-                return ExecutionResult.failure(ReactExecutionSupport.describeLlmFailure(e),
-                        iterations, totalPromptTokens, totalOutputTokens, steps);
-            }
-
-            if (Instant.now().isAfter(deadline)) {
-                throw new ExecutionTimeoutException(config.executionTimeout());
-            }
-
-            totalPromptTokens += completion.promptTokens();
-            totalOutputTokens += completion.outputTokens();
-            String output = completion.text();
-
-            ExecutionResult runBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
-                    config, task, completion.promptTokens(), completion.outputTokens(),
-                    iterations, totalPromptTokens, totalOutputTokens, steps);
-            if (runBudgetExceeded != null) {
-                return runBudgetExceeded;
-            }
-
-            ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task.taskId());
-
+        @Override
+        ExecutionResult decide(String output, LlmCompletion completion, boolean forceFinal, int iteration) {
             // forceFinal picks which sealed decision type governs this iteration — on the
             // forced branch DispatchTools does not exist as a case (same rationale as
             // ReactStrategy.ForcedFinalDecision), so a tool dispatch here is a compile
@@ -226,15 +174,15 @@ public final class ReSpActStrategy implements ExecutionStrategy {
                 ForcedFinalDecision decision = decideForcedFinal(output, completion);
                 switch (decision) {
                     case ForcedFinalDecision.FinalAnswer(String answer) -> {
-                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ForcedFinalDecision.Speak(String message) -> {
-                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.speak(message, iterations));
+                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.speak(message, iteration));
                         task.notifySpeak(message);
-                        return ExecutionResult.success(message, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        return ExecutionResult.success(message, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ForcedFinalDecision.Continue ignored ->
                         log.debug("Forced-final iteration: skipping tool dispatch for task [{}]", task.taskId());
@@ -243,38 +191,34 @@ public final class ReSpActStrategy implements ExecutionStrategy {
                 StepDecision decision = decideNormal(output, completion, task, resolvedTools.isEmpty());
                 switch (decision) {
                     case StepDecision.FinalAnswer(String answer) -> {
-                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.finalAnswer(answer, iterations));
-                        return ExecutionResult.success(answer, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case StepDecision.Speak(String message) -> {
-                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iterations);
-                        steps.add(ExecutionStep.speak(message, iterations));
+                        log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iteration);
+                        steps.add(ExecutionStep.speak(message, iteration));
                         task.notifySpeak(message);
-                        return ExecutionResult.success(message, iterations, totalPromptTokens, totalOutputTokens, steps);
+                        return ExecutionResult.success(message, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
-                    case StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) -> {
-                        ReactExecutionSupport.DispatchContext dispatchCtx = new ReactExecutionSupport.DispatchContext(
-                                tools, memory, steps, task, iterations, deadline, logIo, logIoMaxChars);
-                        if (calls.size() == 1) {
-                            ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
-                        } else {
-                            log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
-                            ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
-                        }
-                    }
+                    case StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) ->
+                        dispatch(calls, completion, iteration);
                     case StepDecision.Continue ignored -> {
                         // No terminal signal yet — an intermediate reasoning step. Loop again.
                     }
                 }
             }
+            return null;
         }
 
-        log.warn("Task [{}] hit maxIterations={} without a final answer or speak turn",
-                task.taskId(), config.maxIterations());
-        return ExecutionResult.failure(
-                "Max iterations (%d) reached without a final answer or speak turn".formatted(config.maxIterations()),
-                iterations, totalPromptTokens, totalOutputTokens, steps);
+        @Override
+        ExecutionResult onMaxIterations() {
+            log.warn("Task [{}] hit maxIterations={} without a final answer or speak turn",
+                    task.taskId(), config.maxIterations());
+            return ExecutionResult.failure(
+                    "Max iterations (%d) reached without a final answer or speak turn".formatted(config.maxIterations()),
+                    iterations, totalPromptTokens, totalOutputTokens, steps);
+        }
     }
 
     // ── Private helpers ────────────────────────────────────────────────────────

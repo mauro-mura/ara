@@ -89,6 +89,8 @@
         <mockito.version>5.14.2</mockito.version>
         <jacoco.version>0.8.14</jacoco.version>
         <javalin.version>6.7.0</javalin.version>
+        <!-- real token counting for SlidingWindowMemoryManager (ara-adapters only) -->
+        <jtokkit.version>1.1.0</jtokkit.version>
 
         <!--
         Coverage floor enforced by the jacoco `check` execution below. The values are
@@ -152,6 +154,13 @@
                 <groupId>io.javalin</groupId>
                 <artifactId>javalin</artifactId>
                 <version>${javalin.version}</version>
+            </dependency>
+
+            <!-- jtokkit — pure-Java tiktoken-compatible tokenizer (ara-adapters only) -->
+            <dependency>
+                <groupId>com.knuddels</groupId>
+                <artifactId>jtokkit</artifactId>
+                <version>${jtokkit.version}</version>
             </dependency>
 
             <!-- Logging -->

@@ -182,7 +182,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         Run run = new Run(
                 task, llm, LlmCallContext.of(config, task), tools,
                 resolvedTools,
-                config, extractSystemPrompt(memory),
+                config, ReactExecutionSupport.extractSystemPrompt(memory),
                 plannerCatalog, stepCatalog,
                 Instant.now().plus(config.executionTimeout()),
                 config.maxIterations(), pe.maxStepRoundsPerStep(),
@@ -614,14 +614,6 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
-
-    private String extractSystemPrompt(MemoryManager memory) {
-        var entries = memory.workingMemory();
-        if (!entries.isEmpty() && "system".equals(entries.get(0).role())) {
-            return entries.get(0).content();
-        }
-        return "";
-    }
 
     private static void checkTimeout(Instant deadline, AgentConfig config) {
         if (Instant.now().isAfter(deadline)) {

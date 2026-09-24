@@ -30,8 +30,10 @@ class WeatherTool implements AraTool {
 }
 ```
 
-`ToolRegistry` is a small interface — implement it over whatever tool collection you
-have:
+`ToolRegistry` is a small public port. For a fixed in-memory catalog you copy this helper
+once — the same one the runnable examples use
+([`ara-examples/.../support/Tools.java`](../ara-examples/src/main/java/io/ara/examples/support/Tools.java)) —
+and every tool after that is just an `AraTool`:
 
 ```java
 class SimpleToolRegistry implements ToolRegistry {
@@ -50,7 +52,13 @@ class SimpleToolRegistry implements ToolRegistry {
                 .orElseGet(() -> ToolResult.failure(id, "Tool not found: " + id));
     }
 }
+```
 
+Implement the port directly only when your tools come from somewhere dynamic (a database, a
+remote catalog, a plugin system); `resolveEnabled`, `findById` and `execute` are the only
+methods you must write. Wiring the tool into a runtime and an agent is then three lines:
+
+```java
 AraRuntime runtime = AraRuntime.builder()
         .llmClient("live", gpt4o)
         .toolRegistry(new SimpleToolRegistry(new WeatherTool()))

@@ -9,7 +9,6 @@ import io.ara.core.agent.ExecutionTimeoutException;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
-import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmRouter;
 import io.ara.core.memory.MemoryEntry;
@@ -144,7 +143,7 @@ public final class ReflexionStrategy implements ExecutionStrategy {
 
         // Snapshot initial working-memory state before the delegate writes to it.
         // We need this to re-seed memory cleanly on each retry.
-        String       systemPrompt   = extractSystemPrompt(memory);
+        String       systemPrompt   = ReactExecutionSupport.extractSystemPrompt(memory);
         List<String> recalledCtx    = extractRecalledContext(memory);
 
         List<String> priorReflections = new ArrayList<>();
@@ -289,7 +288,8 @@ public final class ReflexionStrategy implements ExecutionStrategy {
                 new LlmMessage("user",   prompt)
         );
 
-        LlmClient reflectionLlm = resolveReflectionLlm(llm, ctx, reflectionProvider, task.taskId());
+        LlmClient reflectionLlm = ReactExecutionSupport.resolveReflectionLlm(
+                reflectionRouter, llm, ctx, reflectionProvider, task.taskId(), "Reflexion");
 
         try {
             LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
@@ -312,40 +312,14 @@ public final class ReflexionStrategy implements ExecutionStrategy {
     }
 
     /**
-     * Resolves the {@link LlmClient} to use for the reflection call: {@code reflectionProvider}
-     * routed through {@link #reflectionRouter} when both are available, otherwise {@code fallback}
-     * (the agent's own model) — preserving pre-existing behavior when no router was wired in
-     * (see the single-arg constructor) or no provider override was configured.
+     * Fallback critique text used when the reflection call fails or returns blank.
      */
-    private LlmClient resolveReflectionLlm(LlmClient fallback, LlmCallContext ctx,
-                                            String reflectionProvider, String taskId) {
-        if (reflectionRouter == null || reflectionProvider == null || reflectionProvider.isBlank()) {
-            return fallback;
-        }
-        try {
-            return reflectionRouter.select(LlmConfig.of(reflectionProvider), ctx);
-        } catch (Exception e) {
-            log.warn("Reflexion: failed to resolve reflectionProvider '{}' for task [{}] — "
-                    + "falling back to the agent's own model: {}",
-                    reflectionProvider, taskId, e.getMessage());
-            return fallback;
-        }
-    }
-
     private static String fallbackReflection(String failureReason) {
         return "The previous attempt failed (%s). Try a completely different approach."
                 .formatted(failureReason != null ? failureReason : "unknown reason");
     }
 
     // ── Memory helpers ────────────────────────────────────────────────────────
-
-    private static String extractSystemPrompt(MemoryManager memory) {
-        List<MemoryEntry> entries = memory.workingMemory();
-        if (!entries.isEmpty() && "system".equals(entries.get(0).role())) {
-            return entries.get(0).content();
-        }
-        return "";
-    }
 
     /**
      * Returns any "system" messages injected between the first system prompt and the
