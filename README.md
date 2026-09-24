@@ -61,41 +61,32 @@ Your code ──▶ AraRuntime ──▶ Agent (strategy + contract + session)
 run needs no key, no network and no local model:
 
 ```java
-import io.ara.core.agent.*;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 
-try (AraRuntime runtime = AraRuntime.builder()
+try (var runtime = AraRuntime.builder()
         .llmClient(ScriptedLlmClient.script()
                 .thenFinalAnswer("Virtual threads are lightweight JVM threads.")
                 .build())
         .build()) {
 
-    AraAgent agent = runtime.createAgent(AgentConfig.defaults()
-            .agentType("assistant")
-            .systemPrompt("You are a concise technical assistant.")
-            .build());
-
-    AgentResponse response = agent.execute(AgentTask.of("Explain virtual threads"));
-    System.out.println(response.content());
+    System.out.println(runtime.askText("Explain virtual threads"));
 }
 ```
 
 > Virtual threads are lightweight JVM threads.
 
-That is the whole loop. **What just happened:** the runtime auto-started on
-`createAgent` (call `start()` yourself only when you also want to drive the lifecycle
-explicitly, and `stop()`/`close()` to shut it down); `agent.execute(...)` ran the default
-`react` strategy, which called the LLM, ended at a final answer, and returned it inside an
-`AgentResponse` that also carries the iteration count, token usage, cost and full step
-trace. For a one-liner instead of an `AgentResponse`, use
-`AraAgents.askText(agent, "Explain virtual threads")` — same execution, just the answer
-string.
+That is the whole loop, runnable as `basics/MinimalAgentExample`. **What just happened:**
+`runtime.askText(...)` runs the prompt on a shared default agent and returns the answer
+string directly — the runtime auto-started on first use, and `close()` shuts it down. The
+default `react` strategy called the LLM, ended at a final answer, and returned it.
 
-When all you set is a role and a prompt, `AgentConfig.of("assistant", "...")` is the same
-config on one line; reach for `AgentConfig.defaults()` as soon as a third field is involved.
-And when you do not even need that, `runtime.askText("...")` runs the prompt on a shared
-default agent — the two-line version, runnable as `basics/MinimalAgentExample`.
+When the agent needs a role, a system prompt, tools or a specific model, create one
+explicitly and call `agent.execute(...)`: you get the full `AgentResponse` — iteration
+count, token usage, cost and step trace — instead of just the string.
+`AgentConfig.of("assistant", "...")` is the one-line form; reach for
+`AgentConfig.defaults()` as soon as a third field is involved. See `basics/AraSimpleExample`
+for that fuller shape.
 
 **3. Swap in a real model** — one line changes, everything else stays:
 
