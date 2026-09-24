@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -270,6 +271,55 @@ class LocalAgentSchedulerHardeningTest {
 
             scheduler.resume("cron-race"); // reset for the next round
         }
+    }
+
+    // ── list() must report the live paused/active state, not the registered definition ──
+
+    private boolean listedAsActive(String scheduleId) {
+        return scheduler.list().stream()
+                .filter(s -> scheduleId.equals(s.scheduleId()))
+                .findFirst().orElseThrow()
+                .active();
+    }
+
+    /**
+     * {@code pause()} cancels the job but used to leave the stored {@link AgentSchedule}
+     * untouched, so {@code list()} kept reporting {@code active=true} for a schedule that would
+     * never fire — a caller (e.g. an agent tool) that paused a schedule and then listed it saw
+     * it as still active.
+     */
+    @Test
+    void list_reflectsPauseAndResume() {
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("pausable")));
+        scheduler.register(AgentSchedule.builder()
+                .scheduleId("pausable-schedule")
+                .agentId(AgentId.of("pausable"))
+                .every(Duration.ofHours(1))
+                .withInput("go")
+                .build());
+        assertTrue(listedAsActive("pausable-schedule"), "freshly registered schedule is active");
+
+        scheduler.pause("pausable-schedule");
+        assertFalse(listedAsActive("pausable-schedule"), "a paused schedule must be listed as inactive");
+
+        scheduler.resume("pausable-schedule");
+        assertTrue(listedAsActive("pausable-schedule"), "a resumed schedule must be listed as active again");
+    }
+
+    @Test
+    void list_reportsARegisteredInactiveScheduleAsInactive_andResumeActivatesIt() {
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("dormant")));
+        scheduler.register(AgentSchedule.builder()
+                .scheduleId("dormant-schedule")
+                .agentId(AgentId.of("dormant"))
+                .every(Duration.ofHours(1))
+                .withInput("go")
+                .active(false)
+                .build());
+        assertFalse(listedAsActive("dormant-schedule"));
+
+        scheduler.resume("dormant-schedule");
+        assertTrue(listedAsActive("dormant-schedule"));
     }
 
     private static void await(CountDownLatch latch) {

@@ -181,8 +181,21 @@ public final class LocalAgentScheduler implements AgentScheduler {
     @Override
     public List<AgentSchedule> list() {
         return entries.values().stream()
-                .map(Entry::schedule)
+                .map(LocalAgentScheduler::withLiveActiveFlag)
                 .toList();
+    }
+
+    /**
+     * The stored {@link AgentSchedule} is the definition as registered; whether it is running is
+     * decided by {@code pause}/{@code resume}, which only add/remove the job. Reporting the
+     * definition's own {@code active} flag made a paused schedule keep listing as active.
+     */
+    private static AgentSchedule withLiveActiveFlag(Entry entry) {
+        AgentSchedule s = entry.schedule();
+        boolean running = entry.future() != null;
+        return s.active() == running
+                ? s
+                : new AgentSchedule(s.scheduleId(), s.agentId(), s.trigger(), s.inputTemplate(), running);
     }
 
     @Override
