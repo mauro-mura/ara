@@ -303,7 +303,9 @@ public final class ReflActStrategy implements ExecutionStrategy {
      * "user"} turn (no reset — the next Think call simply sees one more message in
      * context), and records it as a {@link StepType#REFLECTION} step.
      * Failures degrade to a generic nudge rather than propagating — a broken reflection
-     * call must not abort a task that could otherwise still succeed.
+     * call must not abort a task that could otherwise still succeed — except an {@link
+     * ExecutionTimeoutException}: once the shared deadline has passed the task cannot
+     * succeed anyway, so the timeout propagates as-is.
      *
      * <p><b>P0/U3, 2026-09-22:</b> the reflection call now runs through {@link
      * ReactExecutionSupport#completeWithRetry} — bounded by {@code deadline} with the same
@@ -342,6 +344,8 @@ public final class ReflActStrategy implements ExecutionStrategy {
             Thread.currentThread().interrupt();
             log.warn("ReflAct: reflection call cancelled for task [{}]", task.taskId());
             critique = fallbackCritique();
+        } catch (ExecutionTimeoutException e) {
+            throw e;
         } catch (Exception e) {
             log.warn("ReflAct: reflection call failed for task [{}]: {}", task.taskId(), e.getMessage());
             critique = fallbackCritique();
