@@ -255,6 +255,12 @@ public final class ReflexionStrategy implements ExecutionStrategy {
      * ExecutionResult} to report "Cancelled" through — but the interrupt flag is restored
      * first so {@link #execute}'s own {@code isInterrupted()} check at the top of its next
      * attempt still observes the cancellation instead of losing it.
+     *
+     * <p>An {@link ExecutionTimeoutException} (the shared deadline passed during the call)
+     * is the one failure that propagates instead of degrading: swallowing it left {@link
+     * #execute} to rediscover the timeout via its own wall-clock check, which the watchdog
+     * can beat by a fraction of a millisecond — letting the loop exhaust its attempts and
+     * return a plain failure instead of timing out.
      */
     private Reflection generateReflection(
             AgentTask task,
@@ -297,6 +303,8 @@ public final class ReflexionStrategy implements ExecutionStrategy {
             Thread.currentThread().interrupt();
             log.warn("Reflection generation cancelled for task [{}]", task.taskId());
             return new Reflection(fallbackReflection(failureReason), 0, 0);
+        } catch (ExecutionTimeoutException e) {
+            throw e;
         } catch (Exception e) {
             log.warn("Reflection generation failed for task [{}]: {}", task.taskId(), e.getMessage());
             return new Reflection(fallbackReflection(failureReason), 0, 0);
