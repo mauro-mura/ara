@@ -1,5 +1,7 @@
 package io.ara.core.agent;
 
+import io.ara.core.common.Money;
+
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,6 +22,8 @@ import java.util.Optional;
  * @param outputTokens   completion/output tokens consumed across all LLM calls in this pass
  * @param failureReason  non-null only when the strategy encountered a fatal error
  * @param steps          ordered list of execution steps (thoughts, tool calls, observations)
+ * @param cost           the cost the strategy measured itself, or {@code null} when it did not —
+ *                       in which case the executing agent prices the token counts from its config
  */
 public record ExecutionResult(
         boolean goalAchieved,
@@ -28,12 +32,30 @@ public record ExecutionResult(
         int promptTokens,
         int outputTokens,
         String failureReason,
-        List<ExecutionStep> steps
+        List<ExecutionStep> steps,
+        Money cost
 ) {
 
     public ExecutionResult {
         Objects.requireNonNull(output, "output must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
+    }
+
+    /** A result whose cost was not measured by the strategy — the caller prices the tokens. */
+    public ExecutionResult(boolean goalAchieved, String output, int iterationsDone, int promptTokens,
+                           int outputTokens, String failureReason, List<ExecutionStep> steps) {
+        this(goalAchieved, output, iterationsDone, promptTokens, outputTokens, failureReason, steps, null);
+    }
+
+    /**
+     * This result carrying the cost the strategy itself measured. For a strategy that runs
+     * other agents (a workflow) the tokens alone under-describe the spend — each inner agent
+     * may sit on a different model at a different price — so the executing agent uses this
+     * figure as is instead of re-pricing the token counts with its own rates.
+     */
+    public ExecutionResult withCost(Money cost) {
+        return new ExecutionResult(goalAchieved, output, iterationsDone, promptTokens, outputTokens,
+                failureReason, steps, cost);
     }
 
     /**

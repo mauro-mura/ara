@@ -117,4 +117,24 @@ class RunBudgetTest {
         assertTrue(RunBudget.from(RunContext.empty()).isEmpty());
         assertTrue(RunBudget.from(null).isEmpty());
     }
+
+    @Test
+    void fresh_copiesCapsCurrencyAndParent_butStartsFromAZeroedTally() {
+        HierarchicalBudget parent = HierarchicalBudget.root(
+                Budget.limited(Money.of("100.00", "EUR")), 1_000_000, null, null);
+        RunBudget original = RunBudget.of().currency("EUR").maxTokens(1_000).maxCost(2.00).maxActivations(7)
+                .reportingTo(parent).build();
+        original.charge(Spend.of(Money.of("1.00", "EUR"), 400, 1));
+
+        RunBudget fresh = original.fresh();
+
+        assertEquals(0, fresh.activations());
+        assertEquals(0, fresh.spent().tokens());
+        assertEquals(original.maxTokens(), fresh.maxTokens());
+        assertEquals(original.maxCost(), fresh.maxCost());
+        assertEquals(original.maxActivations(), fresh.maxActivations());
+        assertEquals(original.currency(), fresh.currency());
+        assertTrue(fresh.parent().isPresent(), "the parent is where spend legitimately aggregates across runs");
+        assertEquals(1, original.activations(), "the original keeps its own tally");
+    }
 }

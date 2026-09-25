@@ -201,16 +201,48 @@ key with **no declared reducer fails the run** — the same ambiguity control #1
 to guess at for edges is refused here too. (`single writer per key` is the free case:
 the first write is stored as-is.)
 
-`Reducers` provides the common combinators, and one thing about them matters more than
-anything else in a concurrent fan-in: **first arg = the value already in shared state,
-second = the one just written** — *not* whichever body finished first. The scheduler's
-single-control-thread invariant makes the merge deterministic regardless of how the
-worker executions interleaved. `lastWriteWins()` is the explicit opt-out from ADR's
+`Reducers` provides the common combinators. The merge is **deterministic, whatever order
+the writers finish in**: the scheduler keeps every write with a logical (Lamport) clock
+and folds each key in canonical order — causal order first, and between concurrent
+writers *declaration order*, the same rule D1 applies to a join's inputs. So two parallel
+branches writing `findings` through `concatLists()` always yield `[left, right]` if
+`left` is declared first, and in a loop the later lap's write is always the later one. A
+non-commutative reducer is therefore safe. `lastWriteWins()` is the explicit opt-out from ADR's
 default — "I know two nodes may write this key, and I don't care which wins."
 
 This is the declarative replacement for `ara-graph`'s retired `SharedWorkspace`: the
 same channel `RunState` serves now that agent-shaped nodes exist (ADR-052 D2), and that an
 agent node's task shaper can thread into the agent's `RunContext`.
+
+## Reading shared state: `reads`
+
+`reads(id, key...)` (ADR-052 D3, the read side) lets an **agent-shaped** node see shared
+state: at dispatch its agent gets an *immutable snapshot of exactly the declared keys*
+through `task.runContext().state()`. Three properties are the point:
+
+- **Snapshot, not the live map.** The scheduler copies the keys on its own control thread
+  when it dispatches the node, so a pool worker never reads a map the control thread is
+  writing. Treat the values as immutable — a reducer that mutates its accumulator in place
+  would hand the reader an object still changing under it (`Reducers` never does).
+- **Only what was declared.** Anything else in the shared state is invisible. And the
+  agent cannot write back: its `RunState` is the snapshot read through to a per-occurrence
+  store, so `state().put(...)` stays inside that occurrence. The only way a node
+  contributes to shared state is its declared `writes` — one channel in, one channel out.
+- **Never interpolated into a prompt.** It is `RunState`, so the leak-safety rule of
+  ADR-041 holds: the agent (or its `PromptShaper`) projects a value explicitly.
+
+Ordering is what makes the read deterministic: a forward predecessor's write has landed
+before an AND-join dispatches its successor, so after `left`/`right` both write `findings`
+the reader behind the join sees the *reduced* value, both branches included, in canonical
+order. A writer *concurrent* with the reader — neither precedes the other — could have
+landed or not depending on timing, so control #7 refuses it at build time.
+
+Opaque nodes cannot declare reads (their body has no channel to receive state through);
+`reads` on one throws. A declared key nothing has written yet is absent from the snapshot —
+an empty `Optional`, not an error.
+
+A node with declared reads gets a `RunState` of its own rather than the session's: an agent
+that also needs session state should not declare reads on the same node.
 
 ## Dynamic fan-out: `mapOver`
 
@@ -263,13 +295,16 @@ ungoverned run (only the per-node `maxOccurrences` backstop applies).
   OR-merge fires the node on that incoming token every lap.
 - **Control #10 — ambiguous fan-in.** A node with more than one forward predecessor and
   no declared `composer` is refused. Runs after #9 so the more specific diagnostic wins.
+- **Control #7 — state-key compatibility.** A node that declares `reads(...)` must be
+  preceded by a node that writes each key (a `writes`, or a `mapOver` source that
+  `collectInto`s it), and no writer of that key may be concurrent with it. Always on — `reads` is new, so there is nothing to stay
+  compatible with. See "Reading shared state" above.
 
-The other six are documented deferrals, each with its filed reason in `Workflow.java`: #4
+The other five are documented deferrals, each with its filed reason in `Workflow.java`: #4
 (routing shape / mandatory else-arc — needs an `IntentRouter`-like abstraction), #5 (HITL
 presence) and #6 (tool declaration) now have the node model they need — agent-shaped nodes
 exist and expose `WorkflowNode.agent().agent().config()`, so `tags()`/`enabledTools()` are
-readable — but the checks themselves are ADR-052 **D5**'s, a separate increment; #7
-(state-key compatibility) needs declared reads before D3's channel exists; #8
+readable — but the checks themselves are ADR-052 **D5**'s, a separate increment; #8
 (termination: mandatory `maxVisits` per back edge) would break every existing back edge —
 the per-node `maxOccurrences` backstop covers it at coarser grain.
 

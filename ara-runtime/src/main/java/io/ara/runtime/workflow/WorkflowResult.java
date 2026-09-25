@@ -24,14 +24,38 @@ import java.util.Optional;
  * @param state every {@link WorkflowNode.Write} recorded so far, merged through the
  *              graph's declared reducers (ADR-052 D3) — present even on a failed or
  *              partial run, reflecting whatever was written before the run stopped.
+ * @param governedSpend the final tally of the run's own {@code RunBudget} (ADR-054 D6) —
+ *              agent-shaped nodes' real cost <em>and</em> the declared {@link
+ *              WorkflowNode#cost()} of opaque ones — or {@code null} when the run had no
+ *              governor. Read it through {@link #spend()}.
  */
-public record WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason, Map<String, Object> state) {
+public record WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason,
+                             Map<String, Object> state, Spend governedSpend) {
 
     public WorkflowResult {
         Objects.requireNonNull(journal, "journal must not be null");
         Objects.requireNonNull(state, "state must not be null");
         journal = List.copyOf(journal);
         state = Map.copyOf(state);
+    }
+
+    /** Backwards-compatible constructor: the run reports no governed spend. */
+    public WorkflowResult(List<JournalEntry> journal, boolean ok, String failureReason, Map<String, Object> state) {
+        this(journal, ok, failureReason, state, null);
+    }
+
+    /** This result carrying the final tally of the run's budget. */
+    public WorkflowResult withGovernedSpend(Spend spend) {
+        return new WorkflowResult(journal, ok, failureReason, state, spend);
+    }
+
+    /**
+     * What this run spent: the budget's own tally when the run was governed (it counts every
+     * node, opaque ones included), otherwise the sum of the agent-shaped nodes' responses
+     * ({@link #totalSpend()}), or empty when nothing measurable ran.
+     */
+    public Optional<Spend> spend() {
+        return governedSpend != null ? Optional.of(governedSpend) : totalSpend();
     }
 
     /** Backwards-compatible constructor: no shared state (ADR-052 D3). */

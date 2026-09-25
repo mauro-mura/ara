@@ -679,7 +679,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         AgentResponse response = AgentResponse.success(
                 taskId, agentId(), result.output(),
                 result.iterationsDone(), result.promptTokens(), result.outputTokens(),
-                estimateCost(result.promptTokens(), result.outputTokens(), config), elapsed, result.steps())
+                costOf(result, config), elapsed, result.steps())
                 .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
         // ADR-0086: called before clearWorkingMemory() so an implementation that reacts to
         // a finished turn (e.g. consolidation) still sees this turn's full window.
@@ -707,7 +707,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         // partialOutput, ...), used by PipelineStrategy) has it reach the caller instead
         // of being silently dropped here.
         AgentConfig config = session.wiring().config();
-        Money cost = estimateCost(result.promptTokens(), result.outputTokens(), config);
+        Money cost = costOf(result, config);
         return AgentResponse.failure(taskId, agentId(), reason, elapsed,
                 result.iterationsDone(), result.promptTokens(), result.outputTokens(), result.steps())
                 .withContent(result.output())
@@ -817,6 +817,17 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                 session.memoryManager().workingMemory(),
                 tokens,
                 Instant.now());
+    }
+
+    /**
+     * The cost to report for {@code result}: what the strategy measured itself when it did
+     * (a workflow sums the real cost of the agents it ran, each on its own model and rate),
+     * otherwise the token counts priced with this agent's own rates.
+     */
+    private Money costOf(ExecutionResult result, AgentConfig config) {
+        return result.cost() != null
+                ? result.cost()
+                : estimateCost(result.promptTokens(), result.outputTokens(), config);
     }
 
     /**

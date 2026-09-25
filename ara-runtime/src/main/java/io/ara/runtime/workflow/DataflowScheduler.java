@@ -68,6 +68,27 @@ public final class DataflowScheduler {
     // declared reducers. Mutated only from the thread that called run() — same invariant
     // as every other field above.
     private final Map<String, Object> sharedState = new LinkedHashMap<>();
+    // Canonical merge order for sharedState (ADR-052 D3): every write kept with its logical
+    // clock, and each key re-folded in (clock, declaration order, occurrence, sub) order — so
+    // the merged value never depends on which of two concurrent writers finished first.
+    private final Map<String, List<Contribution>> contributions = new LinkedHashMap<>();
+    // Lamport clock per token and per occurrence ("id#occ"): 1 + the highest clock among the
+    // tokens an occurrence consumed. Causally later ⇒ strictly larger clock.
+    private final Map<WorkflowEdge, Deque<Integer>> tokenClocks = new LinkedHashMap<>();
+    private final Map<String, Integer> clocks = new HashMap<>();
+    private final Map<String, Integer> declarationOrder = new HashMap<>();
+
+    /** One write to a shared-state key, with the coordinates that fix its merge position. */
+    private record Contribution(int clock, int declarationOrder, int occurrence, int sub, Object value) {}
+
+    private static final java.util.Comparator<Contribution> CANONICAL =
+            java.util.Comparator.comparingInt(Contribution::clock)
+                    .thenComparingInt(Contribution::declarationOrder)
+                    .thenComparingInt(Contribution::occurrence)
+                    .thenComparingInt(Contribution::sub);
+
+    /** A graph node's own write sorts after its mapOver children's, as it always has. */
+    private static final int OWN_WRITE = Integer.MAX_VALUE;
 
     /**
      * @param maxOccurrences per-node cap on how many times a node may fire in one run;
@@ -140,6 +161,10 @@ public final class DataflowScheduler {
      */
     public WorkflowResult run(String initialInput, ExecutorService pool, List<JournalEntry> priorJournal) {
         graph.edges().forEach(e -> tokens.put(e, new ArrayDeque<>()));
+        graph.edges().forEach(e -> tokenClocks.put(e, new ArrayDeque<>()));
+        for (int i = 0; i < graph.nodes().size(); i++) {
+            declarationOrder.put(graph.nodes().get(i).id(), i);
+        }
 
         Map<String, String> pendingSeed = new LinkedHashMap<>();
         Optional<WorkflowResult> stoppedDuringReplay = replay(priorJournal, pendingSeed);
@@ -179,7 +204,7 @@ public final class DataflowScheduler {
             journal.add(entry);
             if (entry instanceof JournalEntry.Started started) {
                 occurrence.merge(started.nodeId(), 1, Integer::sum);
-                consumeTokens(started.nodeId());
+                clocks.put(started.nodeId() + "#" + started.occurrence(), consumeTokens(started.nodeId()) + 1);
                 if (!finishedKeys.contains(started.nodeId() + "#" + started.occurrence())) {
                     uncertain.add(started);
                 }
@@ -207,13 +232,14 @@ public final class DataflowScheduler {
                 if (overspent.isPresent()) {
                     yield overspent;
                 }
-                Optional<WorkflowResult> collided = applyWrite(finished.nodeId(), graph.node(finished.nodeId()).write(), completed);
+                Optional<WorkflowResult> collided = applyWrite(finished.nodeId(), finished.occurrence(), OWN_WRITE,
+                        graph.node(finished.nodeId()).write(), completed);
                 if (collided.isPresent()) {
                     yield collided;
                 }
                 for (WorkflowEdge edge : graph.out(finished.nodeId())) {
                     if (completed.selectedTargets().contains(edge.to())) {
-                        tokens.get(edge).addLast(completed.content());
+                        deposit(edge, completed.content(), clockOf(finished.nodeId(), finished.occurrence()));
                     } else {
                         markDead(edge);
                     }
@@ -270,12 +296,15 @@ public final class DataflowScheduler {
                 if (occ >= maxOccurrences) {
                     return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id, sharedState);
                 }
-                consumeTokens(id);
+                clocks.put(id + "#" + occ, consumeTokens(id) + 1);
                 journal.add(new JournalEntry.Started(id, occ, input));
                 running.add(id);
                 inFlight++;
                 String firingInput = input;
-                completion.submit(() -> fire(node, occ, firingInput, pool));
+                // Captured HERE, on the control thread that owns sharedState — never read from
+                // the pool worker, which would race the control thread's own writes.
+                Map<String, Object> readSnapshot = snapshotReads(node);
+                completion.submit(() -> fire(node, occ, firingInput, readSnapshot, pool));
             }
 
             if (inFlight == 0) {
@@ -312,11 +341,13 @@ public final class DataflowScheduler {
             // outcome is processed below — a child is never a real WorkflowGraph node, so
             // it never goes through the normal per-node loop this method's caller runs.
             WorkflowNode.MapOverSpec spec = graph.node(fired.nodeId()).mapOver();
+            int childIndex = 0;
             for (MapOverChildResult child : fired.mapOverChildren()) {
+                int sub = childIndex++;
                 journal.add(new JournalEntry.Started(child.childId(), 0, child.input()));
                 journal.add(new JournalEntry.Finished(child.childId(), 0, child.input(), child.outcome()));
                 if (child.outcome() instanceof NodeOutcome.Completed childCompleted && spec.collectInto() != null) {
-                    Optional<WorkflowResult> collided = applyWrite(child.childId(),
+                    Optional<WorkflowResult> collided = applyWrite(fired.nodeId(), fired.occurrence(), sub,
                             new WorkflowNode.Write(spec.collectInto(), out -> List.of(out)), childCompleted);
                     if (collided.isPresent()) {
                         return collided.get();
@@ -325,7 +356,8 @@ public final class DataflowScheduler {
             }
 
             if (completedForCharge != null) {
-                Optional<WorkflowResult> collided = applyWrite(fired.nodeId(), graph.node(fired.nodeId()).write(), completedForCharge);
+                Optional<WorkflowResult> collided = applyWrite(fired.nodeId(), fired.occurrence(), OWN_WRITE,
+                        graph.node(fired.nodeId()).write(), completedForCharge);
                 if (collided.isPresent()) {
                     return collided.get();
                 }
@@ -339,7 +371,7 @@ public final class DataflowScheduler {
                 case NodeOutcome.Completed completed -> {
                     for (WorkflowEdge edge : graph.out(fired.nodeId())) {
                         if (completed.selectedTargets().contains(edge.to())) {
-                            tokens.get(edge).addLast(completed.content());
+                            deposit(edge, completed.content(), clockOf(fired.nodeId(), fired.occurrence()));
                         } else {
                             markDead(edge);
                         }
@@ -392,12 +424,12 @@ public final class DataflowScheduler {
     /** One dynamic fan-out activation's outcome (ADR-052 D4) — never a real {@link WorkflowGraph} node. */
     private record MapOverChildResult(String childId, String input, NodeOutcome outcome) {}
 
-    private Fired fire(WorkflowNode node, int occurrence, String input, ExecutorService pool) {
+    private Fired fire(WorkflowNode node, int occurrence, String input, Map<String, Object> readState, ExecutorService pool) {
         try {
             // node.run(input) is the single execution path (ADR-052 D2): for an opaque node
             // it is body(), for an agent-shaped one it executes the agent and hands back its
             // AgentResponse, so the scheduler never branches on the node's kind (FF-6).
-            NodeOutput out = node.run(input);
+            NodeOutput out = node.run(input, readState);
             String output = out.content();
 
             List<MapOverChildResult> children = List.of();
@@ -543,33 +575,77 @@ public final class DataflowScheduler {
     }
 
     /**
-     * Applies {@code write} (ADR-052 D3) to {@link #sharedState}: a first write to a key
-     * is stored as-is; a second one is merged through {@link WorkflowGraph#reducers()}'s
-     * entry for that key. A key written twice with no declared reducer is the same
-     * ambiguity {@code Workflow.Builder}'s D5 control #10 already refuses to guess at for
-     * edges — refused here too, rather than silently picking last-write-wins or losing
-     * one write. {@code write} is nullable so a caller with nothing to apply (the common
-     * case) doesn't need its own null check.
+     * ADR-052 D3, read side: an immutable copy of just the keys {@code node} declared in
+     * {@link WorkflowNode#reads()}, as they stand when the node is dispatched. A declared key
+     * nothing has written yet is simply absent — the agent sees an empty {@code Optional}, not
+     * an error (whether some node can ever write it is a build-time question, control #7).
+     *
+     * <p>Every write a forward predecessor made has already been applied by now: writes land on
+     * this same control thread when a node's {@code Finished} entry is processed, and an AND-join
+     * only dispatches once all its forward predecessors have finished. A concurrent,
+     * <em>non-ancestor</em> writer may or may not have landed — which is why a node should read
+     * keys its ancestors write, the case control #7 checks for.
      */
-    private Optional<WorkflowResult> applyWrite(String nodeId, WorkflowNode.Write write, NodeOutcome.Completed completed) {
+    private Map<String, Object> snapshotReads(WorkflowNode node) {
+        if (node.reads().isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        for (String key : node.reads()) {
+            if (sharedState.containsKey(key)) {
+                snapshot.put(key, sharedState.get(key));
+            }
+        }
+        return java.util.Collections.unmodifiableMap(snapshot);
+    }
+
+    /**
+     * Applies {@code write} (ADR-052 D3) to {@link #sharedState}. A key written once holds
+     * that value; a key written again is folded through {@link WorkflowGraph#reducers()}'s
+     * entry for it, over <em>every</em> write so far in canonical order ({@link #CANONICAL}):
+     * causal order first, and — between writers that are concurrent — declaration order,
+     * never completion order. The same rule D1 applies to a join's inputs, applied to state,
+     * so a non-commutative reducer ({@code concatLists}) gives the same result on every run.
+     *
+     * <p>A key written twice with no declared reducer is refused rather than guessed at —
+     * the same ambiguity control #10 refuses for edges. {@code write} is nullable so a
+     * caller with nothing to apply needs no null check of its own.
+     *
+     * @param nodeId     the graph node the write belongs to (a mapOver child's parent)
+     * @param sub        a mapOver child's index, or {@link #OWN_WRITE} for the node's own write
+     */
+    private Optional<WorkflowResult> applyWrite(String nodeId, int occurrence, int sub,
+                                                 WorkflowNode.Write write, NodeOutcome.Completed completed) {
         if (write == null) {
             return Optional.empty();
         }
-        Object value = write.extractor().apply(completed.content());
         String key = write.key();
-        if (!sharedState.containsKey(key)) {
-            sharedState.put(key, value);
-            return Optional.empty();
-        }
+        List<Contribution> written = contributions.computeIfAbsent(key, k -> new ArrayList<>());
         BinaryOperator<Object> reducer = graph.reducers().get(key);
-        if (reducer == null) {
+        if (!written.isEmpty() && reducer == null) {
             return Optional.of(new WorkflowResult(journal, false,
                     "node " + nodeId + " wrote key '" + key + "' but it already had a value and no reducer is "
                             + "declared for it (ADR-052 D3) — call reduce(\"" + key + "\", ...) to say how they combine",
                     sharedState));
         }
-        sharedState.put(key, reducer.apply(sharedState.get(key), value));
+        written.add(new Contribution(clockOf(nodeId, occurrence), declarationOrder.getOrDefault(nodeId, Integer.MAX_VALUE),
+                occurrence, sub, write.extractor().apply(completed.content())));
+        written.sort(CANONICAL);
+        Object merged = written.getFirst().value();
+        for (int i = 1; i < written.size(); i++) {
+            merged = reducer.apply(merged, written.get(i).value());
+        }
+        sharedState.put(key, merged);
         return Optional.empty();
+    }
+
+    private int clockOf(String nodeId, int occurrence) {
+        return clocks.getOrDefault(nodeId + "#" + occurrence, 1);
+    }
+
+    private void deposit(WorkflowEdge edge, String content, int clock) {
+        tokens.get(edge).addLast(content);
+        tokenClocks.get(edge).addLast(clock);
     }
 
     /**
@@ -647,19 +723,25 @@ public final class DataflowScheduler {
         return composed;
     }
 
-    private void consumeTokens(String id) {
+    /** Consumes the tokens that enabled {@code id}; returns the highest clock among them (0 if none). */
+    private int consumeTokens(String id) {
         List<WorkflowEdge> in = graph.in(id);
         for (WorkflowEdge back : in) {
             if (back.back() && !tokens.get(back).isEmpty()) {
                 tokens.get(back).pollFirst();
-                return;
+                Integer clock = tokenClocks.get(back).pollFirst();
+                return clock == null ? 0 : clock;
             }
         }
+        int max = 0;
         for (WorkflowEdge edge : in) {
             if (!edge.back() && !tokens.get(edge).isEmpty()) {
                 tokens.get(edge).pollFirst();
+                Integer clock = tokenClocks.get(edge).pollFirst();
+                max = Math.max(max, clock == null ? 0 : clock);
             }
         }
+        return max;
     }
 
     /**

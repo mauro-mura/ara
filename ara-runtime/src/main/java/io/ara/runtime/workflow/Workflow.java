@@ -74,7 +74,8 @@ public final class Workflow {
 
     /** Runs the workflow from its entry node(s), with no wall-clock bound. */
     public WorkflowResult run(String input, ExecutorService pool) {
-        return new DataflowScheduler(graph, maxOccurrences, budget).run(input, pool);
+        RunBudget run = freshBudget();
+        return withSpend(new DataflowScheduler(graph, maxOccurrences, run).run(input, pool), run);
     }
 
     /**
@@ -83,17 +84,36 @@ public final class Workflow {
      * what happens past it. {@code null} is the same as the unbounded overload above.
      */
     public WorkflowResult run(String input, ExecutorService pool, Instant deadline) {
-        return new DataflowScheduler(graph, maxOccurrences, budget, deadline).run(input, pool);
+        RunBudget run = freshBudget();
+        return withSpend(new DataflowScheduler(graph, maxOccurrences, run, deadline).run(input, pool), run);
     }
 
     /** Resumes the workflow from a prior journal (ADR-052 D1) — see {@link DataflowScheduler#run(String, ExecutorService, List)}. */
     public WorkflowResult run(String input, ExecutorService pool, List<JournalEntry> priorJournal) {
-        return new DataflowScheduler(graph, maxOccurrences, budget).run(input, pool, priorJournal);
+        RunBudget run = freshBudget();
+        return withSpend(new DataflowScheduler(graph, maxOccurrences, run).run(input, pool, priorJournal), run);
     }
 
     /** Like {@link #run(String, ExecutorService, List)}, bounded by {@code deadline} — see {@link #run(String, ExecutorService, Instant)}. */
     public WorkflowResult run(String input, ExecutorService pool, List<JournalEntry> priorJournal, Instant deadline) {
-        return new DataflowScheduler(graph, maxOccurrences, budget, deadline).run(input, pool, priorJournal);
+        RunBudget run = freshBudget();
+        return withSpend(new DataflowScheduler(graph, maxOccurrences, run, deadline).run(input, pool, priorJournal), run);
+    }
+
+    /**
+     * The budget declared on the builder is a <em>template</em>: every run gets its own copy
+     * with a zeroed tally, so a reusable {@code Workflow} — above all one hosted as an agent
+     * that serves every call, possibly concurrently — never starts a run with another run's
+     * spend already counted. Spend that should aggregate across runs belongs on a {@link
+     * io.ara.core.budget.HierarchicalBudget} parent ({@code RunBudget.Builder#reportingTo}),
+     * which {@link RunBudget#fresh()} keeps shared.
+     */
+    private RunBudget freshBudget() {
+        return budget == null ? null : budget.fresh();
+    }
+
+    private static WorkflowResult withSpend(WorkflowResult result, RunBudget run) {
+        return run == null ? result : result.withGovernedSpend(run.spent());
     }
 
     public WorkflowGraph graph() {
@@ -104,7 +124,7 @@ public final class Workflow {
         return maxOccurrences;
     }
 
-    /** The run governor, if one was declared. */
+    /** The run governor declared on the builder — the template each run copies, never a live tally. */
     public Optional<RunBudget> budget() {
         return Optional.ofNullable(budget);
     }
@@ -185,6 +205,39 @@ public final class Workflow {
          */
         public Builder writes(String id, String key, Function<String, Object> extractor) {
             return replace(id, requireNode(id).withWrite(new WorkflowNode.Write(key, extractor)));
+        }
+
+        /**
+         * Declares the shared-state keys an already-added <b>agent-shaped</b> node reads
+         * (ADR-052 D3, the read side of {@link #writes}). At dispatch the node's agent gets an
+         * immutable snapshot of exactly these keys through {@code task.runContext().state()};
+         * anything else in the shared state is invisible to it. The value is never
+         * interpolated into a prompt — the agent (or its {@code PromptShaper}) projects it
+         * explicitly, the leak-safety rule {@code RunState} already sets.
+         *
+         * <p>Checked in {@link #build}: every key must be written by some node that
+         * <em>precedes</em> this one (control #7), so a typo in a key fails the build instead
+         * of quietly handing the agent an empty {@code Optional}. Declare {@link #reduce} for a
+         * key several nodes write, and the reader after their join sees the reduced value.
+         *
+         * @throws IllegalArgumentException if {@code id} was never added, is not agent-shaped
+         *                                  (an opaque body has no channel to receive state),
+         *                                  or a key is null or blank
+         */
+        public Builder reads(String id, String... keys) {
+            WorkflowNode node = requireNode(id);
+            if (node.agent() == null) {
+                throw new IllegalArgumentException("node '" + id + "' is not agent-shaped — only a node added with "
+                        + "agent(...) can declare reads(...): an opaque body has no channel to receive shared state");
+            }
+            Set<String> declared = new LinkedHashSet<>(node.reads());
+            for (String key : keys) {
+                if (key == null || key.isBlank()) {
+                    throw new IllegalArgumentException("reads('" + id + "', ...) has a null or blank key");
+                }
+                declared.add(key);
+            }
+            return replace(id, node.withReads(declared));
         }
 
         /**
@@ -332,8 +385,8 @@ public final class Workflow {
 
         // ── ADR-052 D5: structural build-time checks ────────────────────────────
         //
-        // Four of the ten controls the ADR names are checkable on today's facade — pure
-        // graph shape, nothing more. The other six need a node model this increment
+        // Five of the ten controls the ADR names are checkable on today's facade — graph
+        // shape, plus declared state keys (#7). The rest need what this increment
         // deliberately doesn't build: #4 (router shape / a mandatory else-arc) presumes an
         // IntentRouter-like abstraction at this layer, which doesn't exist here (a routing
         // node's selector is an arbitrary function — AgentPipeline's own compiler enforces
@@ -344,8 +397,7 @@ public final class Workflow {
         // binding.agent().config().tags()/enabledTools(). They are not written yet because
         // they are ADR-052 D5's, not D2's — the node model was the blocker, and it is
         // removed; the checks themselves remain a separate increment; #7 (state-key
-        // compatibility) needs declared reads/writes per node, which don't exist before
-        // ADR-052 D3 gives nodes a RunState channel to declare them against; #8
+        // compatibility) is checked below now that nodes can declare reads (ADR-052 D3); #8
         // (termination: a back edge needs a declared maxVisits) would require adding a
         // required field to WorkflowEdge, breaking every back edge already built
         // (including AgentPipeline's own compiler) for a guarantee the per-node
@@ -360,6 +412,79 @@ public final class Workflow {
             // more specific, actionable diagnostic instead of the generic fan-in one.
             checkJoinInCycle(graph);
             checkAmbiguousFanIn(graph);
+            checkStateKeyCompatibility(graph);
+        }
+
+        /**
+         * Control #7 — a node that {@link #reads} a shared-state key must be preceded by some
+         * node that writes it. Nothing seeds the shared state from outside a run, so a key with
+         * no writer upstream is empty every time: a typo, or a writer wired downstream of its
+         * reader, that would otherwise surface only as an agent quietly working without data.
+         *
+         * <p>It also refuses a writer <em>concurrent</em> with the reader — neither precedes the
+         * other: whether its write has landed when the reader starts would depend on timing.
+         * Writers that are ancestors are fine however many there are and however they
+         * interleave: the scheduler merges them in a canonical order (see {@code
+         * DataflowScheduler#applyWrite}), and all of them have landed before the reader runs.
+         *
+         * <p>A writer is a node with a {@link WorkflowNode#write()} on that key, or a {@code
+         * mapOver} source that {@code collectInto}s it (its children write as part of its
+         * activation). "Precedes" means a path of at least one edge — so a node reading a key it
+         * writes itself counts only when a cycle brings it back to itself, the loop-refinement
+         * case, and not merely because it wrote the key on this very occurrence.
+         */
+        private void checkStateKeyCompatibility(WorkflowGraph graph) {
+            for (WorkflowNode reader : graph.nodes()) {
+                for (String key : new TreeSet<>(reader.reads())) {
+                    List<String> writers = graph.nodes().stream()
+                            .filter(n -> writesKey(n, key))
+                            .map(WorkflowNode::id)
+                            .toList();
+                    if (writers.stream().noneMatch(w -> precedes(graph, w, reader.id()))) {
+                        throw new IllegalStateException(
+                                "node '" + reader.id() + "' reads state key '" + key + "' but no node that writes it "
+                                        + "precedes it (ADR-052 D5 control #7) — "
+                                        + (writers.isEmpty()
+                                                ? "nothing writes '" + key + "' at all; check the key name or add writes(...)"
+                                                : "it is written only by " + writers
+                                                        + ", none of which has a path to '" + reader.id() + "'"));
+                    }
+                    for (String writer : writers) {
+                        if (!writer.equals(reader.id())
+                                && !precedes(graph, writer, reader.id())
+                                && !precedes(graph, reader.id(), writer)) {
+                            throw new IllegalStateException(
+                                    "node '" + reader.id() + "' reads state key '" + key + "', which '" + writer
+                                            + "' also writes on a branch concurrent with it (ADR-052 D5 control #7) — "
+                                            + "whether that write has landed when '" + reader.id() + "' starts depends on "
+                                            + "timing; connect '" + writer + "' upstream of '" + reader.id()
+                                            + "' or give it a key of its own");
+                        }
+                    }
+                }
+            }
+        }
+
+        private static boolean writesKey(WorkflowNode node, String key) {
+            return (node.write() != null && node.write().key().equals(key))
+                    || (node.mapOver() != null && key.equals(node.mapOver().collectInto()));
+        }
+
+        /** Whether a path of at least one edge leads from {@code from} to {@code to}. */
+        private static boolean precedes(WorkflowGraph graph, String from, String to) {
+            Set<String> visited = new HashSet<>();
+            Deque<String> stack = new ArrayDeque<>();
+            graph.out(from).forEach(e -> stack.push(e.to()));
+            while (!stack.isEmpty()) {
+                String id = stack.pop();
+                if (id.equals(to)) {
+                    return true;
+                }
+                if (visited.add(id)) {
+                    graph.out(id).forEach(e -> stack.push(e.to()));
+                }
+            }
+            return false;
         }
 
         /**

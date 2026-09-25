@@ -2,9 +2,12 @@ package io.ara.runtime.workflow;
 
 import io.ara.core.agent.AgentChain;
 import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.RunState;
 import io.ara.core.budget.Spend;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
@@ -63,6 +66,14 @@ import java.util.function.Function;
  *                           {@link #run(String)} executes it and the resulting
  *                           {@link AgentResponse} — not {@link #body()} — is the node's
  *                           outcome, so tokens/cost are captured rather than lost.
+ * @param reads              the shared-state keys this node's agent may read (ADR-052 D3,
+ *                           the read side of {@link Write}); empty means "reads nothing" —
+ *                           most nodes. Only meaningful for an agent-shaped node: an opaque
+ *                           {@link #body()} has no channel to receive state through, so
+ *                           {@code Workflow.Builder#reads} refuses it. The agent sees an
+ *                           <em>immutable snapshot</em> of just these keys, taken when the
+ *                           node is dispatched, through {@code RunContext#state()} — never
+ *                           the live shared map, and never auto-interpolated into a prompt.
  */
 public record WorkflowNode(
         String id,
@@ -73,13 +84,22 @@ public record WorkflowNode(
         Write write,
         MapOverSpec mapOver,
         Function<List<String>, String> composer,
-        AgentBinding agent
+        AgentBinding agent,
+        Set<String> reads
 ) {
 
     public WorkflowNode {
         Objects.requireNonNull(id, "id must not be null");
         Objects.requireNonNull(body, "body must not be null");
         Objects.requireNonNull(onUncertainResume, "onUncertainResume must not be null");
+        reads = reads == null ? Set.of() : Set.copyOf(reads);
+    }
+
+    /** Backwards-compatible constructor: a node that declares no {@link #reads}. */
+    public WorkflowNode(String id, Function<String, String> body, Function<String, Set<String>> selector,
+                        UncertainResumePolicy onUncertainResume, Function<String, Spend> cost, Write write,
+                        MapOverSpec mapOver, Function<List<String>, String> composer, AgentBinding agent) {
+        this(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent, Set.of());
     }
 
     /** Backwards-compatible constructor: a node that is not agent-shaped (no {@link AgentBinding}). */
@@ -139,25 +159,25 @@ public record WorkflowNode(
 
     /** Returns a copy of this node with its {@link #onUncertainResume} policy replaced. */
     public WorkflowNode withOnUncertainResume(UncertainResumePolicy policy) {
-        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer, agent);
+        return new WorkflowNode(id, body, selector, policy, cost, write, mapOver, composer, agent, reads);
     }
 
     /** Returns a copy of this node with a {@link #cost} function that maps its output to the {@link Spend} it drew. */
     public WorkflowNode withCost(Function<String, Spend> cost) {
         return new WorkflowNode(id, body, selector, onUncertainResume,
-                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer, agent);
+                Objects.requireNonNull(cost, "cost must not be null"), write, mapOver, composer, agent, reads);
     }
 
     /** Returns a copy of this node with a {@link #write} that maps its output to a shared-state entry. */
     public WorkflowNode withWrite(Write write) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost,
-                Objects.requireNonNull(write, "write must not be null"), mapOver, composer, agent);
+                Objects.requireNonNull(write, "write must not be null"), mapOver, composer, agent, reads);
     }
 
     /** Returns a copy of this node with a {@link #mapOver} spec (ADR-052 D4). */
     public WorkflowNode withMapOver(MapOverSpec mapOver) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write,
-                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer, agent);
+                Objects.requireNonNull(mapOver, "mapOver must not be null"), composer, agent, reads);
     }
 
     /**
@@ -166,7 +186,22 @@ public record WorkflowNode(
      */
     public WorkflowNode withComposer(Function<List<String>, String> composer) {
         return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver,
-                Objects.requireNonNull(composer, "composer must not be null"), agent);
+                Objects.requireNonNull(composer, "composer must not be null"), agent, reads);
+    }
+
+    /**
+     * Returns a copy of this node that may read {@code keys} from the run's shared state
+     * (ADR-052 D3). Agent-shaped nodes only — see {@link #reads()}.
+     *
+     * @throws IllegalStateException if this node is not agent-shaped
+     */
+    public WorkflowNode withReads(Set<String> keys) {
+        if (agent == null) {
+            throw new IllegalStateException("node '" + id + "' is not agent-shaped: an opaque body has no channel "
+                    + "to receive shared state through, so it cannot declare reads");
+        }
+        return new WorkflowNode(id, body, selector, onUncertainResume, cost, write, mapOver, composer, agent,
+                Objects.requireNonNull(keys, "keys must not be null"));
     }
 
     /**
@@ -181,16 +216,49 @@ public record WorkflowNode(
      * a failed step, rather than a node that "completes" with a failure payload.
      */
     NodeOutput run(String input) {
-        return agent == null ? NodeOutput.of(body.apply(input)) : executeAgent(id, agent, input);
+        return run(input, Map.of());
+    }
+
+    /**
+     * Like {@link #run(String)}, handing an agent-shaped node the snapshot of the shared
+     * state it declared in {@link #reads()} (ADR-052 D3). {@code readState} is what the
+     * scheduler captured on its own thread when it dispatched this occurrence — the node
+     * never sees the live map. An opaque node ignores it: it can't declare reads.
+     */
+    NodeOutput run(String input, Map<String, Object> readState) {
+        return agent == null ? NodeOutput.of(body.apply(input)) : executeAgent(id, agent, input, readState);
     }
 
     private static NodeOutput executeAgent(String id, AgentBinding binding, String input) {
-        AgentResponse response = binding.agent().execute(binding.taskFor(input));
+        return executeAgent(id, binding, input, Map.of());
+    }
+
+    private static NodeOutput executeAgent(String id, AgentBinding binding, String input, Map<String, Object> readState) {
+        AgentTask task = binding.taskFor(input);
+        if (!readState.isEmpty()) {
+            task = task.withRunContext(task.runContext().withState(readOnlyView(task.runContext().state(), readState)));
+        }
+        AgentResponse response = binding.agent().execute(task);
         if (!response.isSuccess()) {
             throw new IllegalStateException("node '" + id + "' agent '" + binding.agent().agentId().value()
                     + "' failed: " + response.failureReason());
         }
         return new NodeOutput(response.content(), response);
+    }
+
+    /**
+     * The state the agent sees: the declared-read snapshot, read through when a key is
+     * absent from the agent's own store, with writes going only to that own store — so the
+     * snapshot (and the scheduler's shared map behind it) can never be mutated from inside
+     * a node. A task that carried no state of its own ({@code RunState.noop()}) gets a
+     * fresh per-occurrence store, so the agent's scratch writes are not silently dropped
+     * — they simply never leave this occurrence; the only way a node contributes to shared
+     * state is its declared {@link Write}.
+     */
+    private static RunState readOnlyView(RunState own, Map<String, Object> readState) {
+        RunState base = RunState.inMemory();
+        readState.forEach(base::put);
+        return RunState.overlay(base, own == RunState.noop() ? RunState.inMemory() : own);
     }
 
     /**

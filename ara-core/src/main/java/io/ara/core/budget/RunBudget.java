@@ -67,6 +67,27 @@ public final class RunBudget {
         return new Builder();
     }
 
+    /**
+     * A new governor with this one's caps, currency and parent, and a <em>zeroed</em> tally.
+     *
+     * <p>A {@code RunBudget} is one run's running total, so something that runs many times —
+     * a reusable workflow, above all one hosted as an agent that serves every call — must not
+     * hand the same instance to each run: the second would start with the first's spend and the
+     * caps would silently become lifetime limits. Such a caller keeps this instance as the
+     * <em>template</em> and runs each execution on {@code template.fresh()}. The parent, if any,
+     * is deliberately shared: it is where spend legitimately aggregates across runs.
+     */
+    public RunBudget fresh() {
+        Builder b = of().currency(currency);
+        maxTokens.ifPresent(b::maxTokens);
+        maxCost.ifPresent(b::maxCost);
+        maxActivations.ifPresent(b::maxActivations);
+        if (parent != null) {
+            b.reportingTo(parent);
+        }
+        return b.build();
+    }
+
     /** A governor with no caps and no parent — every {@link #charge} is {@link Charge.Ok}. */
     public static RunBudget unlimited(String currency) {
         return of().currency(currency).build();

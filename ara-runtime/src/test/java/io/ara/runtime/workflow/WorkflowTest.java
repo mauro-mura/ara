@@ -104,16 +104,43 @@ class WorkflowTest {
     }
 
     @Test
-    void aBudgetedWorkflowIsEffectivelySingleRun_theGovernorAccumulatesAcrossRuns() {
-        RunBudget shared = RunBudget.of().maxActivations(3).build();
+    void aBudgetedWorkflowIsReusable_eachRunStartsFromAZeroedTally() {
         Workflow wf = Workflow.of()
                 .node("a", in -> "A").node("b", in -> "B").edge("a", "b")
-                .budget(shared)
+                .budget(RunBudget.of().maxActivations(3).build())
                 .build();
 
-        assertTrue(wf.run("one", pool).ok(), "first run: 2 activations, within cap");
-        WorkflowResult second = wf.run("two", pool);
-        assertFalse(second.ok(), "second run pushes the shared governor past 3 — rebuild for a fresh one");
-        assertTrue(second.failureReason().contains("ACTIVATIONS"), second.failureReason());
+        for (int run = 1; run <= 5; run++) {
+            WorkflowResult result = wf.run("run " + run, pool);
+            assertTrue(result.ok(), "run " + run + " has its own tally: 2 activations, within a cap of 3 — "
+                    + result.failureReason());
+        }
     }
+
+    @Test
+    void theCapStillBindsWithinASingleRun_ofAReusedBudgetedWorkflow() {
+        Workflow wf = Workflow.of()
+                .node("a", in -> "A").node("b", in -> "B").node("c", in -> "C")
+                .edge("a", "b").edge("b", "c")
+                .budget(RunBudget.of().maxActivations(2).build())
+                .build();
+
+        assertFalse(wf.run("one", pool).ok());
+        WorkflowResult second = wf.run("two", pool);
+        assertFalse(second.ok());
+        assertTrue(second.failureReason().contains("node c#0"),
+                "fails at the same node every time, not earlier as spend piles up: " + second.failureReason());
+    }
+
+    @Test
+    void theBuilderBudgetIsATemplate_itsOwnTallyIsNeverTouched() {
+        RunBudget template = RunBudget.of().maxActivations(10).build();
+        Workflow wf = Workflow.of().node("a", in -> "A").budget(template).build();
+
+        wf.run("x", pool);
+
+        assertEquals(0, template.activations());
+        assertEquals(0, template.spent().tokens());
+    }
+
 }

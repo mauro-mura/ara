@@ -111,9 +111,12 @@ final class WorkflowStrategy implements ExecutionStrategy {
             }
         }
 
-        return result.ok()
+        ExecutionResult executed = result.ok()
                 ? ExecutionResult.success(output, iteration, result.totalPromptTokens(), result.totalOutputTokens(), steps)
                 : ExecutionResult.failure(result.failureReason(), output, iteration,
                         result.totalPromptTokens(), result.totalOutputTokens(), steps);
+        // The real cost of the nodes that ran — not the token counts re-priced with this
+        // agent's own rates, which say nothing about the models the inner agents used.
+        return result.spend().map(spend -> executed.withCost(spend.money())).orElse(executed);
     }
 }
