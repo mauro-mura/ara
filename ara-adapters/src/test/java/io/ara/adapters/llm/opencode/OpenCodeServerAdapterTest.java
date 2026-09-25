@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * endpoints the adapter uses. Launch mode is exercised with a shell script standing in for the
  * {@code opencode} binary.
  */
-class OpenCodeServerAdapterTest {
+class   OpenCodeServerAdapterTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final LlmCallContext CTX = new LlmCallContext.Builder().agentType("test").build();
