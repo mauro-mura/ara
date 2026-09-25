@@ -237,13 +237,7 @@ public final class DataflowScheduler {
                 if (collided.isPresent()) {
                     yield collided;
                 }
-                for (WorkflowEdge edge : graph.out(finished.nodeId())) {
-                    if (completed.selectedTargets().contains(edge.to())) {
-                        deposit(edge, completed.content(), clockOf(finished.nodeId(), finished.occurrence()));
-                    } else {
-                        markDead(edge);
-                    }
-                }
+                propagateCompletion(finished.nodeId(), finished.occurrence(), completed);
                 yield Optional.empty();
             }
             case NodeOutcome.Failed failed -> Optional.of(new WorkflowResult(journal, false,
@@ -368,15 +362,8 @@ public final class DataflowScheduler {
             // instead tolerate partial failure is ADR-052 D4's job (AgentChain.FailurePolicy,
             // reused rather than reinvented) — D1 only has to behave safely, not flexibly.
             switch (fired.outcome()) {
-                case NodeOutcome.Completed completed -> {
-                    for (WorkflowEdge edge : graph.out(fired.nodeId())) {
-                        if (completed.selectedTargets().contains(edge.to())) {
-                            deposit(edge, completed.content(), clockOf(fired.nodeId(), fired.occurrence()));
-                        } else {
-                            markDead(edge);
-                        }
-                    }
-                }
+                case NodeOutcome.Completed completed ->
+                        propagateCompletion(fired.nodeId(), fired.occurrence(), completed);
                 case NodeOutcome.Failed failed -> {
                     return new WorkflowResult(journal, false,
                             "node " + fired.nodeId() + "#" + fired.occurrence() + " failed: " + failed.reason(), sharedState);
@@ -769,6 +756,36 @@ public final class DataflowScheduler {
         }
         if (anyForward && allForwardDead) {
             graph.out(target).forEach(this::markDead);
+        }
+    }
+
+    /**
+     * Fans a completed node's outcome out across its outgoing edges: every edge the node
+     * selected receives the content as a token stamped with this occurrence's clock, and
+     * every edge it did not select is marked dead (which {@link #markDead} then propagates
+     * forward). A node that selects nothing therefore kills its whole fan-out, which is
+     * what makes a conditional branch a real branch rather than a pass-through.
+     *
+     * <p>Called from two places that must agree: the live path in {@link #drive} and the
+     * resume path in {@link #applyReplayedOutcome}. They are the same computation on the
+     * same inputs — replaying a journalled completion has to leave exactly the edge state
+     * the original run left, or a resumed workflow silently diverges from the execution it
+     * is continuing, and the divergence only shows up as a wrong answer much later. One
+     * method rather than two copies is what keeps that true as the rule evolves; it is not
+     * a DRY preference, it is the invariant.
+     *
+     * <p>The clock is read once for all outgoing edges instead of per edge: it's a pure
+     * lookup keyed by this occurrence, and neither {@link #deposit} nor {@link #markDead}
+     * writes it, so hoisting it changes nothing but the number of map lookups.
+     */
+    private void propagateCompletion(String nodeId, int occurrence, NodeOutcome.Completed completed) {
+        int clock = clockOf(nodeId, occurrence);
+        for (WorkflowEdge edge : graph.out(nodeId)) {
+            if (completed.selectedTargets().contains(edge.to())) {
+                deposit(edge, completed.content(), clock);
+            } else {
+                markDead(edge);
+            }
         }
     }
 }

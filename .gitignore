@@ -3,3 +3,6 @@
 /.idea/
 /.DS_Store
 /graphify-out/
+/ara-adapters/src/main/java/io/ara/adapters/ui/game/
+/logs/
+/system/

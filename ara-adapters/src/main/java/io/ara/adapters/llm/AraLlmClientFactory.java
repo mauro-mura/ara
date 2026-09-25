@@ -2,6 +2,7 @@ package io.ara.adapters.llm;
 
 import io.ara.adapters.llm.anthropic.AnthropicLlmClient;
 import io.ara.adapters.llm.chatjimmy.ChatJimmyLlmClient;
+import io.ara.adapters.llm.opencode.OpenCodeServerAdapter;
 import io.ara.adapters.llm.mistral.MistralLlmClient;
 import io.ara.adapters.llm.ollama.OllamaLlmClient;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
@@ -111,5 +112,18 @@ public final class AraLlmClientFactory {
      */
     public static ChatJimmyLlmClient.Builder chatJimmy() {
         return ChatJimmyLlmClient.builder();
+    }
+
+    /**
+     * Returns a builder for an {@link LlmClient} backed by an
+     * <a href="https://opencode.ai">opencode</a> server, launched on demand on this machine or
+     * reached by URL at any reachable host. Not LangChain4j-backed — see
+     * {@link OpenCodeServerAdapter} for the mapping and its limits, and in particular for what
+     * {@code zenFreeTierTools} grants on whichever host the server sits on.
+     *
+     * @return {@link OpenCodeServerAdapter.Builder}
+     */
+    public static OpenCodeServerAdapter.Builder openCode() {
+        return OpenCodeServerAdapter.builder();
     }
 }

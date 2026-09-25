@@ -80,13 +80,7 @@ class DataflowSchedulerTest {
 
     @Test
     void deadBranch_joinDoesNotWaitForIt_andDeadnessPropagatesTransitively() {
-        WorkflowGraph conditional = new WorkflowGraph(
-                List.of(WorkflowNode.routing("split", in -> "S", out -> Set.of("a")),
-                        echo("a", "A"), echo("b", "B"), echo("c", "C"), join("join")),
-                List.of(WorkflowEdge.of("split", "a"), WorkflowEdge.of("split", "b"),
-                        WorkflowEdge.of("a", "join"), WorkflowEdge.of("b", "c"), WorkflowEdge.of("c", "join")));
-
-        WorkflowResult result = run(conditional);
+        WorkflowResult result = run(conditionalBranchGraph(null));
 
         assertEquals(1, result.firedTimes("join"), "join should not wait on the dead branch: " + result.order());
         assertEquals("A", result.firstOf("join").input(), "join should see only the live branch");
@@ -163,6 +157,33 @@ class DataflowSchedulerTest {
     }
 
     @Test
+    void resume_replaysAConditionalCompletion_withTheSameDeadnessAsTheLiveRun() {
+        WorkflowResult full = run(conditionalBranchGraph(null));
+        // Crash the instant `split` finishes, so its Completed entry — the one carrying the
+        // selection that kills b and c — is the last thing the resume has to replay. The
+        // other resume test truncates after a plain `echo` node, which selects every target
+        // and therefore never reaches the markDead branch at all: without this test nothing
+        // pins the resume path to the live path for an unselected edge.
+        List<JournalEntry> truncated = truncateAfterFinished(full, "split");
+
+        Map<String, AtomicInteger> resumeCalls = new ConcurrentHashMap<>();
+        WorkflowResult resumed = new DataflowScheduler(conditionalBranchGraph(resumeCalls), 10)
+                .run("start", pool, truncated);
+
+        assertTrue(resumed.ok(), "resume should complete the run: " + resumed.failureReason());
+        assertEquals(0, resumeCalls.getOrDefault("split", new AtomicInteger()).get(),
+                "split already completed and must not run again on resume: " + resumeCalls);
+        assertEquals(0, resumed.firedTimes("b"),
+                "resume must not revive the branch split did not select: " + resumed.order());
+        assertEquals(0, resumed.firedTimes("c"),
+                "nor anything reachable only through it: " + resumed.order());
+        assertEquals(1, resumed.firedTimes("join"),
+                "a revived edge would leave the join waiting on a branch that never runs: " + resumed.order());
+        assertEquals(full.firstOf("join").input(), resumed.firstOf("join").input(),
+                "replaying a conditional completion must leave the same edge state as the live run");
+    }
+
+    @Test
     void uncertainResume_retryPolicy_reexecutesTheNodeThatWasInFlightAtCrashTime() {
         WorkflowResult full = run(linearGraph(UncertainResumePolicy.RETRY, null));
         List<JournalEntry> truncated = truncateAfterStarted(full, "slow");
@@ -234,6 +255,21 @@ class DataflowSchedulerTest {
 
     private WorkflowResult run(WorkflowGraph graph) {
         return new DataflowScheduler(graph, 10).run("start", pool);
+    }
+
+    /** {@code split} selects only {@code "a"}, so {@code split -> b -> c} dies when {@code split} finishes. */
+    private WorkflowGraph conditionalBranchGraph(Map<String, AtomicInteger> callCounts) {
+        WorkflowNode split = WorkflowNode.routing("split", in -> {
+            if (callCounts != null) {
+                callCounts.computeIfAbsent("split", k -> new AtomicInteger()).incrementAndGet();
+            }
+            return "S";
+        }, out -> Set.of("a"));
+        return new WorkflowGraph(
+                List.of(split, echo("a", "A", callCounts), echo("b", "B", callCounts),
+                        echo("c", "C", callCounts), join("join")),
+                List.of(WorkflowEdge.of("split", "a"), WorkflowEdge.of("split", "b"),
+                        WorkflowEdge.of("a", "join"), WorkflowEdge.of("b", "c"), WorkflowEdge.of("c", "join")));
     }
 
     /** {@code split -> a -> join} (short) versus {@code split -> b -> c -> join} (long). */

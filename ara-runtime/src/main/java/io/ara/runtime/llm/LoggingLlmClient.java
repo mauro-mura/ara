@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.concurrent.Flow;
 
 /**
  * {@link LlmClient} decorator that logs request messages and the response at INFO level.
@@ -46,6 +47,35 @@ public final class LoggingLlmClient extends DelegatingLlmClient {
         LlmCompletion completion = delegate.complete(messages, config);
         logResponse(completion, maxChars);
         return completion;
+    }
+
+    @Override
+    public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
+        int chars = context != null ? context.logLlmIoMaxChars() : maxChars;
+        logRequest(messages, chars);
+        Flow.Publisher<String> upstream = delegate.stream(messages, context);
+        return subscriber -> upstream.subscribe(new Flow.Subscriber<>() {
+            private final StringBuilder acc = new StringBuilder();
+
+            @Override public void onSubscribe(Flow.Subscription s) { subscriber.onSubscribe(s); }
+
+            @Override public void onNext(String item) {
+                acc.append(item);
+                subscriber.onNext(item);
+            }
+
+            @Override public void onError(Throwable t) {
+                log.warn("LLM STREAM ERROR after {} chars: {}", acc.length(), t.toString());
+                subscriber.onError(t);
+            }
+
+            @Override public void onComplete() {
+                if (log.isInfoEnabled()) {
+                    log.info("LLM RESPONSE (stream) text={}", truncate(acc.toString(), chars));
+                }
+                subscriber.onComplete();
+            }
+        });
     }
 
     private void logRequest(List<LlmMessage> messages, int chars) {

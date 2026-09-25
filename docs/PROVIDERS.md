@@ -3,6 +3,7 @@
 [← back to README](../README.md)
 
 - [Connecting a real LLM](#connecting-a-real-llm)
+- [Reusing an opencode server](#reusing-an-opencode-server)
 - [Multi-provider runtimes](#multi-provider)
 - [LLM I/O logging](#llm-io-logging)
 - [OpenTelemetry tracing](#opentelemetry-tracing)
@@ -55,6 +56,12 @@ LlmClient mistral = AraLlmClientFactory.mistral()
         .model(MistralLlmClient.Models.MISTRAL_MEDIUM_LATEST)
         .build();
 
+// opencode — reuse the providers and subscriptions you already configured there
+// (no API key of your own; read the limits before enabling its free-tier models)
+LlmClient opencode = AraLlmClientFactory.openCode()
+        .model("opencode/big-pickle")
+        .build();
+
 // OpenAI-compatible endpoint (LM Studio, Groq, Together AI, …)
 LlmClient local = AraLlmClientFactory.openAi()
         .baseUrl("http://localhost:1234/v1")
@@ -62,6 +69,77 @@ LlmClient local = AraLlmClientFactory.openAi()
         .modelName("llama-3.1-8b-instruct")
         .build();
 ```
+
+## Reusing an opencode server
+
+`openCode()` talks to an [opencode](https://opencode.ai) headless server instead of a
+provider API, so ARA inherits whatever providers, credentials and subscriptions you have
+already configured there — no second API key to manage. It is not LangChain4j-backed: it
+speaks opencode's session API directly.
+
+There are two ways to get a server, and they differ in more than convenience:
+
+```java
+// 1. Launch one. Needs the `opencode` binary on your PATH (override with
+//    executable(...)). Runs `opencode serve --port 0 --hostname 127.0.0.1` as a
+//    child process, reads the ephemeral URL it prints on stdout, and kills the
+//    process on close() — and at JVM exit, so an unclosed adapter cannot orphan a
+//    server. Loopback-bound, so it is reachable only from this machine.
+LlmClient launched = AraLlmClientFactory.openCode()
+        .model("opencode/big-pickle")
+        .build();
+
+// 2. Connect to one that is already running — localhost, a LAN box, a shared team
+//    server. Any reachable URL: nothing here is restricted to loopback. close()
+//    leaves it alone, because this adapter did not start it.
+LlmClient connected = AraLlmClientFactory.openCode()
+        .baseUrl("https://opencode.internal.example.com")
+        .password(System.getenv("OPENCODE_SERVER_PASSWORD"))
+        .model("anthropic/claude-sonnet-4-6")
+        .build();
+```
+
+Other builder options: `executable(...)` for the binary in launch mode, `timeout(...)`
+per request (default 5 min — a whole agent turn happens inside one request),
+`startupTimeout(...)` for how long to wait for the URL announcement (default 30s), and
+`model(...)` as `providerID/modelID`, split on the first slash only, since model ids
+themselves contain slashes. Unset means "whatever the server is configured to use".
+`providerId()` reports `opencode-<model>`, which is what shows up in logs and in
+`LlmException.provider()`.
+
+### ⚠️ Read this before pointing it at a shared server
+
+`zenFreeTierTools(false)` is the default and should stay that way. opencode's Zen free tier
+only answers calls made from inside opencode, and it decides that by looking at the tool
+list: deny it opencode's own `bash` or `read` and the gateway refuses with `FreeTierError`.
+So the zero-cost models — `opencode/big-pickle` and friends — need
+`zenFreeTierTools(true)`, and the price is real: opencode executes those tools **inside its
+own loop**, on the machine where the opencode server runs, and only the final text ever
+reaches ARA. ARA's HITL gate never sees those calls. Turn it on for a box you would let a
+model loose in — a scratch machine, a container — or keep it off and use a paid model or
+one you host. This matters most in mode 2: with `baseUrl` pointing at a shared or remote
+server you are granting `bash` and `read` on **that host**, not on yours.
+
+### Known limits
+
+Deliberate, and stated rather than discovered:
+
+- **opencode's own tools are off** for every call, so `supportsNativeTools()` is `false` and
+  ARA's text-based tool catalog is used instead. ARA runs its own tool loop; leaving
+  opencode's `bash`/`edit` enabled would let the model act behind ARA's back.
+- **Sampling parameters are ignored** — temperature, top-p, max tokens, stop sequences, seed
+  and the output JSON schema have no counterpart on opencode's message endpoint, so the
+  model's own defaults apply.
+- **Media is rejected** with a non-failover `LlmException` (`supportedMediaTypes()` is empty)
+  rather than silently dropped.
+- **No native streaming**: `stream` falls back to the interface default and emits the whole
+  reply as one item.
+- **Token counts include opencode's own system prompt** (thousands of tokens), so they
+  overstate what your ARA prompt actually cost. Budgets set from them will be pessimistic.
+- **Each call opens and deletes its own opencode session.** Reusing one across calls was
+  discarded: opencode would append ARA's resent history to its own copy, duplicating every
+  turn and growing the context quadratically. On a shared server, a session whose cleanup
+  fails is left behind rather than failing the call.
 
 ## Multi-provider
 

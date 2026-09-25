@@ -274,50 +274,90 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                     "Agent terminated", Duration.ZERO);
         }
 
-        // Bind this session's shared RunState onto the task, but only if it doesn't
-        // already carry one: a fresh top-level call should see its session's
-        // accumulated state, but a task that arrived via delegate_task already has
-        // SHARED/OVERLAY/ISOLATED state attached by AgentDelegationTool and must not
-        // have it clobbered here.
-        AgentTask effectiveTask = task.runContext().state() == RunState.noop()
-                ? task.withRunContext(task.runContext().withState(session.runState()))
-                : task;
-
-        // Bind cross-session userMemory (ADR-043 rev. 3), resolved fresh from
-        // sessionStore rather than cached on AgentSession: unlike session-scoped state,
-        // userMemory must outlive any single session, so there is no per-session object
-        // to cache it on. Same noop()-guard as state, above.
-        if (effectiveTask.userId() != null && effectiveTask.runContext().userMemory() == RunState.noop()) {
-            RunState userMemory = RunState.persisting(sessionStore, userMemoryKey(effectiveTask.userId()));
-            effectiveTask = effectiveTask.withRunContext(effectiveTask.runContext().withUserMemory(userMemory));
-        }
-
         AgentConfig sessionConfig = session.wiring().config();
 
-        // ADR-0077 D2's declared external blocker, closed: "senza grantedScopes popolato
-        // da qualche meccanismo di configurazione/autenticazione a monte, incoming è
-        // sempre null" — this is that upstream mechanism, now that ADR-033 Fasi 1-9 give
-        // it somewhere real to flow to. Seeds this agent's OWN declared ceiling as the
-        // starting authorization context — but ONLY for a genuinely fresh, top-level task
-        // that carries neither channel yet: one delivered via AgentDelegationTool/
-        // LocalMessageBus already carries an attenuated incoming scope from a prior hop,
-        // and one built via AraRuntime.executeOnBehalfOf already carries the OBO subject —
-        // overwriting either here with this agent's own (wider) ceiling would defeat the
-        // whole attenuation chain. An agent with no grantedScopes configured (still the
-        // overwhelming default) seeds nothing — zero behavior change for the unconfigured
-        // case, exactly like the state/userMemory guards immediately above.
-        if (!sessionConfig.grantedScopes().isEmpty()
-                && effectiveTask.runContext().opaque(RunContext.SCOPES_KEY, io.ara.core.auth.ScopeSet.class) == null
-                && effectiveTask.executionContext().isEmpty()) {
-            io.ara.core.auth.ScopeSet ownScopes = io.ara.core.auth.ScopeSet.of(sessionConfig.grantedScopes());
-            effectiveTask = effectiveTask
-                    .withRunContext(effectiveTask.runContext().withOpaque(RunContext.SCOPES_KEY, ownScopes))
-                    .withExecutionContext(io.ara.core.auth.ExecutionContext.ofAgent(agentId().value(), ownScopes));
-        }
+        // Three independent seeding decisions, applied left to right. Same shape in all
+        // three: attach the channel only when the task doesn't already carry it, never
+        // overwrite what an earlier layer put there. Each has its own guard and its own
+        // reason, so each gets its own method rather than a shared "bind if absent" helper
+        // — the guards differ enough that a generic version would hide exactly the part
+        // a reader needs to check.
+        AgentTask effectiveTask = withSessionState(task, session);
+        effectiveTask = withUserMemory(effectiveTask);
+        effectiveTask = withOwnScopes(effectiveTask, sessionConfig);
 
         String effectiveSystemPrompt = effectiveTask.runContext().promptVar(CTX_SYSTEM_PROMPT, sessionConfig.systemPrompt());
 
         return executeUnderSessionLock(effectiveTask, session, sessionConfig, effectiveSystemPrompt);
+    }
+
+    /**
+     * Binds this session's shared {@link RunState} onto the task, but only if the task
+     * doesn't already carry one: a fresh top-level call should see its session's
+     * accumulated state, but a task that arrived via {@code delegate_task} already has
+     * SHARED/OVERLAY/ISOLATED state attached by {@code AgentDelegationTool} and must not
+     * have it clobbered here.
+     *
+     * <p>Side effect: none beyond the returned task; the session's own state object is
+     * read, never replaced.
+     */
+    private AgentTask withSessionState(AgentTask task, AgentSession session) {
+        return task.runContext().state() == RunState.noop()
+                ? task.withRunContext(task.runContext().withState(session.runState()))
+                : task;
+    }
+
+    /**
+     * Binds cross-session user memory (ADR-043 rev. 3), resolved fresh from
+     * {@code sessionStore} rather than cached on the {@code AgentSession}: unlike
+     * session-scoped state, user memory must outlive any single session, so there is no
+     * per-session object to cache it on. Same noop-guard as {@link #withSessionState}.
+     *
+     * <p>Skipped when the task carries no {@link UserId} — there is no key to resolve
+     * from, and an anonymous caller has no cross-session memory by definition.
+     *
+     * <p>Side effect: none beyond the returned task; reads through
+     * {@code sessionStore} on every call rather than memoizing the handle.
+     */
+    private AgentTask withUserMemory(AgentTask task) {
+        if (task.userId() == null || task.runContext().userMemory() != RunState.noop()) {
+            return task;
+        }
+        RunState userMemory = RunState.persisting(sessionStore, userMemoryKey(task.userId()));
+        return task.withRunContext(task.runContext().withUserMemory(userMemory));
+    }
+
+    /**
+     * Seeds this agent's OWN declared scope ceiling as the task's starting authorization
+     * context — the upstream mechanism whose absence was ADR-0077 D2's declared external
+     * blocker ("senza grantedScopes popolato da qualche meccanismo di
+     * configurazione/autenticazione a monte, incoming è sempre null"), now that ADR-033
+     * Fasi 1-9 give it somewhere real to flow to.
+     *
+     * <p>Applies ONLY to a genuinely fresh, top-level task that carries neither the
+     * scope-set channel nor an execution context. A task delivered via
+     * {@code AgentDelegationTool}/{@code LocalMessageBus} already carries an attenuated
+     * incoming scope from a prior hop, and one built via
+     * {@code AraRuntime.executeOnBehalfOf} already carries the OBO subject: overwriting
+     * either with this agent's own (wider) ceiling would defeat the whole attenuation
+     * chain, so those two are the reason this is a guard and not a default.
+     *
+     * <p>An agent with no {@code grantedScopes} configured — still the overwhelming
+     * default — seeds nothing, which is why this is inert for the unconfigured case.
+     *
+     * <p>Side effect: none beyond the returned task; the ceiling is read from the
+     * session's config, not cached here.
+     */
+    private AgentTask withOwnScopes(AgentTask task, AgentConfig sessionConfig) {
+        if (sessionConfig.grantedScopes().isEmpty()
+                || task.runContext().opaque(RunContext.SCOPES_KEY, io.ara.core.auth.ScopeSet.class) != null
+                || !task.executionContext().isEmpty()) {
+            return task;
+        }
+        io.ara.core.auth.ScopeSet ownScopes = io.ara.core.auth.ScopeSet.of(sessionConfig.grantedScopes());
+        return task
+                .withRunContext(task.runContext().withOpaque(RunContext.SCOPES_KEY, ownScopes))
+                .withExecutionContext(io.ara.core.auth.ExecutionContext.ofAgent(agentId().value(), ownScopes));
     }
 
     private AgentResponse executeUnderSessionLock(AgentTask task, AgentSession session,
