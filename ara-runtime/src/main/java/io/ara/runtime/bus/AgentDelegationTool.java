@@ -247,15 +247,13 @@ public final class AgentDelegationTool implements AraTool {
     }
 
     private ToolResult delegate(String argumentJson, RunContext callerContext, SessionId callerSessionId) {
-        String recipientId;
-        String taskContent;
+        DelegationRequest request;
         try {
-            DelegationRequest parsed = parseDelegation(argumentJson);
-            recipientId = parsed.recipientAgentId();
-            taskContent = parsed.task();
+            request = parseDelegation(argumentJson);
         } catch (Exception e) {
             return ToolResult.failure(TOOL_ID, "Invalid arguments: " + e.getMessage());
         }
+        String recipientId = request.recipientAgentId();
 
         if (selfId.equals(recipientId)) {
             return ToolResult.failure(TOOL_ID,
@@ -275,23 +273,34 @@ public final class AgentDelegationTool implements AraTool {
 
         SessionId delegateSessionId = delegateSessionId(callerSessionId, recipientId);
 
-        // The delegate's own RunState layer is backed by SessionStore (persisting()
-        // degrades to inMemory()'s behavior when sessionStore is noop()) whenever there
-        // is a real session to anchor it to; otherwise there is nothing to persist under,
-        // so it stays a throwaway in-memory layer exactly like before session propagation.
-        RunState ownLayer = delegateSessionId != null
-                ? RunState.persisting(sessionStore, delegateSessionId)
-                : RunState.inMemory();
+        return dispatch(request, delegateSessionId, attenuateForHops(callerContext, delegateSessionId));
+    }
 
-        // Enforce this agent's DelegateStateAccess policy on the outgoing RunState:
-        // SHARED forwards the same reference (today's behavior); OVERLAY gives the
-        // delegate read-through to our state with writes confined to its own private
-        // layer; ISOLATED starts the delegate with nothing of ours.
-        RunContext outgoing = switch (stateAccess) {
-            case SHARED   -> callerContext;
-            case OVERLAY  -> callerContext.withState(RunState.overlay(callerContext.state(), ownLayer));
-            case ISOLATED -> callerContext.withState(ownLayer);
-        };
+    /**
+     * What one hop hands to the bus: the outgoing {@link RunContext} (state layer applied by
+     * the {@code stateAccess} policy, then scopes and execution context narrowed) alongside
+     * the two values {@link #dispatch} needs but cannot cheaply recover — the effective scope
+     * set, which the message carries as its own field and not only inside the context, and
+     * the narrowed {@link ExecutionContext}, whose presence decides whether the message needs
+     * {@code withExecutionContext} at all.
+     *
+     * <p>Returned as one value so the context and the message's own fields are always built
+     * from the same computation and cannot drift apart.
+     */
+    private record PreparedHop(RunContext context, ScopeSet effectiveScopes, ExecutionContext executionContext) {}
+
+    /**
+     * Builds the {@link RunContext} a delegate receives: this agent's declared state-access
+     * treatment, then a non-escalation of permissions across the hop.
+     *
+     * <p>Pure — reads only its arguments and the final fields {@code stateAccess},
+     * {@code ownGrantedScopes} and {@code sessionStore} — so the whole authorization surface
+     * of a delegation is one method a reviewer can read top to bottom, instead of being split
+     * across the middle of a longer {@code execute}-shaped one. Kept separate from
+     * {@link #delegate} for exactly that reason, not to make the line count look better.
+     */
+    private PreparedHop attenuateForHops(RunContext callerContext, SessionId delegateSessionId) {
+        RunContext outgoing = applyStateAccess(callerContext, delegateSessionId);
 
         // ADR-0077 D2/D3: non-escalation of permissions across the delegation hop.
         // effectiveScopes = incoming ∩ ownGrantedScopes — an intersection, so the result
@@ -319,6 +328,41 @@ public final class AgentDelegationTool implements AraTool {
             outgoing = outgoing.withOpaque(RunContext.EXECUTION_CONTEXT_KEY, outgoingContext);
         }
 
+        return new PreparedHop(outgoing, effectiveForThisHop, outgoingContext);
+    }
+
+    /**
+     * Enforces this agent's {@link DelegateStateAccess} policy on the outgoing {@link RunState}:
+     * SHARED forwards the same reference (today's behavior); OVERLAY gives the
+     * delegate read-through to our state with writes confined to its own private
+     * layer; ISOLATED starts the delegate with nothing of ours.
+     */
+    private RunContext applyStateAccess(RunContext callerContext, SessionId delegateSessionId) {
+        // The delegate's own RunState layer is backed by SessionStore (persisting()
+        // degrades to inMemory()'s behavior when sessionStore is noop()) whenever there
+        // is a real session to anchor it to; otherwise there is nothing to persist under,
+        // so it stays a throwaway in-memory layer exactly like before session propagation.
+        RunState ownLayer = delegateSessionId != null
+                ? RunState.persisting(sessionStore, delegateSessionId)
+                : RunState.inMemory();
+
+        return switch (stateAccess) {
+            case SHARED   -> callerContext;
+            case OVERLAY  -> callerContext.withState(RunState.overlay(callerContext.state(), ownLayer));
+            case ISOLATED -> callerContext.withState(ownLayer);
+        };
+    }
+
+    /**
+     * Sends the delegation and renders either the delegate's answer or the reason it could
+     * not be obtained. The four {@code catch} clauses are not redundant: each maps a distinct
+     * bus failure onto a message that tells the LLM something different about what to try
+     * next (the agent is gone / it is busy / the hop failed outright), and the tool reports a
+     * failure as a {@link ToolResult} rather than propagating, because the ReAct loop is
+     * built to read a failed tool call as an observation and keep reasoning.
+     */
+    private ToolResult dispatch(DelegationRequest request, SessionId delegateSessionId, PreparedHop hop) {
+        String recipientId = request.recipientAgentId();
         try {
             // ADR-033: the same effectiveForThisHop that ADR-0077 threads onward for
             // the *next* hop's own attenuation is also what LocalMessageBus checks against
@@ -327,12 +371,13 @@ public final class AgentDelegationTool implements AraTool {
             // When outgoingContext (the on-behalf-of subject identity) is present it
             // supersedes senderScopes at the bus — both are still set so a recipient not
             // yet ExecutionContext-aware still sees a correct senderScopes.
-            AgentMessage request = AgentMessage.of(selfId, recipientId, taskContent, outgoing, delegateSessionId)
-                    .withSenderScopes(effectiveForThisHop);
-            if (outgoingContext != null) {
-                request = request.withExecutionContext(outgoingContext);
+            AgentMessage message = AgentMessage
+                    .of(selfId, recipientId, request.task(), hop.context(), delegateSessionId)
+                    .withSenderScopes(hop.effectiveScopes());
+            if (hop.executionContext() != null) {
+                message = message.withExecutionContext(hop.executionContext());
             }
-            AgentMessage reply = bus.request(request, timeout);
+            AgentMessage reply = bus.request(message, timeout);
             return ToolResult.success(TOOL_ID,
                     "[" + recipientId + "] " + reply.content());
         } catch (java.util.NoSuchElementException e) {
