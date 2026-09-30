@@ -37,6 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>The scheduled agent is a {@link AraAgents#deterministic deterministic agent}: it
  * has no {@code LlmClient} at all, so the whole example runs without a network.
+ *
+ * <p>Note the demo's agent returns immediately, so it never overruns its one-second interval
+ * and no tick is ever dropped. A schedule that <em>does</em> overrun its own interval has
+ * its overlapping ticks skipped rather than stacked — see
+ * {@link AgentScheduler#triggerNow(String)} for why a manual trigger is exempt.
  */
 public final class AgentSchedulerExample {
 

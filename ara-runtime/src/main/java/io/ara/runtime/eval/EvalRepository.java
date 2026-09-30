@@ -21,7 +21,13 @@ public interface EvalRepository {
 
     void saveCase(EvalCase evalCase);
 
-    /** Cases of {@code suiteId}, ordered by {@link EvalCase#seqNo()}. */
+    /**
+     * Cases of {@code suiteId} in a <em>total</em> order: by {@link EvalCase#seqNo()}, ties
+     * broken by {@code caseId}. The tiebreak is what makes it total — a corpus holds several
+     * cases with the same {@code seqNo} whenever they were all derived from production
+     * failures — and an eval whose case order could shift between two runs of the same corpus
+     * would report a different culprit in its verdict than the one it measured first.
+     */
     List<EvalCase> findCases(String suiteId);
 
     /** Cases of {@code suiteId} filtered by hold-out flag — how {@code EvalRunner}'s two methods partition the suite. */
@@ -31,7 +37,14 @@ public interface EvalRepository {
 
     Optional<EvalResult> findResult(String evalId);
 
-    /** Every result recorded for {@code specHash}, newest first not guaranteed. */
+    /**
+     * Every result recorded for {@code specHash}, in unspecified order.
+     *
+     * <p>No chronological order is derivable from this interface: an {@link EvalResult} carries
+     * no timestamp and its {@code evalId} is a random UUID, so a caller that needs "the most
+     * recent result" — which is what a baseline lookup wants — must track the one it means
+     * rather than take the last element of this list.
+     */
     List<EvalResult> findResultsForSpec(String specHash);
 
     static EvalRepository inMemory() {

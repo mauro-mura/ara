@@ -229,3 +229,14 @@ day-of-week), steps (`*/15`, `0-30/10`) and comma-separated lists (`1,15,30`,
 day-of-month and day-of-week are both restricted, standard cron OR semantics apply (fires
 when either matches). `LocalAgentScheduler` holds schedules in memory — they do not
 survive a process restart.
+
+**A schedule never overlaps with itself.** If a trigger fires while that schedule's previous
+run is still executing, the tick is dropped and nothing is dispatched. The agent executor is
+unbounded (one virtual thread per run), so without this a recurring job whose agent is slower
+than its own interval would stack up concurrent executions of itself, each burning LLM calls
+and tool dispatches that cannot influence one another. Register several schedules if you do
+want several runs of the same agent in flight at once. A dropped tick is not silent: a
+`ScheduleExecutionListener` sees the fire, then a completion whose failure reason begins with
+`skipped: previous run of this schedule is still in flight`, so it can be told apart from a
+genuine agent failure. `triggerNow` is an explicit request rather than a tick and always
+dispatches, since the caller is holding the returned future.

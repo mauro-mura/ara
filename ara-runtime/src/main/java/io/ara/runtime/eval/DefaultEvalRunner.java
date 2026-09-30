@@ -14,7 +14,7 @@ import io.ara.core.eval.StrategyRegistry;
 import io.ara.core.eval.Verdict;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -143,70 +143,117 @@ public final class DefaultEvalRunner implements EvalRunner {
                 .filter(EvalCase::countsTowardVerdict)   // DRAFT cases stay in the corpus, out of the verdict (ADR-0071 D4)
                 .toList();
 
-        Map<String, CaseStats> perCase = new LinkedHashMap<>();
-        Map<String, Boolean> blocking = new HashMap<>();
-        List<Spend> runCosts = new ArrayList<>();
+        List<CaseRun> runs = new ArrayList<>();
         RunBudget cap = evalBudgetCap.get();   // nullable — no cap, measurement only
-        boolean capExceeded = false;
         String capBreachDetail = null;
 
         for (EvalCase c : cases) {
-            if (capExceeded) {
+            if (capBreachDetail != null) {
                 break;   // stop before the next case, never mid-case (see class-level "Cost")
             }
-            EvaluationStrategy strategy = strategies.resolve(c.evaluationStrategy())
-                    .orElseThrow(() -> new IllegalStateException(
-                            "no EvaluationStrategy registered for '" + c.evaluationStrategy()
-                                    + "' (case " + c.caseId() + ") — register one or leave the case DRAFT"));
-            double[] scores = new double[n];
-            for (int i = 0; i < n; i++) {
-                // The correlation id becomes the runId of the agent's trace spans. Before, a run
-                // was keyed by its random task id, which named nothing; this one names the eval,
-                // the case and the execution, so a span is traceable to the sample it produced.
-                String correlationId = evalId + "/" + c.caseId() + "/" + i;
-                AgentResponse response = agent.execute(
-                        AgentTask.of(c.input(), c.context(), correlationId, "system"));
-                EvaluationResult scored = scoreOf(response, c, strategy);
-                scores[i] = scored.score();
-                samples.onSample(new EvalSample(evalId, c.caseId(), c.holdout(), i, correlationId,
-                        response.isSuccess(), response.failureReasonOpt().orElse(null),
-                        response.isSuccess() ? response.content() : "",
-                        scored.score(), scored.rationale(), scored.metadata(), response.elapsedTime()));
-                Spend spend = costOf(response);
-                runCosts.add(spend);
-                if (cap != null && cap.charge(spend) instanceof RunBudget.Charge.Exceeded ex) {
-                    capExceeded = true;
-                    capBreachDetail = "eval run budget exceeded on " + ex.axis() + ": " + ex.detail();
-                }
-            }
-            perCase.put(c.caseId(), CaseStats.of(c.caseId(), c.holdout(), scores));
-            blocking.put(c.caseId(), isBlocking(c));
+            CaseRun run = measure(c, agent, evalId, n);
+            runs.add(run);
+            // the cap is charged per case rather than per run: a breach is only ever acted upon
+            // between cases, so the sequence of charges it sees is the same either way
+            capBreachDetail = chargeCap(cap, run.costs());
         }
 
         Optional<EvalResult> baseline = baselineForSuite.apply(suiteId);
-        Map<String, Double> perTag = perTag(cases, perCase);
-        List<String> regressions = regressions(perCase, baseline);
-        boolean truncated = capExceeded && perCase.size() < cases.size();
+        Map<String, Double> perTag = perTag(runs);
+        List<String> regressions = regressions(runs, baseline);
+        boolean truncated = capBreachDetail != null && runs.size() < cases.size();
         Verdict verdict = truncated
                 ? new Verdict.NeedsReview(capBreachDetail + " — "
-                        + (cases.size() - perCase.size()) + " case(s) not run before the cap stopped the eval")
-                : verdict(perCase, blocking, baseline, holdout);
+                        + (cases.size() - runs.size()) + " case(s) not run before the cap stopped the eval")
+                : verdict(runs, baseline, holdout);
 
         EvalResult result = new EvalResult(evalId, specHash, suiteId, n,
-                perCase, perTag, regressions, verdict, List.copyOf(runCosts));
+                perCase(runs), perTag, regressions, verdict, runCosts(runs));
         repo.saveResult(result);
         return result;
     }
 
-    private static EvaluationResult scoreOf(AgentResponse response, EvalCase c, EvaluationStrategy strategy) {
+    /**
+     * One case, run {@code n} times and measured. The budget cap is deliberately not charged
+     * here — a cap breach only ever stops the eval <em>between</em> cases, which is
+     * {@link #evaluate}'s business (see the class-level "Cost" section).
+     */
+    private CaseRun measure(EvalCase c, AraAgent agent, String evalId, int n) {
+        EvaluationStrategy strategy = strategies.resolve(c.evaluationStrategy())
+                .orElseThrow(() -> new IllegalStateException(
+                        "no EvaluationStrategy registered for '" + c.evaluationStrategy()
+                                + "' (case " + c.caseId() + ") — register one or leave the case DRAFT"));
+        double[] scores = new double[n];
+        List<Spend> costs = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            // The correlation id becomes the runId of the agent's trace spans. Before, a run
+            // was keyed by its random task id, which named nothing; this one names the eval,
+            // the case and the execution, so a span is traceable to the sample it produced.
+            String correlationId = evalId + "/" + c.caseId() + "/" + i;
+            AgentResponse response = agent.execute(
+                    AgentTask.of(c.input(), c.context(), correlationId, "system"));
+            EvaluationResult scored = scoreOf(response, c, strategy);
+            scores[i] = scored.score();
+            samples.onSample(new EvalSample(evalId, c.caseId(), c.holdout(), i, correlationId,
+                    response.isSuccess(), response.failureReasonOpt().orElse(null),
+                    response.isSuccess() ? response.content() : "",
+                    scored.score(), scored.rationale(), scored.metadata(), response.elapsedTime()));
+            costs.add(costOf(response));
+        }
+        return new CaseRun(c, CaseStats.of(c.caseId(), c.holdout(), scores), isBlocking(c), List.copyOf(costs));
+    }
+
+    /**
+     * One measured case: what it scored, whether it blocks, and what its runs cost. Replaces the
+     * three collections {@link #evaluate} used to fill in lockstep — {@code perCase},
+     * {@code blocking} and {@code runCosts} — which nothing but a shared caseId kept in step: a
+     * case that was measured but never classified was a state the code allowed and no test could
+     * see. The {@link EvalCase} travels with the numbers, so a case's tags and hold-out flag
+     * cannot end up beside another case's stats.
+     */
+    private record CaseRun(EvalCase evalCase, CaseStats stats, boolean blocking, List<Spend> costs) {
+        String caseId() {
+            return evalCase.caseId();
+        }
+    }
+
+    /**
+     * Charges {@code cap} (nullable) with one case's spends; the detail of the last breach, or
+     * {@code null} when the cap held. Charging the case's runs as a batch rather than one by one
+     * is not a change of accounting: nothing charges the cap in between, so the breach it reports
+     * is the same one the per-run loop reported.
+     */
+    private static String chargeCap(RunBudget cap, List<Spend> costs) {
+        if (cap == null) {
+            return null;
+        }
+        String breach = null;
+        for (Spend spend : costs) {
+            if (cap.charge(spend) instanceof RunBudget.Charge.Exceeded ex) {
+                breach = "eval run budget exceeded on " + ex.axis() + ": " + ex.detail();
+            }
+        }
+        return breach;
+    }
+
+    /**
+     * The score for one execution. A successful response is scored by the case's own strategy and
+     * its number is taken as-is: an {@link EvaluationResult} cannot hold a value outside
+     * {@code [0, 1]} — its compact constructor rejects one — so a clamp here would never see a
+     * different number than the one the strategy already decided on.
+     *
+     * <p>A verifier that computes a score outside the range is therefore a bug in that verifier,
+     * and it fails <em>there</em>, loudly, aborting the eval. That is the honest place for it: a
+     * clamp here would quietly fold a broken verifier into the mean and the stdev, so the
+     * resulting verdict would be evidence about a measurement nobody made.
+     */
+    private static EvaluationResult scoreOf(AgentResponse response, EvalCase evalCase, EvaluationStrategy strategy) {
         if (!response.isSuccess()) {
             // an agent that could not complete the task scores zero, whatever the verifier says
             return EvaluationResult.fail(0.0, "no answer: "
                     + response.failureReasonOpt().orElse("the agent did not complete"));
         }
-        EvaluationResult r = strategy.evaluate(response, c);
-        double clamped = Math.max(0.0, Math.min(1.0, r.score()));
-        return clamped == r.score() ? r : new EvaluationResult(r.passed(), clamped, r.rationale(), r.metadata());
+        return strategy.evaluate(response, evalCase);
     }
 
     /**
@@ -235,15 +282,23 @@ public final class DefaultEvalRunner implements EvalRunner {
         return !"judge".equals(c.evaluationStrategy());
     }
 
-    private static Map<String, Double> perTag(List<EvalCase> cases, Map<String, CaseStats> perCase) {
+    /** The measured stats by case id, in the order the cases were run. */
+    private static Map<String, CaseStats> perCase(List<CaseRun> runs) {
+        Map<String, CaseStats> out = new LinkedHashMap<>();
+        runs.forEach(run -> out.put(run.caseId(), run.stats()));
+        return out;
+    }
+
+    /** Every run's cost, in the order the runs happened — {@link EvalResult#runCosts()}. */
+    private static List<Spend> runCosts(List<CaseRun> runs) {
+        return runs.stream().flatMap(run -> run.costs().stream()).toList();
+    }
+
+    private static Map<String, Double> perTag(List<CaseRun> runs) {
         Map<String, List<Double>> byTag = new LinkedHashMap<>();
-        for (EvalCase c : cases) {
-            CaseStats stats = perCase.get(c.caseId());
-            if (stats == null) {
-                continue;
-            }
-            for (String tag : c.tags()) {
-                byTag.computeIfAbsent(tag, k -> new ArrayList<>()).add(stats.meanScore());
+        for (CaseRun run : runs) {
+            for (String tag : run.evalCase().tags()) {
+                byTag.computeIfAbsent(tag, k -> new ArrayList<>()).add(run.stats().meanScore());
             }
         }
         Map<String, Double> out = new LinkedHashMap<>();
@@ -252,50 +307,50 @@ public final class DefaultEvalRunner implements EvalRunner {
         return out;
     }
 
-    private List<String> regressions(Map<String, CaseStats> perCase, Optional<EvalResult> baseline) {
+    private List<String> regressions(List<CaseRun> runs, Optional<EvalResult> baseline) {
         if (baseline.isEmpty()) {
             return List.of();
         }
         Map<String, CaseStats> base = baseline.get().perCase();
         List<String> out = new ArrayList<>();
-        perCase.forEach((caseId, now) -> {
-            CaseStats before = base.get(caseId);
+        for (CaseRun run : runs) {
+            CaseStats before = base.get(run.caseId());
             if (before != null
                     && before.meanScore() >= CASE_PASS_THRESHOLD
-                    && now.meanScore() < CASE_PASS_THRESHOLD) {
-                out.add(caseId);
+                    && run.stats().meanScore() < CASE_PASS_THRESHOLD) {
+                out.add(run.caseId());
             }
-        });
+        }
         return List.copyOf(out);
     }
 
-    private Verdict verdict(Map<String, CaseStats> perCase, Map<String, Boolean> blocking,
-                            Optional<EvalResult> baseline, boolean holdout) {
-        if (perCase.isEmpty()) {
+    private Verdict verdict(List<CaseRun> runs, Optional<EvalResult> baseline, boolean holdout) {
+        if (runs.isEmpty()) {
             return new Verdict.NeedsReview("the suite has no evaluable (READY) cases");
         }
 
         // D1 — blocking veto: a blocking verifier failing rejects outright (ADR-0059 D1).
-        for (var e : perCase.entrySet()) {
-            if (Boolean.TRUE.equals(blocking.get(e.getKey())) && e.getValue().meanScore() < CASE_PASS_THRESHOLD) {
-                return new Verdict.Reject("blocking verifier failed on case " + e.getKey()
-                        + " (mean score " + fmt(e.getValue().meanScore()) + ")");
+        for (CaseRun run : runs) {
+            if (run.blocking() && run.stats().meanScore() < CASE_PASS_THRESHOLD) {
+                return new Verdict.Reject("blocking verifier failed on case " + run.caseId()
+                        + " (mean score " + fmt(run.stats().meanScore()) + ")");
             }
         }
 
         // D2 — advisory judge below threshold, no blocking failure → a human decides.
-        for (var e : perCase.entrySet()) {
-            if (!Boolean.TRUE.equals(blocking.get(e.getKey())) && e.getValue().meanScore() < JUDGE_ADVISORY_THRESHOLD) {
-                return new Verdict.NeedsReview("advisory judge score " + fmt(e.getValue().meanScore())
-                        + " below " + JUDGE_ADVISORY_THRESHOLD + " on case " + e.getKey());
+        for (CaseRun run : runs) {
+            if (!run.blocking() && run.stats().meanScore() < JUDGE_ADVISORY_THRESHOLD) {
+                return new Verdict.NeedsReview("advisory judge score " + fmt(run.stats().meanScore())
+                        + " below " + JUDGE_ADVISORY_THRESHOLD + " on case " + run.caseId());
             }
         }
 
         // D3 — the mean gain over the baseline must exceed the observed variance (ADR-0059 D3 / D2 DR-4).
         if (baseline.isPresent()) {
-            double now = overallMean(perCase);
-            double before = overallMean(baseline.get().perCase());
-            double variance = pooledStdev(perCase);
+            List<CaseStats> stats = runs.stream().map(CaseRun::stats).toList();
+            double now = overallMean(stats);
+            double before = overallMean(baseline.get().perCase().values());
+            double variance = pooledStdev(stats);
             double gain = now - before;
             if (gain <= variance) {
                 String why = "mean gain " + fmt(gain) + " does not exceed the observed variance "
@@ -308,14 +363,14 @@ public final class DefaultEvalRunner implements EvalRunner {
         return new Verdict.PromoteToCanary();
     }
 
-    private static double overallMean(Map<String, CaseStats> perCase) {
-        return perCase.values().stream().mapToDouble(CaseStats::meanScore).average().orElse(0.0);
+    private static double overallMean(Collection<CaseStats> stats) {
+        return stats.stream().mapToDouble(CaseStats::meanScore).average().orElse(0.0);
     }
 
     /** Root-mean-square of the per-case stdevs — the spread the gain has to clear. */
-    private static double pooledStdev(Map<String, CaseStats> perCase) {
-        double sumSq = perCase.values().stream().mapToDouble(s -> s.stdev() * s.stdev()).sum();
-        int n = perCase.size();
+    private static double pooledStdev(Collection<CaseStats> stats) {
+        double sumSq = stats.stream().mapToDouble(s -> s.stdev() * s.stdev()).sum();
+        int n = stats.size();
         return n == 0 ? 0.0 : Math.sqrt(sumSq / n);
     }
 

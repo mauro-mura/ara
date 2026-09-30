@@ -2,6 +2,7 @@ package io.ara.core.eval;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -128,5 +129,32 @@ class EvalTypesTest {
         assertTrue(r.hasEnoughRuns());
         assertThrows(IllegalArgumentException.class, () -> new EvalResult(
                 "e2", "h", "s1", 2, Map.of(), Map.of(), List.of(), new Verdict.RejectOverfit()));
+    }
+
+    /**
+     * {@code perCase}/{@code perTag} keep the order the caller measured in. The verdict cascade
+     * reports the <em>first</em> failing case, so a copy that rehashed the entries would let a
+     * hash decide which case an eval blames.
+     */
+    @Test
+    void evalResult_keepsTheCallersCaseAndTagOrder() {
+        CaseStats c1 = CaseStats.of("c1", false, 0.9, 1.0, 0.8);
+        CaseStats c2 = CaseStats.of("c2", false, 0.9, 1.0, 0.8);
+        CaseStats c3 = CaseStats.of("c3", false, 0.9, 1.0, 0.8);
+        Map<String, CaseStats> perCase = new LinkedHashMap<>();
+        perCase.put("c1", c1);
+        perCase.put("c2", c2);
+        perCase.put("c3", c3);
+        Map<String, Double> perTag = new LinkedHashMap<>();
+        perTag.put("shape", 0.9);
+        perTag.put("latency", 0.4);
+        perTag.put("tone", 0.7);
+
+        EvalResult r = new EvalResult("e1", "spec", "s1", 3,
+                perCase, perTag, List.of(), new Verdict.PromoteToCanary());
+
+        assertEquals(List.of("c1", "c2", "c3"), List.copyOf(r.perCase().keySet()));
+        assertEquals(List.of("shape", "latency", "tone"), List.copyOf(r.perTag().keySet()));
+        assertThrows(UnsupportedOperationException.class, () -> r.perCase().put("c4", c1));
     }
 }

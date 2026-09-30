@@ -55,19 +55,271 @@ class LocalAgentSchedulerHardeningTest {
      * "never propagates" deterministically; proving the same through the real {@code
      * scheduleAtFixedRate} machinery would only be provable indirectly and non-deterministically.
      */
+    /**
+     * A schedule never overlaps with itself: a tick arriving while the previous run of the same
+     * schedule is still executing is skipped, and the next tick after that run completes is
+     * eligible again.
+     *
+     * <p>Driven through {@link LocalAgentScheduler#safeFire} rather than a real interval so the
+     * overlap window is opened by a latch instead of by {@code Thread.sleep}, which is what makes
+     * this a regression test rather than a timing race: the same test against the pre-guard code
+     * deterministically reports one start per {@code safeFire} call instead of one.
+     */
     @Test
-    void safeFire_neverPropagates_whenFireThrowsSynchronously() {
-        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("blank-input-agent")));
-        AgentSchedule blankInputSchedule = AgentSchedule.builder()
-                .scheduleId("blank")
-                .agentId(AgentId.of("blank-input-agent"))
-                .every(Duration.ofMillis(100))
-                // no withInput(...) — inputTemplate defaults to "", AgentTask.of("") throws
-                .build();
+    void fixedInterval_skipsWhilePreviousInFlight() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch gate = new CountDownLatch(1);
+        CountDownLatch runReported = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+        AtomicInteger skipped = new AtomicInteger();
+        AtomicInteger completed = new AtomicInteger();
 
-        for (int i = 0; i < 5; i++) {
-            assertDoesNotThrow(() -> scheduler.safeFire(blankInputSchedule),
-                    "safeFire must swallow fire()'s exception on every call, not just the first");
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("slow-agent")) {
+            @Override public AgentResponse execute(AgentTask task) {
+                int n = starts.incrementAndGet();
+                started.countDown();
+                if (n == 1) {
+                    try {
+                        gate.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return success(task);
+            }
+        });
+
+        LocalAgentScheduler listening = new LocalAgentScheduler(registry, new ScheduleExecutionListener() {
+            @Override public void onFire(String scheduleId, AgentId agentId) {}
+            @Override public void onComplete(String scheduleId, AgentResponse outcome) {
+                if (outcome.failureReason() != null
+                        && outcome.failureReason().contains("skipped: previous run of this schedule is still in flight")) {
+                    skipped.incrementAndGet();
+                } else {
+                    completed.incrementAndGet();
+                    runReported.countDown();
+                }
+            }
+        });
+        listening.start();
+
+        AgentSchedule s = AgentSchedule.builder()
+                .scheduleId("overlap")
+                .agentId(AgentId.of("slow-agent"))
+                .every(Duration.ofHours(1))   // never fires on its own — safeFire drives it
+                .withInput("go")
+                .build();
+        listening.register(s);
+
+        listening.safeFire(s);
+        assertTrue(started.await(5, TimeUnit.SECONDS), "first run should have started");
+
+        // Three further ticks while run #1 is held at the gate
+        listening.safeFire(s);
+        listening.safeFire(s);
+        listening.safeFire(s);
+
+        assertEquals(1, starts.get(), "no second run may start while the first is in flight");
+        assertEquals(3, skipped.get(), "every overlapping tick must be reported as skipped");
+
+        gate.countDown();
+        // onComplete is invoked after the overlap flag is released, so this latch is what makes
+        // the next tick's eligibility deterministic — the agent's own return is not.
+        assertTrue(runReported.await(5, TimeUnit.SECONDS), "first run should have reported a completion");
+
+        // The flag must have been released by the completion, so the schedule runs again
+        listening.safeFire(s);
+        waitFor(() -> starts.get() == 2);
+        assertEquals(2, starts.get(), "a tick after completion must be eligible to run again");
+        assertEquals(3, skipped.get(), "the post-completion tick must not be reported as a skip");
+        assertEquals(2, completed.get(), "both real runs report a completion; skips report their own");
+    }
+
+    /**
+     * A manual {@code triggerNow} is an explicit one-off request, not a tick, so it must dispatch
+     * even while the schedule's previous run is in flight. The caller is holding the returned
+     * {@code AgentFuture}; silently dropping their request would strand it.
+     */
+    @Test
+    void triggerNow_dispatches_evenWhileThePreviousRunIsInFlight() throws Exception {
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch gate = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("manual-agent")) {
+            @Override public AgentResponse execute(AgentTask task) {
+                starts.incrementAndGet();
+                started.countDown();
+                try {
+                    gate.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                return success(task);
+            }
+        });
+
+        AgentSchedule s = AgentSchedule.builder()
+                .scheduleId("manual")
+                .agentId(AgentId.of("manual-agent"))
+                .every(Duration.ofHours(1))
+                .withInput("go")
+                .build();
+        scheduler.register(s);
+
+        scheduler.safeFire(s);
+        assertTrue(started.await(5, TimeUnit.SECONDS) || starts.get() == 1, "first run started");
+
+        // A tick would be skipped here; a manual trigger must not be
+        scheduler.triggerNow("manual");
+
+        assertTrue(started.await(5, TimeUnit.SECONDS), "triggerNow must dispatch a second run");
+        assertEquals(2, starts.get());
+        gate.countDown();
+    }
+
+    /**
+     * The overlap flag is per schedule id: a long-running schedule must not stop an unrelated one
+     * from firing. Guards against a flag accidentally shared across entries.
+     */
+    @Test
+    void differentSchedules_areNotBlockedByEachOther() throws Exception {
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        CountDownLatch gate = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+
+        for (String id : new String[]{"a", "b"}) {
+            registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("agent-" + id)) {
+                @Override public AgentResponse execute(AgentTask task) {
+                    starts.incrementAndGet();
+                    bothStarted.countDown();
+                    try {
+                        gate.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return success(task);
+                }
+            });
+            scheduler.register(AgentSchedule.builder()
+                    .scheduleId(id)
+                    .agentId(AgentId.of("agent-" + id))
+                    .every(Duration.ofHours(1))
+                    .withInput("go")
+                    .build());
+        }
+
+        scheduler.safeFire(scheduleOf("a"));
+        scheduler.safeFire(scheduleOf("b"));
+
+        assertTrue(bothStarted.await(5, TimeUnit.SECONDS),
+                "a second schedule must not be blocked by the first one's in-flight run");
+        assertEquals(2, starts.get());
+        gate.countDown();
+    }
+
+    private AgentSchedule scheduleOf(String id) {
+        return AgentSchedule.builder()
+                .scheduleId(id)
+                .agentId(AgentId.of("agent-" + id))
+                .every(Duration.ofHours(1))
+                .withInput("go")
+                .build();
+    }
+
+    /**
+     * The flag must survive pause/resume, which swap the schedule's {@code ScheduledFuture}.
+     * A fresh flag there would let a run resume alongside a run that was already in flight —
+     * exactly the unbounded overlap the flag exists to prevent.
+     */
+    @Test
+    void overlapFlag_survivesPauseAndResume() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch gate = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("pause-agent")) {
+            @Override public AgentResponse execute(AgentTask task) {
+                starts.incrementAndGet();
+                started.countDown();
+                try {
+                    gate.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                return success(task);
+            }
+        });
+
+        AgentSchedule s = AgentSchedule.builder()
+                .scheduleId("pausable")
+                .agentId(AgentId.of("pause-agent"))
+                .every(Duration.ofHours(1))
+                .withInput("go")
+                .build();
+        scheduler.register(s);
+
+        scheduler.safeFire(s);
+        assertTrue(started.await(5, TimeUnit.SECONDS), "first run started");
+
+        scheduler.pause("pausable");
+        scheduler.resume("pausable");
+
+        scheduler.safeFire(s);
+        assertEquals(1, starts.get(),
+                "a tick after pause/resume must still see the in-flight run and be skipped");
+
+        gate.countDown();
+    }
+
+    /**
+     * A dispatch that fails synchronously (blank {@code inputTemplate} makes
+     * {@code AgentTask.of} throw, before any completion callback is registered) must still
+     * release the flag. Without it the schedule would skip every tick forever after a single
+     * failed dispatch — a dead schedule with no error.
+     */
+    @Test
+    void overlapFlag_isReleased_whenDispatchFailsSynchronously() {
+        registry.register(new LocalAgentSchedulerTest.StubAgent(AgentId.of("blank-agent")));
+
+        AtomicInteger skipped = new AtomicInteger();
+        AtomicInteger dispatchFailures = new AtomicInteger();
+        LocalAgentScheduler listening = new LocalAgentScheduler(registry, new ScheduleExecutionListener() {
+            @Override public void onFire(String scheduleId, AgentId agentId) {}
+            @Override public void onComplete(String scheduleId, AgentResponse outcome) {
+                if (outcome.failureReason() != null
+                        && outcome.failureReason().contains("skipped: previous run of this schedule is still in flight")) {
+                    skipped.incrementAndGet();
+                } else if (outcome.failureReason() != null
+                        && outcome.failureReason().contains("failed to dispatch")) {
+                    dispatchFailures.incrementAndGet();
+                }
+            }
+        });
+        listening.start();
+
+        AgentSchedule blank = AgentSchedule.builder()
+                .scheduleId("blank-dispatch")
+                .agentId(AgentId.of("blank-agent"))
+                .every(Duration.ofHours(1))
+                // no withInput(...) — inputTemplate is "", AgentTask.of("") throws
+                .build();
+        listening.register(blank);
+
+        for (int i = 0; i < 3; i++) {
+            listening.safeFire(blank);
+        }
+
+        // A leaked flag would report ticks 2 and 3 as skips instead of as dispatch failures.
+        assertEquals(3, dispatchFailures.get(), "every tick must reach dispatch, not be skipped");
+        assertEquals(0, skipped.get(), "a failed dispatch must not leave the flag set");
+    }
+
+    /** Polls {@code condition} for up to ~2s — a real run finishes on another thread. */
+    private static void waitFor(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 2_000;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
         }
     }
 

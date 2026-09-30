@@ -11,8 +11,11 @@ import io.ara.core.eval.CaseStats;
 import io.ara.core.eval.EvalCase;
 import io.ara.core.eval.EvalResult;
 import io.ara.core.eval.EvalSuite;
+import io.ara.core.eval.EvaluationResult;
+import io.ara.core.eval.EvaluationStrategy;
 import io.ara.core.eval.StrategyRegistry;
 import io.ara.core.eval.Verdict;
+import io.ara.runtime.eval.evaluator.LlmJudgeEvaluator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -138,6 +141,48 @@ class DefaultEvalRunnerTest {
         assertTrue(nr.reason().contains("advisory judge"));
     }
 
+    /**
+     * What the unreadable-grade path in {@link LlmJudgeEvaluator} exists to protect, asserted
+     * through the verdict instead of through {@link LlmJudgeEvaluator#UNPARSEABLE_SCORE}: the
+     * constant alone promises nothing. {@code UNPARSEABLE_SCORE} raised to 0.7, or
+     * {@link #JUDGE_ADVISORY_THRESHOLD} lowered to 0.4, would leave every judge unit test green
+     * and promote a candidate on a formatting wobble — this is the test that notices.
+     */
+    @Test
+    void anUnreadableJudgeReply_needsReview_andNeverPromotes() {
+        addCase("j1", false, EvalCase.Status.READY, List.of(), "x", "judge",
+                Map.of("spec", "is the answer right?", "blocking", "false"));
+        StrategyRegistry strategies = StrategyRegistry.defaults();
+        strategies.register(new LlmJudgeEvaluator(agent(in -> "I would rather not say")));   // no SCORE: line
+
+        EvalResult r = new DefaultEvalRunner(repo, strategies, specHash -> agent(in -> "ok"))
+                .run("spec-A", SUITE, 3);
+
+        assertEquals(LlmJudgeEvaluator.UNPARSEABLE_SCORE, r.perCase().get("j1").meanScore(), 1e-9);
+        Verdict.NeedsReview nr = assertInstanceOf(Verdict.NeedsReview.class, r.verdict());
+        assertTrue(nr.reason().contains("advisory judge"), "reason: " + nr.reason());
+    }
+
+    /**
+     * The other degradation path: a judge that does not complete scores {@code 0.0} rather than
+     * {@link LlmJudgeEvaluator#UNPARSEABLE_SCORE}, so the recorded number differs — but the
+     * verdict does not, and that is the part a reader depends on. Never vetoed either: the case
+     * is non-blocking, so it escalates rather than rejecting.
+     */
+    @Test
+    void aJudgeThatDoesNotComplete_needsReview_too() {
+        addCase("j1", false, EvalCase.Status.READY, List.of(), "x", "judge",
+                Map.of("spec", "is the answer right?", "blocking", "false"));
+        StrategyRegistry strategies = StrategyRegistry.defaults();
+        strategies.register(new LlmJudgeEvaluator(failingAgent()));
+
+        EvalResult r = new DefaultEvalRunner(repo, strategies, specHash -> agent(in -> "ok"))
+                .run("spec-A", SUITE, 3);
+
+        assertEquals(0.0, r.perCase().get("j1").meanScore(), 1e-9);
+        assertInstanceOf(Verdict.NeedsReview.class, r.verdict());
+    }
+
     @Test
     void draftCasesAreExcludedFromTheVerdict() {
         addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "ok"));
@@ -210,6 +255,29 @@ class DefaultEvalRunnerTest {
         assertThrows(IllegalArgumentException.class, () -> runner(agent(in -> "x")).run("spec-A", SUITE, 2));
     }
 
+    /**
+     * The runner does not clamp a verifier's score into {@code [0, 1]} behind its back: an
+     * out-of-range score is a bug in that verifier, and it surfaces there, as a failure, rather
+     * than being folded into the mean and the stdev of a measurement nobody made.
+     */
+    @Test
+    void anOutOfRangeVerifierScore_failsLoudly_ratherThanBeingClamped() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "over_confident", Map.of());
+        StrategyRegistry strategies = StrategyRegistry.defaults();
+        strategies.register("over_confident", new EvaluationStrategy() {
+            @Override public String strategyId() { return "over_confident"; }
+            @Override public EvaluationResult evaluate(AgentResponse response, EvalCase evalCase) {
+                return new EvaluationResult(true, 1.5, "over-confident verifier", Map.of());
+            }
+        });
+        DefaultEvalRunner runner = new DefaultEvalRunner(repo, strategies, specHash -> agent(in -> "ok"));
+
+        IllegalArgumentException failure =
+                assertThrows(IllegalArgumentException.class, () -> runner.run("spec-A", SUITE, 3));
+        assertTrue(failure.getMessage().contains("1.5"),
+                "the score guard of the verifier is what must reject it: " + failure.getMessage());
+    }
+
     @Test
     void variancePicksUpFlakyRuns() {
         addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "ok"));
@@ -241,8 +309,8 @@ class DefaultEvalRunnerTest {
 
     @Test
     void aRealCapStopsBeforeTheNextCase_andForcesNeedsReview() {
-        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "ok"));
-        addCase("c2", false, EvalCase.Status.READY, List.of(), "y", "exact_match", Map.of("expected", "ok"));
+        addCase("c1", false, EvalCase.Status.READY, List.of("shape"), "x", "exact_match", Map.of("expected", "ok"));
+        addCase("c2", false, EvalCase.Status.READY, List.of("tone"), "y", "exact_match", Map.of("expected", "ok"));
 
         // 100 tokens/run × 3 runs = 300 for c1 alone, over a 250 cap — breached mid-c1,
         // reported only once c2 would otherwise start.
@@ -251,6 +319,8 @@ class DefaultEvalRunnerTest {
 
         assertEquals(List.of("c1"), List.copyOf(r.perCase().keySet()), "c2 never starts once the cap is breached");
         assertEquals(3, r.runCosts().size(), "c1's own 3 runs are never cut short");
+        assertEquals(List.of("shape"), List.copyOf(r.perTag().keySet()),
+                "a case that never ran has no measurement, so it contributes no tag either");
         Verdict.NeedsReview nr = assertInstanceOf(Verdict.NeedsReview.class, r.verdict());
         assertTrue(nr.reason().contains("run budget exceeded"), "reason: " + nr.reason());
         assertTrue(nr.reason().contains("TOKENS"), "reason: " + nr.reason());

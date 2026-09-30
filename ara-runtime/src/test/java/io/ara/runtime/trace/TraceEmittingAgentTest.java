@@ -102,6 +102,92 @@ class TraceEmittingAgentTest {
         assertTrue(blobText(toolStep.promptRef()).startsWith("read_file "));
     }
 
+    // ── which spec, and in what order ─────────────────────────────────────────────────
+
+    private List<ExecutionStep> threeSteps() {
+        return List.of(ExecutionStep.thought("a", 1), ExecutionStep.toolCall("t", "{}", 1), ExecutionStep.finalAnswer("done", 2));
+    }
+
+    /** The join key to everything measured per spec: without it a span names an agent, not a behaviour. */
+    @Test
+    void everySpanCarriesTheSpecHashTheResolverGivesForTheAgentsConfig() {
+        AraAgent withConfig = new AraAgent() {
+            @Override public AgentId agentId() { return agentId; }
+            @Override public AgentConfig config() { return AgentConfig.defaults().agentType("reviewer").build(); }
+            @Override public AgentState currentState() { return AgentState.IDLE; }
+            @Override public AgentResponse execute(AgentTask task) { return success(task, "ok", threeSteps()); }
+            @Override public void terminate() {}
+        };
+        AgentTask task = AgentTask.of("q", Map.of(), "run-7", "tester");
+
+        new TraceEmittingAgent(withConfig, traces, blobs, config -> "spec-" + config.agentType()).execute(task);
+
+        List<TraceSpan> spans = traces.findByRunId("run-7");
+        assertEquals(4, spans.size());
+        assertTrue(spans.stream().allMatch(s -> "spec-reviewer".equals(s.specHash())), "root and every child");
+    }
+
+    @Test
+    void withoutAResolverSpansCarryNoSpecHashAsBefore() {
+        new TraceEmittingAgent(agent(t -> success(t, "ok", threeSteps())), traces, blobs)
+                .execute(AgentTask.of("q", Map.of(), "run-8", "tester"));
+
+        assertTrue(traces.findByRunId("run-8").stream().allMatch(s -> s.specHash() == null));
+    }
+
+    /** A resolver is caller code: if it throws, the run still runs and is still traced. */
+    @Test
+    void aResolverThatThrowsNeverFailsTheRun() {
+        AraAgent withConfig = new AraAgent() {
+            @Override public AgentId agentId() { return agentId; }
+            @Override public AgentConfig config() { return AgentConfig.defaults().agentType("x").build(); }
+            @Override public AgentState currentState() { return AgentState.IDLE; }
+            @Override public AgentResponse execute(AgentTask task) { return success(task, "ok", threeSteps()); }
+            @Override public void terminate() {}
+        };
+
+        AgentResponse response = new TraceEmittingAgent(withConfig, traces, blobs, config -> { throw new IllegalStateException("no"); })
+                .execute(AgentTask.of("q", Map.of(), "run-9", "tester"));
+
+        assertTrue(response.isSuccess());
+        assertEquals(4, traces.findByRunId("run-9").size());
+    }
+
+    /**
+     * Steps have no clock, so they are laid out in order inside the run's interval. Every step sharing
+     * the run's whole interval made "the steps before this one" empty for every step, which disabled
+     * the search for an upstream cause.
+     */
+    @Test
+    void childSpansAreStrictlyOrderedInsideTheRunsInterval() {
+        new TraceEmittingAgent(agent(t -> success(t, "ok", threeSteps())), traces, blobs)
+                .execute(AgentTask.of("q", Map.of(), "run-10", "tester"));
+
+        List<TraceSpan> spans = traces.findByRunId("run-10");
+        TraceSpan root = spans.get(0);
+        List<TraceSpan> children = spans.subList(1, spans.size());
+        for (int i = 0; i < children.size(); i++) {
+            assertTrue(!children.get(i).startedAt().isBefore(root.startedAt()), "no child starts before the run");
+            assertTrue(!children.get(i).endedAt().isAfter(root.endedAt()), "no child ends after the run");
+            if (i > 0) {
+                assertTrue(children.get(i).startedAt().isAfter(children.get(i - 1).startedAt()),
+                        "step " + i + " starts after step " + (i - 1));
+            }
+        }
+    }
+
+    @Test
+    void anInstantaneousRunStillKeepsItsStepsInOrder() {
+        AraAgent instant = agent(t -> new AgentResponse(t.taskId(), agentId, "ok", AgentState.DONE, 3, 1, 1,
+                Money.ZERO_EUR, Duration.ZERO, null, Instant.parse("2026-09-04T12:00:00Z"), threeSteps(), "m"));
+
+        new TraceEmittingAgent(instant, traces, blobs).execute(AgentTask.of("q", Map.of(), "run-11", "tester"));
+
+        List<TraceSpan> children = traces.findByRunId("run-11").subList(1, 4);
+        assertTrue(children.get(1).startedAt().isAfter(children.get(0).startedAt())
+                && children.get(2).startedAt().isAfter(children.get(1).startedAt()));
+    }
+
     @Test
     void aFailedResponseGivesAFailedRootWithAClassifiedFailureKind() {
         AgentTask task = AgentTask.of("do the thing", Map.of(), "run-err", "tester");

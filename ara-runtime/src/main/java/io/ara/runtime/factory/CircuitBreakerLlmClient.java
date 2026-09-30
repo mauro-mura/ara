@@ -5,6 +5,9 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.telemetry.AraTelemetry;
+import io.ara.core.telemetry.Span;
+import io.ara.core.telemetry.SpanStatus;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -62,6 +65,18 @@ import java.util.concurrent.atomic.AtomicReference;
  * consecutive failures, {@value #DEFAULT_COOLDOWN_SECONDS}s cooldown): the values matter far
  * less than the mechanism, and every knob is another contract to test and defend (the wiring
  * in {@code DefaultWiringFactory} applies this with no parameters).
+ *
+ * <p>With an {@link AraTelemetry} supplied, each state transition is recorded as a
+ * {@code llm.circuit} span carrying {@code llm.provider}, {@code llm.circuit.outcome}
+ * ({@code opened} / {@code half_open} / {@code closed}), {@code llm.circuit.from},
+ * {@code llm.circuit.failure_threshold} and {@code llm.circuit.cooldown_ms}. Transitions
+ * only, never the skips they cause: an open circuit is hit once per request for as long as the
+ * outage lasts, and a span per skip would bury the transitions that actually explain the
+ * behaviour. {@link AraTelemetry#noop()} (the default) allocates nothing.
+ *
+ * <p><b>Thread safety:</b> thread-safe. All configuration fields are final; the state machine
+ * is carried by atomics, and a transition's span is emitted by whichever thread won the
+ * compare-and-set, which is the thread whose transition it describes.
  */
 public final class CircuitBreakerLlmClient implements LlmClient {
 
@@ -76,6 +91,7 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     private final int                  failureThreshold;
     private final Duration             cooldown;
     private final Clock                clock;
+    private final AraTelemetry         telemetry;
 
     private final AtomicReference<State> state          = new AtomicReference<>(State.CLOSED);
     private final AtomicInteger          consecutiveFailures = new AtomicInteger(0);
@@ -83,15 +99,28 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     private final AtomicLong            openedAtMillis  = new AtomicLong(-1L);
 
     public CircuitBreakerLlmClient(LlmClient delegate) {
-        this(delegate, DEFAULT_FAILURE_THRESHOLD, DEFAULT_COOLDOWN, Clock.systemUTC());
+        this(delegate, DEFAULT_FAILURE_THRESHOLD, DEFAULT_COOLDOWN, Clock.systemUTC(), AraTelemetry.noop());
     }
 
     public CircuitBreakerLlmClient(LlmClient delegate, int failureThreshold, Duration cooldown) {
-        this(delegate, failureThreshold, cooldown, Clock.systemUTC());
+        this(delegate, failureThreshold, cooldown, Clock.systemUTC(), AraTelemetry.noop());
+    }
+
+    public CircuitBreakerLlmClient(LlmClient delegate, AraTelemetry telemetry) {
+        this(delegate, DEFAULT_FAILURE_THRESHOLD, DEFAULT_COOLDOWN, Clock.systemUTC(), telemetry);
+    }
+
+    public CircuitBreakerLlmClient(LlmClient delegate, int failureThreshold, Duration cooldown, AraTelemetry telemetry) {
+        this(delegate, failureThreshold, cooldown, Clock.systemUTC(), telemetry);
     }
 
     /** Package-visible so tests can freeze/advance the clock and hold the trial threads. */
     CircuitBreakerLlmClient(LlmClient delegate, int failureThreshold, Duration cooldown, Clock clock) {
+        this(delegate, failureThreshold, cooldown, clock, AraTelemetry.noop());
+    }
+
+    CircuitBreakerLlmClient(LlmClient delegate, int failureThreshold, Duration cooldown,
+                            Clock clock, AraTelemetry telemetry) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
         if (failureThreshold < 1) throw new IllegalArgumentException("failureThreshold must be >= 1");
         Objects.requireNonNull(cooldown, "cooldown must not be null");
@@ -100,6 +129,7 @@ public final class CircuitBreakerLlmClient implements LlmClient {
         this.failureThreshold = failureThreshold;
         this.cooldown         = cooldown;
         this.clock            = Objects.requireNonNull(clock, "clock must not be null");
+        this.telemetry        = Objects.requireNonNull(telemetry, "telemetry must not be null");
     }
 
     @Override
@@ -151,11 +181,15 @@ public final class CircuitBreakerLlmClient implements LlmClient {
         long now = clock.millis();
         if (now - openedAtMillis.get() < cooldown.toMillis()) throw fastFail();
         if (!state.compareAndSet(State.OPEN, State.HALF_OPEN)) throw fastFail();
+        record("half_open", State.OPEN, null);
     }
 
     private void onSuccess() {
         consecutiveFailures.set(0);
-        state.set(State.CLOSED);
+        State previous = state.getAndSet(State.CLOSED);
+        // Only the recovery close is worth a span: a success while already CLOSED is the
+        // normal path and would emit one span per request forever.
+        if (previous != State.CLOSED) record("closed", previous, null);
     }
 
     private void onFailure(Throwable ex) {
@@ -177,9 +211,32 @@ public final class CircuitBreakerLlmClient implements LlmClient {
     }
 
     private void open() {
+        State previous = state.getAndSet(State.OPEN);
         consecutiveFailures.set(0);
-        state.set(State.OPEN);
         openedAtMillis.set(clock.millis());
+        record("opened", previous, null);
+    }
+
+    /**
+     * Records one {@code llm.circuit} span for a state transition. Deliberately not recorded
+     * for every fast-fail skip: during an outage that would emit one span per request, which
+     * is exactly the volume this change is meant to avoid — the {@code opened} transition and
+     * the pool's own {@code llm.failover} span already say the candidate is being skipped.
+     */
+    private void record(String outcome, State from, Throwable cause) {
+        Span span = telemetry.spanBuilder("llm.circuit")
+                .setAttribute("llm.provider", delegate.providerId())
+                .setAttribute("llm.circuit.outcome", outcome)
+                .setAttribute("llm.circuit.from", from.name())
+                .setAttribute("llm.circuit.failure_threshold", (long) failureThreshold)
+                .setAttribute("llm.circuit.cooldown_ms", cooldown.toMillis())
+                .startSpan();
+        if (cause != null) {
+            span.recordException(cause).setStatus(SpanStatus.ERROR);
+        } else {
+            span.setStatus(SpanStatus.OK);
+        }
+        span.end();
     }
 
     private LlmException fastFail() {

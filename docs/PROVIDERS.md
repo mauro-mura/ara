@@ -178,7 +178,9 @@ Make sure `INFO` is enabled for `io.ara.runtime.llm.LoggingLlmClient` (LLM I/O) 
 
 Pass an `AraTelemetry` to `AraRuntime.Builder.telemetry(...)` to get a full trace tree —
 one `agent.execute` span per task, with `llm.complete` (one per LLM call) and
-`tool.execute` (one per tool dispatch) nested as children in call order:
+`tool.execute` (one per tool dispatch) nested as children in call order. A `FAILOVER` chain
+adds `llm.failover` and `llm.circuit` spans on top — see
+[LLM failover & circuit breaker](#observing-failover-and-breaker-state):
 
 ```java
 AraTelemetry telemetry = OtelTelemetryFactory.builder()   // ara-adapters
@@ -263,6 +265,28 @@ calls would have survived.
 Circuit state lives on the session's wiring (ADR-039), so a conversation that keeps its
 session alive accumulates the diagnosis across calls, while a fresh ephemeral session
 starts a clean breaker.
+
+### Observing failover and breaker state
+
+With `telemetry(...)` configured, the resilience layer adds its own spans to the trace. The
+per-candidate `llm.complete` spans are already there (each candidate is instrumented), but
+they don't say *why* a fallback answered — so the pool records a chain-level span:
+
+| span | when | notable attributes |
+| --- | --- | --- |
+| `llm.failover` | every blocking chain | `outcome` = `served_by_primary` / `served_by_fallback` / `aborted_non_failover` / `exhausted` / `interrupted`, `attempts`, `served_by`, `chain` |
+| `llm.failover` | each streaming decision | same, plus `streaming: true` and `provider`; `outcome` = `served` / `switching` / `aborted_non_failover` / `failed_after_first_token` / `exhausted` |
+| `llm.circuit` | breaker transitions only | `outcome` = `opened` / `half_open` / `closed`, `from`, `failure_threshold`, `cooldown_ms`, `provider` |
+
+Blocking calls wrap the whole candidate walk in a single `llm.failover` span, so the
+candidates' `llm.complete` spans appear as its children. Streaming cannot: tokens arrive over
+time on the provider's thread and a tracing scope is thread-bound, so each streaming decision
+is recorded as its own short span instead.
+
+Skips caused by an open circuit are deliberately *not* spans — an open circuit is hit once per
+request for the whole outage, and one span per skip would bury the transitions that actually
+explain the behaviour. Read the `opened` transition plus the pool's `served_by_fallback`
+instead: they already say the candidate was skipped and who answered.
 
 Runnable: `io.ara.examples.failover.FailoverExample` — the same 503 against `FAILOVER`
 (survives via the fallback), against `PRIMARY_ONLY` (dies), a 401 (aborts without

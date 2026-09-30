@@ -99,6 +99,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
      */
     private final io.ara.core.trace.TraceStore traceStore;
     private final io.ara.core.trace.BlobStore  traceBlobStore;
+    private final java.util.function.Function<AgentConfig, String> traceSpecHash;
 
     /**
      * Shared, ref-counted, versioned catalog of LLM transports (ADR-039 §3-4), keyed by
@@ -134,6 +135,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         this.mediaStore           = builder.mediaStore;
         this.traceStore           = builder.traceStore;
         this.traceBlobStore       = builder.traceBlobStore;
+        this.traceSpecHash        = builder.traceSpecHash;
 
         this.llmTransports = new DefaultResourceRegistry<>(
                 transport -> {
@@ -305,7 +307,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         ToolRegistry toolRegistry = toolRegistryFactory.apply(config);
         WiringFactory wiringFactory = new DefaultWiringFactory(
                 llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
-                mediaStore);
+                mediaStore, telemetry);
         AgentInterceptorChain chain = new AgentInterceptorChain(interceptors);
         return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore);
     }
@@ -348,7 +350,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
      */
     private AraAgent instrumentTracing(AraAgent agent) {
         return traceStore != null && traceBlobStore != null
-                ? new io.ara.runtime.trace.TraceEmittingAgent(agent, traceStore, traceBlobStore)
+                ? new io.ara.runtime.trace.TraceEmittingAgent(agent, traceStore, traceBlobStore, traceSpecHash)
                 : agent;
     }
 
@@ -495,6 +497,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         private SessionStore sessionStore = SessionStore.noop();
         private io.ara.core.trace.TraceStore traceStore;
         private io.ara.core.trace.BlobStore  traceBlobStore;
+        private java.util.function.Function<AgentConfig, String> traceSpecHash;
 
         private Builder() {}
 
@@ -642,6 +645,12 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
                                      io.ara.core.trace.BlobStore blobStore) {
             this.traceStore     = Objects.requireNonNull(traceStore, "traceStore must not be null");
             this.traceBlobStore = Objects.requireNonNull(blobStore, "blobStore must not be null");
+            return this;
+        }
+
+        /** Stamps each emitted span with the spec hash this function gives for the agent's config (optional). */
+        public Builder traceSpecHash(java.util.function.Function<AgentConfig, String> specHashOf) {
+            this.traceSpecHash = Objects.requireNonNull(specHashOf, "specHashOf must not be null");
             return this;
         }
 

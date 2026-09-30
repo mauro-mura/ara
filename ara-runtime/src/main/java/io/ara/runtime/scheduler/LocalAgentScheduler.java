@@ -24,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Single-JVM implementation of {@link AgentScheduler} (ADR-032).
@@ -70,6 +71,33 @@ import java.util.concurrent.TimeUnit;
  * register a task with {@link #tickExecutor} and return) — the same "short, no I/O" exception
  * N1's own findings call out, not the general "don't do slow work inside a map's per-bin lock"
  * pinning risk those findings are otherwise about.
+ *
+ * <p><b>2026-09-30 — a schedule never overlaps with itself.</b> A tick whose previous run is
+ * still executing is skipped. {@link #agentExecutor} is a virtual-thread-per-task executor with
+ * no ceiling, so before this an agent that outlasted its own interval was launched again on every
+ * tick: a 1s agent on a 50ms interval was measured starting 22 concurrent executions in 1.1s,
+ * each one a full agent run with its own LLM calls, sessions and tool dispatches, all of them
+ * overlapping and none able to influence the others. For a recurring job that is never what was
+ * wanted — a "daily report" that takes 40 minutes should produce one report, not 48 concurrent
+ * half-written ones — and it is the per-item-spawn-without-a-ceiling shape this project's
+ * concurrency rules call out as a resource-exhaustion vector.
+ *
+ * <p>Deliberately <em>not</em> a configurable policy, even though the obvious next step looks
+ * like one. A "run again once the previous one finishes" variant needs the completion hook to
+ * re-dispatch, which drags a second piece of state (a pending run) in beside the in-flight one,
+ * moves {@link ScheduleExecutionListener#onFire} off the tick thread onto whichever thread
+ * finished the previous run, and makes the release path re-entrant — all of it to serve a second
+ * consumer nobody has asked for yet. And an unbounded "let me overlap freely" option would be the
+ * wrong thing to offer anyway: a caller who genuinely wants N runs in flight registers N
+ * schedules, and a caller who wants a <em>bound</em> of N is asking for a ceiling feature, which
+ * is a different thing from "no ceiling". So one honest rule is applied unconditionally, and
+ * whoever needs coalescing adds it with a real second caller in hand.
+ *
+ * <p><b>Checklist.</b> {@link Entry#inFlight()} must travel with the schedule id through every
+ * mutation — that is what {@link Entry#withFuture} is for, and every site that swaps a {@link
+ * ScheduledFuture} goes through it. A fresh {@link AtomicBoolean} at any such site would leave
+ * the running execution's release pointed at an orphaned flag while the schedule's new flag reads
+ * idle, silently restoring the unbounded overlap this exists to prevent.
  */
 public final class LocalAgentScheduler implements AgentScheduler {
 
@@ -80,8 +108,25 @@ public final class LocalAgentScheduler implements AgentScheduler {
     private final ExecutorService          agentExecutor;
     private final ScheduleExecutionListener listener;
 
-    /** Holds the AgentSchedule definition and its active ScheduledFuture — a {@code null} future means paused. */
-    private record Entry(AgentSchedule schedule, ScheduledFuture<?> future) {}
+    /**
+     * The AgentSchedule definition, its active {@link ScheduledFuture} ({@code null} when paused)
+     * and the overlap flag guarding this id.
+     *
+     * <p><b>Thread-safe.</b> The two reference components never change after construction; only
+     * the {@link AtomicBoolean} inside {@link #inFlight()} is mutable, and it is mutated solely
+     * through its own CAS / {@code set}.
+     */
+    private record Entry(AgentSchedule schedule, ScheduledFuture<?> future, AtomicBoolean inFlight) {
+
+        /**
+         * The same schedule with a different job state, keeping the overlap flag. Every site that
+         * installs, cancels or replaces a {@link ScheduledFuture} must build its new Entry here
+         * rather than calling the canonical constructor — see the class javadoc's checklist.
+         */
+        Entry withFuture(ScheduledFuture<?> replacement) {
+            return new Entry(schedule, replacement, inFlight);
+        }
+    }
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
 
@@ -116,7 +161,14 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 existing.future().cancel(false);
             }
             ScheduledFuture<?> future = schedule.active() ? scheduleJob(schedule) : null;
-            return new Entry(schedule, future);
+            // A re-registration replaces the definition but must not orphan a run of the previous
+            // one: that run still holds the old flag and will release it on completion, so the
+            // new definition keeps waiting on that same flag rather than starting a second,
+            // unblocked execution alongside it.
+            AtomicBoolean inFlight = existing != null
+                    ? existing.inFlight()
+                    : new AtomicBoolean();
+            return new Entry(schedule, future, inFlight);
         });
         log.info("[Scheduler] registered '{}' trigger={} active={}",
                 schedule.scheduleId(), describe(schedule.trigger()), schedule.active());
@@ -134,7 +186,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 return existing;
             }
             existing.future().cancel(false);
-            return new Entry(existing.schedule(), null);
+            return existing.withFuture(null);
         });
         if (!alreadyPaused[0]) {
             log.info("[Scheduler] paused '{}'", scheduleId);
@@ -152,7 +204,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 alreadyActive[0] = true;
                 return existing;
             }
-            return new Entry(existing.schedule(), scheduleJob(existing.schedule()));
+            return existing.withFuture(scheduleJob(existing.schedule()));
         });
         if (!alreadyActive[0]) {
             log.info("[Scheduler] resumed '{}'", scheduleId);
@@ -175,7 +227,11 @@ public final class LocalAgentScheduler implements AgentScheduler {
     public AgentFuture triggerNow(String scheduleId) {
         AgentSchedule schedule = require(scheduleId).schedule();
         log.info("[Scheduler] triggerNow '{}'", scheduleId);
-        return fire(schedule);
+        // A manual trigger is an explicit one-off request, not a tick: it dispatches even if the
+        // schedule's previous run is still in flight, because the caller is holding the returned
+        // AgentFuture and silently dropping their request would strand it. The overlap guard
+        // below belongs to recurring ticks only.
+        return dispatch(schedule, null);
     }
 
     @Override
@@ -270,7 +326,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 // cancelled or paused concurrently — do not resurrect it.
                 return current;
             }
-            return new Entry(schedule, scheduleCron(schedule, expression));
+            return current.withFuture(scheduleCron(schedule, expression));
         });
     }
 
@@ -314,7 +370,39 @@ public final class LocalAgentScheduler implements AgentScheduler {
         }
     }
 
+    /**
+     * A recurring tick: dispatches, unless this schedule's previous run is still executing, in
+     * which case the tick is dropped.
+     */
     private AgentFuture fire(AgentSchedule schedule) {
+        // Acquired first, and only when the entry is still present: a tick for a schedule that was
+        // cancelled between the job firing and here must not be reported as overlapping anything.
+        // Reading the Entry and then CASing its own AtomicBoolean is safe without holding the
+        // map's per-bin lock — the worst case is acting on an Entry that a concurrent cancel just
+        // detached, which is exactly the "nothing to overlap" outcome anyway. Acquiring *outside*
+        // the bin lock is deliberate: a dispatch must never serialize unrelated schedule ids.
+        Entry entry = entries.get(schedule.scheduleId());
+        if (entry != null && !entry.inFlight().compareAndSet(false, true)) {
+            return skipped(schedule);
+        }
+        return dispatch(schedule, entry != null ? entry.inFlight() : null);
+    }
+
+    /**
+     * Announces and hands {@code schedule} to its agent. {@code inFlight} is the overlap flag
+     * this dispatch acquired, or {@code null} for a dispatch that did not (a manual trigger, or a
+     * tick whose schedule was cancelled mid-fire) and therefore must not release anything.
+     *
+     * <p>{@link #notifyFire} lives here rather than in {@link #fire} so that a manual
+     * {@link #triggerNow} keeps announcing itself exactly as it did when it shared the tick path,
+     * and so a skip can announce before it explains.
+     *
+     * <p><b>Checklist.</b> Every exit that returns <em>without</em> attaching a completion
+     * callback must release {@code inFlight}; the three that do are the synchronous-dispatch
+     * catch, the agent-not-found branch, and {@link #onFireOutcome} for the async path. Missing
+     * one leaves the flag set forever and silently stops the schedule from ever firing again.
+     */
+    private AgentFuture dispatch(AgentSchedule schedule, AtomicBoolean inFlight) {
         notifyFire(schedule.scheduleId(), schedule.agentId());
         log.debug("[Scheduler] firing '{}' agent={}", schedule.scheduleId(), schedule.agentId().value());
         return registry.findById(schedule.agentId())
@@ -323,13 +411,14 @@ public final class LocalAgentScheduler implements AgentScheduler {
                     try {
                         AgentTask task = AgentTask.of(schedule.inputTemplate());
                         future = AraAgents.executeAsync(agent, task, agentExecutor);
-                        future.async().whenComplete((r, ex) -> onFireOutcome(schedule, task, r, ex));
+                        future.async().whenComplete((r, ex) -> onFireOutcome(schedule, task, inFlight, r, ex));
                     } catch (Throwable t) {
                         // Task construction / dispatch failed synchronously — before whenComplete
                         // was ever registered. Without this catch, onFire would have already fired
                         // with no matching onComplete ever following it: a schedule with a blank
                         // inputTemplate (AgentSchedule does not validate it) would violate the
                         // listener's "one onFire, one onComplete" contract on every single tick.
+                        release(inFlight);
                         AgentResponse failure = AgentResponse.failure(
                                 "scheduler-" + schedule.scheduleId(),
                                 schedule.agentId(),
@@ -342,6 +431,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
                     return future;
                 })
                 .orElseGet(() -> {
+                    release(inFlight);
                     log.warn("[Scheduler] agent {} not found for schedule '{}' — skipping",
                             schedule.agentId().value(), schedule.scheduleId());
                     AgentResponse failure = AgentResponse.failure(
@@ -354,9 +444,46 @@ public final class LocalAgentScheduler implements AgentScheduler {
                 });
     }
 
+    /**
+     * Reports a tick that was dropped because the previous run of the same schedule is still
+     * executing.
+     *
+     * <p>The skip is announced with {@link #notifyFire} before {@link #notifyComplete}, so the
+     * listener's one-fire/one-completion pairing holds on this path too — a dropped tick is
+     * reported as a completion whose failure reason says why, never as a silent tick with no
+     * outcome. This is the same shape as the agent-not-found path, which announces a fire and
+     * then reports that nothing was dispatched.
+     *
+     * <p>Logged at debug rather than warn: a schedule whose agent is simply slower than its own
+     * interval skips every single tick, and a warn line per tick would flood the log with a
+     * condition that is working as intended. The listener is where an application that cares
+     * opts in to visibility.
+     */
+    private AgentFuture skipped(AgentSchedule schedule) {
+        log.debug("[Scheduler] '{}' skipped — previous run still in flight", schedule.scheduleId());
+        notifyFire(schedule.scheduleId(), schedule.agentId());
+        AgentResponse failure = AgentResponse.failure(
+                "scheduler-" + schedule.scheduleId(),
+                schedule.agentId(),
+                "skipped: previous run of this schedule is still in flight",
+                Duration.ZERO);
+        notifyComplete(schedule.scheduleId(), failure);
+        return AgentFuture.completed(failure);
+    }
+
+    /** Clears the overlap flag so the schedule's next tick is eligible to run again. */
+    private static void release(AtomicBoolean inFlight) {
+        if (inFlight != null) {
+            inFlight.set(false);
+        }
+    }
+
     /** Reports the terminal outcome of a dispatched execution — the normal-path counterpart
-     *  of the synchronous-dispatch-failure handling in {@link #fire}. */
-    private void onFireOutcome(AgentSchedule schedule, AgentTask task, AgentResponse r, Throwable ex) {
+     *  of the synchronous-dispatch-failure handling in {@link #dispatch}, and the release site
+     *  for the happy path's overlap flag. */
+    private void onFireOutcome(AgentSchedule schedule, AgentTask task, AtomicBoolean inFlight,
+                               AgentResponse r, Throwable ex) {
+        release(inFlight);
         AgentResponse outcome = r;
         if (outcome == null && ex != null) {
             outcome = AgentResponse.failure(

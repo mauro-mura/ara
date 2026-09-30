@@ -43,7 +43,13 @@ public final class InMemoryEvalRepository implements EvalRepository {
         Objects.requireNonNull(suiteId, "suiteId must not be null");
         return cases.values().stream()
                 .filter(c -> c.suiteId().equals(suiteId))
-                .sorted(Comparator.comparingInt(EvalCase::seqNo))
+                // seqNo alone is not a total order, and ties are the normal case rather than an
+                // edge one: every case RegressionCaseBuilder derives from a production failure
+                // is created with seqNo 0. A tie therefore falls back to the iteration order of
+                // the ConcurrentHashMap above, which is the hash of the caseId — arbitrary, and
+                // not something a reader of a failing eval could reconstruct. caseId is unique
+                // within a suite, so breaking the tie on it makes the order total.
+                .sorted(Comparator.comparingInt(EvalCase::seqNo).thenComparing(EvalCase::caseId))
                 .toList();
     }
 

@@ -198,7 +198,7 @@ final class RuntimeAssembler {
     private ExecutionPlanner buildExecutionPlanner(Map<String, LlmClient> instrumentedClients) {
         LlmRouter reflection = b.reflectionRouter != null
                 ? b.reflectionRouter
-                : new DefaultLlmRouter(instrumentedClients, b.defaultClientId, b.llmClientFactory);
+                : new DefaultLlmRouter(instrumentedClients, b.defaultClientId, b.llmClientFactory, b.telemetry);
 
         ReactStrategy       reactStrategy     = new ReactStrategy();
         ReSpActStrategy     respactStrategy   = new ReSpActStrategy();
@@ -248,6 +248,7 @@ final class RuntimeAssembler {
         b.mcpServers.forEach((id, binding) ->
                 factoryBuilder.mcpServer(id, binding.connector(), binding.toolsAdapter()));
         if (b.traceStore != null) factoryBuilder.traceEmission(b.traceStore, b.traceBlobStore);   // ADR-0068 D1
+        if (b.traceSpecHash != null) factoryBuilder.traceSpecHash(b.traceSpecHash);
 
         return factoryBuilder
                 .toolRegistryFactory(agentCfg ->

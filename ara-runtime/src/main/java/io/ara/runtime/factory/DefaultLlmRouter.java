@@ -7,6 +7,7 @@ import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmRouter;
+import io.ara.core.telemetry.AraTelemetry;
 import io.ara.runtime.llm.LoggingLlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,14 +42,28 @@ public final class DefaultLlmRouter implements LlmRouter {
     private final Map<String, LlmClient> registry;
     private final String                 defaultClientId;
     private final LlmClientFactory       clientFactory;
+    private final AraTelemetry           telemetry;
     private final AtomicInteger          roundRobinIndex = new AtomicInteger(0);
 
     public DefaultLlmRouter(Map<String, LlmClient> registry,
                             String defaultClientId,
                             LlmClientFactory clientFactory) {
+        this(registry, defaultClientId, clientFactory, AraTelemetry.noop());
+    }
+
+    /**
+     * @param telemetry records the failover chain this router builds for reflection calls
+     *                  ({@link FailoverLlmClient}); {@link AraTelemetry#noop()} when the
+     *                  deployment does not trace.
+     */
+    public DefaultLlmRouter(Map<String, LlmClient> registry,
+                            String defaultClientId,
+                            LlmClientFactory clientFactory,
+                            AraTelemetry telemetry) {
         this.registry        = Map.copyOf(Objects.requireNonNull(registry));
         this.defaultClientId = Objects.requireNonNull(defaultClientId);
         this.clientFactory   = clientFactory;
+        this.telemetry       = Objects.requireNonNull(telemetry, "telemetry must not be null");
     }
 
     @Override
@@ -66,7 +81,7 @@ public final class DefaultLlmRouter implements LlmRouter {
                         .toList();
                 yield ordered.size() == 1
                         ? ordered.get(0)
-                        : new FailoverLlmClient(ordered);
+                        : new FailoverLlmClient(ordered, telemetry);
             }
 
             case ROUND_ROBIN -> {

@@ -46,11 +46,36 @@ public final class TraceEmittingAgent implements AraAgent, SessionHistoryAware, 
     private final AraAgent delegate;
     private final TraceStore traces;
     private final BlobStore blobs;
+    private final java.util.function.Function<AgentConfig, String> specHashOf;
 
     public TraceEmittingAgent(AraAgent delegate, TraceStore traces, BlobStore blobs) {
-        this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
-        this.traces   = Objects.requireNonNull(traces, "traces must not be null");
-        this.blobs    = Objects.requireNonNull(blobs, "blobs must not be null");
+        this(delegate, traces, blobs, null);
+    }
+
+    /**
+     * @param specHashOf names the spec a config belongs to, stamped on every span the agent emits
+     *                   (see {@link TraceProjection#project(AgentTask, AgentResponse, BlobStore, String)});
+     *                   {@code null} leaves spans without one, as before
+     */
+    public TraceEmittingAgent(AraAgent delegate, TraceStore traces, BlobStore blobs,
+                              java.util.function.Function<AgentConfig, String> specHashOf) {
+        this.delegate   = Objects.requireNonNull(delegate, "delegate must not be null");
+        this.traces     = Objects.requireNonNull(traces, "traces must not be null");
+        this.blobs      = Objects.requireNonNull(blobs, "blobs must not be null");
+        this.specHashOf = specHashOf;
+    }
+
+    /** The spec hash of the wrapped agent, or {@code null}; a resolver that throws must never fail a run. */
+    private String specHash() {
+        if (specHashOf == null || delegate.config() == null) {
+            return null;
+        }
+        try {
+            return specHashOf.apply(delegate.config());
+        } catch (RuntimeException e) {
+            log.warn("spec hash resolution failed for agent {}: {}", delegate.agentId().value(), e.getMessage());
+            return null;
+        }
     }
 
     @Override
@@ -81,7 +106,7 @@ public final class TraceEmittingAgent implements AraAgent, SessionHistoryAware, 
 
     private List<TraceSpan> safeProject(AgentTask task, AgentResponse response) {
         try {
-            return TraceProjection.project(task, response, blobs);
+            return TraceProjection.project(task, response, blobs, specHash());
         } catch (RuntimeException e) {
             log.warn("trace projection failed for task {}: {}", response.taskId(), e.getMessage());
             return List.of();

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
@@ -19,8 +20,12 @@ import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
+import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmTransport;
+import io.ara.core.media.MediaStore;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.runtime.factory.CircuitBreakerLlmClient;
+import io.ara.runtime.telemetry.RecordingTelemetry;
 
 class DefaultWiringFactoryTest {
 
@@ -30,6 +35,16 @@ class DefaultWiringFactoryTest {
         StubClient(String id) { this.id = id; }
         @Override public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
             return new LlmCompletion("ok", 1, 1, "stop", null);
+        }
+        @Override public String providerId() { return id; }
+    }
+
+    /** A stub that fails every call with a failover-able error, like a dead endpoint. */
+    private static final class FailingClient implements LlmClient {
+        private final String id;
+        FailingClient(String id) { this.id = id; }
+        @Override public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+            throw LlmException.serverError(id, "simulated 500", 500);
         }
         @Override public String providerId() { return id; }
     }
@@ -155,6 +170,35 @@ class DefaultWiringFactoryTest {
         assertTrue(wiring.llm().providerId().contains("primary"));
         assertTrue(wiring.llm().providerId().contains("fallback1"));
         assertEquals(2, wiring.leases().size(), "FAILOVER must lease every profile it can reach");
+        wiring.close();
+    }
+
+    @Test
+    void failoverPolicy_passesTheTelemetryDownToThePoolAndItsBreakers() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        // A primary that always fails: the chain walks to the fallback, and its breaker opens
+        // after the default threshold, so one call is enough to prove both spans are wired.
+        DefaultResourceRegistry<LlmTransport, LlmClient> registry =
+                new DefaultResourceRegistry<>(transport -> new StubClient("built:" + transport.modelName()), client -> { });
+        registry.seed("primary", new FailingClient("primary"));
+        registry.seed("fallback", new StubClient("fallback"));
+
+        var factory = new DefaultWiringFactory(registry, "primary", null, Map.of(),
+                cfg -> ToolRegistry.empty(), MediaStore.noop(), telemetry);
+
+        AgentWiring wiring = factory.build(configWithPolicy(LlmSelectionPolicy.FAILOVER, "primary", "fallback"));
+        wiring.llm().complete(List.of(), (LlmCallContext) null);
+
+        var failoverSpan = telemetry.spansNamed("llm.failover").get(0);
+        assertEquals("served_by_fallback", failoverSpan.attributes().get("llm.failover.outcome"));
+        assertEquals(2L, failoverSpan.attributes().get("llm.failover.attempts"));
+
+        for (int i = 0; i < CircuitBreakerLlmClient.DEFAULT_FAILURE_THRESHOLD - 1; i++) {
+            wiring.llm().complete(List.of(), (LlmCallContext) null);
+        }
+        var openedSpan = telemetry.spansNamed("llm.circuit").get(0);
+        assertEquals("opened", openedSpan.attributes().get("llm.circuit.outcome"));
+        assertEquals("primary", openedSpan.attributes().get("llm.provider"));
         wiring.close();
     }
 

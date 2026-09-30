@@ -8,6 +8,7 @@ import io.ara.core.llm.LlmSelectionPolicy;
 import io.ara.core.llm.LlmTransport;
 import io.ara.core.mcp.McpClient;
 import io.ara.core.media.MediaStore;
+import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.runtime.factory.CircuitBreakerLlmClient;
@@ -45,6 +46,7 @@ public final class DefaultWiringFactory implements WiringFactory {
     private final Map<String, McpServerBinding> mcpServers;
     private final Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory;
     private final MediaStore mediaStore;
+    private final AraTelemetry telemetry;
 
     /** Convenience constructor for agents with no ARA-managed MCP servers and no media. */
     public DefaultWiringFactory(
@@ -87,12 +89,31 @@ public final class DefaultWiringFactory implements WiringFactory {
             Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory,
             MediaStore mediaStore
     ) {
+        this(llmTransports, defaultLlmClientId, mcpTransports, mcpServers,
+                statelessToolRegistryFactory, mediaStore, AraTelemetry.noop());
+    }
+
+    /**
+     * @param telemetry records the failover chain and the per-candidate breaker transitions
+     *                  (see {@link FailoverLlmClient} / {@link CircuitBreakerLlmClient}).
+     *                  {@link AraTelemetry#noop()} for a deployment that does not trace.
+     */
+    public DefaultWiringFactory(
+            ResourceRegistry<LlmTransport, LlmClient> llmTransports,
+            String defaultLlmClientId,
+            ResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports,
+            Map<String, McpServerBinding> mcpServers,
+            Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory,
+            MediaStore mediaStore,
+            AraTelemetry telemetry
+    ) {
         this.mediaStore                    = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
         this.llmTransports                = Objects.requireNonNull(llmTransports, "llmTransports must not be null");
         this.defaultLlmClientId            = Objects.requireNonNull(defaultLlmClientId, "defaultLlmClientId must not be null");
         this.mcpTransports                 = mcpTransports;
         this.mcpServers                    = Map.copyOf(Objects.requireNonNull(mcpServers, "mcpServers must not be null"));
         this.statelessToolRegistryFactory  = Objects.requireNonNull(statelessToolRegistryFactory, "statelessToolRegistryFactory must not be null");
+        this.telemetry                     = Objects.requireNonNull(telemetry, "telemetry must not be null");
     }
 
     @Override
@@ -128,8 +149,8 @@ public final class DefaultWiringFactory implements WiringFactory {
                 case FAILOVER -> resolvedClients.size() == 1
                         ? resolvedClients.get(0)
                         : new FailoverLlmClient(resolvedClients.stream()
-                                .<LlmClient>map(CircuitBreakerLlmClient::new)
-                                .toList());
+                                .<LlmClient>map(client -> new CircuitBreakerLlmClient(client, telemetry))
+                                .toList(), telemetry);
                 case ROUND_ROBIN -> new RoundRobinLlmClient(resolvedClients);
                 default -> resolvedClients.get(0);
             };

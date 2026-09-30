@@ -11,6 +11,7 @@ import io.ara.core.trace.TraceSpan;
 import io.ara.runtime.agent.FailureKind;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -57,6 +58,20 @@ public final class TraceProjection {
 
     /** The spans for one completed execution — root first, then one per {@link ExecutionStep}. */
     public static List<TraceSpan> project(AgentTask task, AgentResponse response, BlobStore blobs) {
+        return project(task, response, blobs, null);
+    }
+
+    /**
+     * As above, stamping every span with {@code specHash} — which spec produced this run.
+     *
+     * <p>The hash is the key that joins a run to everything that is measured per spec: the archive's
+     * lineage, the eval results of that variant, the suite-vs-production gap. Without it a span says
+     * <em>which agent</em> ran but not <em>which behaviour</em>, and every panel that groups by spec
+     * has nothing to group on. It is passed in, not computed: what makes two configs "the same spec"
+     * is the meta-agent's definition, not this module's, so the caller that owns it supplies it
+     * ({@code null} for an agent that is not tracked to a spec).
+     */
+    public static List<TraceSpan> project(AgentTask task, AgentResponse response, BlobStore blobs, String specHash) {
         Objects.requireNonNull(task, "task must not be null");
         Objects.requireNonNull(response, "response must not be null");
         Objects.requireNonNull(blobs, "blobs must not be null");
@@ -87,6 +102,7 @@ public final class TraceProjection {
                 .status(status)
                 .startedAt(startedAt)
                 .endedAt(endedAt);
+        root.specHash(specHash);
         if (!ok) {
             root.failureKind(FailureKind.classify(response.failureReason()).name());   // ADR-0074 D6
         }
@@ -95,8 +111,20 @@ public final class TraceProjection {
         spans.add(root.build());
 
         List<ExecutionStep> steps = response.steps();
+        // An ExecutionStep carries no clock, so the run's interval is divided evenly between its
+        // steps: an ORDER, not a measurement. Giving every step the whole run's interval (as this did)
+        // made "the steps before this one" empty for every step, which silently disabled the root-cause
+        // search that reads earlier steps of the same run. The slice is at least one nanosecond so
+        // even an instantaneous run keeps a strict order.
+        Duration slice = steps.isEmpty() ? Duration.ZERO : response.elapsedTime().dividedBy(steps.size());
+        if (slice.isZero() || slice.isNegative()) {
+            slice = Duration.ofNanos(1);
+        }
         for (int i = 0; i < steps.size(); i++) {
             ExecutionStep step = steps.get(i);
+            Instant stepStart = startedAt.plus(slice.multipliedBy(i));
+            Instant stepEnd = i == steps.size() - 1 && !slice.equals(Duration.ofNanos(1))
+                    ? endedAt : stepStart.plus(slice);
             String stepPrompt = step.type() == StepType.TOOL_CALL
                     ? ref(blobs, step.toolId() + " " + Objects.requireNonNullElse(step.arguments(), ""))
                     : null;
@@ -105,8 +133,9 @@ public final class TraceProjection {
                     .promptRef(stepPrompt)
                     .outputRef(ref(blobs, step.content()))
                     .status(new SpanStatus.Completed())
-                    .startedAt(startedAt)
-                    .endedAt(endedAt)
+                    .specHash(specHash)
+                    .startedAt(stepStart)
+                    .endedAt(stepEnd)
                     .build());
         }
         return spans;

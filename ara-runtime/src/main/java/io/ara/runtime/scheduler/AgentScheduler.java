@@ -27,6 +27,17 @@ import java.util.List;
  *
  * runtime.scheduler().register(schedule);
  * }</pre>
+ *
+ * <p><b>A schedule never overlaps with itself.</b> If a trigger fires while the schedule's
+ * previous run is still executing, the tick is dropped and nothing is dispatched — the
+ * executor is unbounded (one virtual thread per run), so a recurring job whose agent is
+ * slower than its own interval would otherwise stack up concurrent executions of itself,
+ * each one burning LLM calls and tool dispatches that cannot influence each other. A
+ * caller who does want several runs of the same agent in flight at once registers several
+ * schedules. The drop is not silent: a {@link ScheduleExecutionListener} sees the fire
+ * followed by a completion whose reason says the previous run was still in flight. An
+ * explicit {@link #triggerNow} is not a tick and always dispatches, since the caller is
+ * holding the returned future.
  */
 public interface AgentScheduler {
 

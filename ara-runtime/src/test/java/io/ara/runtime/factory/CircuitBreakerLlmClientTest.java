@@ -5,6 +5,8 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
 import io.ara.core.llm.LlmException;
 import io.ara.core.llm.LlmMessage;
+import io.ara.core.telemetry.SpanStatus;
+import io.ara.runtime.telemetry.RecordingTelemetry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -29,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Tests exercise the behaviour through the delegate (invocation counts, thrown/fast-fail
  * errors) rather than poking at internals, mirroring {@link FailoverLlmClientTest}'s style:
- * anonymous single-purpose stub clients and a few scripted-emitter helpers.
+ * anonymous single-purpose stub clients and a few scripted-emitter helpers. The
+ * {@code llm.circuit} spans are asserted through {@link RecordingTelemetry}.
  */
 class CircuitBreakerLlmClientTest {
 
@@ -358,6 +361,81 @@ class CircuitBreakerLlmClientTest {
         assertEquals(3, primary.calls(),
                 "once open, subsequent calls must skip the primary entirely — no per-request timeout");
         assertEquals("fallback", pool.lastUsedProviderId());
+    }
+
+    // ── telemetry ──────────────────────────────────────────────────────────
+
+    @Test
+    void recordsOpened_whenTheFailureThresholdIsReached() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        ScriptedClient delegate = new ScriptedClient("primary");
+        var cb = new CircuitBreakerLlmClient(delegate, 2, COOLDOWN, new FakeClock(0), telemetry);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        assertTrue(telemetry.spansNamed("llm.circuit").isEmpty(), "one failure below the threshold is no transition");
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+
+        var span = telemetry.spansNamed("llm.circuit").get(0);
+        assertEquals("opened", span.attributes().get("llm.circuit.outcome"));
+        assertEquals("CLOSED", span.attributes().get("llm.circuit.from"));
+        assertEquals("primary", span.attributes().get("llm.provider"));
+        assertEquals(2L, span.attributes().get("llm.circuit.failure_threshold"));
+        assertEquals(COOLDOWN.toMillis(), span.attributes().get("llm.circuit.cooldown_ms"));
+        assertEquals(SpanStatus.OK, span.status());
+    }
+
+    @Test
+    void recordsHalfOpenAndClosed_aroundTheCooldownTrial() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        FakeClock clock = new FakeClock(0);
+        ScriptedClient delegate = new ScriptedClient("primary");
+        var cb = new CircuitBreakerLlmClient(delegate, 1, COOLDOWN, clock, telemetry);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        clock.advance(Duration.ofSeconds(30));
+        delegate.succeed();
+        assertEquals("ok", cb.complete(hello(), (LlmCallContext) null).text());
+
+        List<RecordingTelemetry.RecordedSpan> spans = telemetry.spansNamed("llm.circuit");
+        assertEquals(3, spans.size(), "opened, half_open, closed — and nothing for the success that followed");
+
+        assertEquals("half_open", spans.get(1).attributes().get("llm.circuit.outcome"));
+        assertEquals("OPEN", spans.get(1).attributes().get("llm.circuit.from"));
+        assertEquals("closed", spans.get(2).attributes().get("llm.circuit.outcome"));
+        assertEquals("HALF_OPEN", spans.get(2).attributes().get("llm.circuit.from"));
+    }
+
+    @Test
+    void doesNotRecordASpanForTheFastFailsWhileOpen() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        ScriptedClient delegate = new ScriptedClient("primary");
+        var cb = new CircuitBreakerLlmClient(delegate, 1, COOLDOWN, new FakeClock(0), telemetry);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        int afterOpen = telemetry.spansNamed("llm.circuit").size();
+
+        for (int i = 0; i < 5; i++) {
+            assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        }
+        assertEquals(afterOpen, telemetry.spansNamed("llm.circuit").size(),
+                "a skip is not a transition — one span per request would bury the transitions");
+    }
+
+    @Test
+    void recordsNoSpan_whenTheFailureDoesNotOpenTheCircuit() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        LlmClient delegate = new LlmClient() {
+            @Override public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+                throw LlmException.authenticationError("primary", "invalid api key");
+            }
+            @Override public String providerId() { return "primary"; }
+        };
+        var cb = new CircuitBreakerLlmClient(delegate, 1, COOLDOWN, new FakeClock(0), telemetry);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+
+        assertTrue(telemetry.spansNamed("llm.circuit").isEmpty());
     }
 
     // ── robustness / defaults ───────────────────────────────────────────────

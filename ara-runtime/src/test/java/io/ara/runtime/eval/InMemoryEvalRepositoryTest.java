@@ -14,8 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ADR-0070 — {@link InMemoryEvalRepository}: suites/cases/results by id, cases ordered by
- * {@code seqNo}, and the hold-out partition {@code EvalRunner}'s two methods rely on.
+ * ADR-0070 — {@link InMemoryEvalRepository}: suites/cases/results by id, cases in a total
+ * order, and the hold-out partition {@code EvalRunner}'s two methods rely on.
  */
 class InMemoryEvalRepositoryTest {
 
@@ -31,6 +31,23 @@ class InMemoryEvalRepositoryTest {
         assertEquals(List.of("c1", "c2"), repo.findCases("s1").stream().map(EvalCase::caseId).toList());
         assertEquals(1, repo.findCases("s2").size());
         assertTrue(repo.findCases("unknown").isEmpty());
+    }
+
+    /**
+     * Cases sharing a {@code seqNo} — what every case derived from a production failure looks
+     * like, since {@code RegressionCaseBuilder} numbers them all 0 — still come back in one
+     * fixed order. Without the {@code caseId} tiebreak the order is the hash of the caseId, so
+     * the same corpus would name a different culprit in its verdict run after run.
+     */
+    @Test
+    void casesSharingASeqNo_comeBackInCaseIdOrder() {
+        EvalRepository repo = EvalRepository.inMemory();
+        repo.saveCase(EvalCase.curated("c3", "s1", "third", "exact_match", 0));
+        repo.saveCase(EvalCase.curated("c1", "s1", "first", "exact_match", 0));
+        repo.saveCase(EvalCase.curated("c2", "s1", "second", "exact_match", 0));
+
+        assertEquals(List.of("c1", "c2", "c3"),
+                repo.findCases("s1").stream().map(EvalCase::caseId).toList());
     }
 
     @Test

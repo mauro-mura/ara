@@ -982,6 +982,7 @@ public final class AraRuntime implements AutoCloseable {
         SessionStore sessionStore = SessionStore.noop();
         io.ara.core.trace.TraceStore traceStore;
         io.ara.core.trace.BlobStore  traceBlobStore;
+        java.util.function.Function<io.ara.core.agent.AgentConfig, String> traceSpecHash;
         MediaStore   mediaStore   = MediaStore.noop();
         ApprovalGate approvalGate;
         io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
@@ -1242,6 +1243,16 @@ public final class AraRuntime implements AutoCloseable {
                                      io.ara.core.trace.BlobStore blobStore) {
             this.traceStore     = Objects.requireNonNull(traceStore, "traceStore must not be null");
             this.traceBlobStore = Objects.requireNonNull(blobStore, "blobStore must not be null");
+            return this;
+        }
+
+        /**
+         * Stamps every span the runtime's trace emission writes with the spec hash this function
+         * returns for the agent's config, so a run can be joined to the spec that produced it.
+         * Has no effect unless {@link #traceEmission} is also set.
+         */
+        public Builder traceSpecHash(java.util.function.Function<io.ara.core.agent.AgentConfig, String> specHashOf) {
+            this.traceSpecHash = Objects.requireNonNull(specHashOf, "specHashOf must not be null");
             return this;
         }
 

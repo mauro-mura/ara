@@ -26,13 +26,22 @@ import io.ara.core.common.AgentId;
  *
  * <p>Both methods are {@code default} no-ops so implementations only override what they
  * need.
+ *
+ * <p><b>Dropped ticks.</b> A recurring tick whose schedule's previous run is still executing
+ * is skipped rather than overlapped. A skip is reported like any other fire: {@link #onFire}
+ * runs, then {@link #onComplete} carries a failure whose reason starts with
+ * {@code "skipped: previous run of this schedule is still in flight"}. So the one-fire /
+ * one-completion pairing holds on every path, and an application can tell a genuine agent
+ * failure from a dropped tick by inspecting {@link AgentResponse#failureReason()} instead of
+ * having to infer it from a missing execution.
  */
 public interface ScheduleExecutionListener {
 
     /**
      * Invoked just before the agent for {@code scheduleId} is dispatched. Called for
-     * every fire, including the case where the target agent is not registered (the
-     * {@code onComplete} callback then reports the failure response).
+     * every fire, including the case where the target agent is not registered, and
+     * including a tick that is then dropped because the previous run is still in
+     * flight (the {@code onComplete} callback then reports the reason).
      */
     default void onFire(String scheduleId, AgentId agentId) {
     }
