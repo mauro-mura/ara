@@ -575,9 +575,10 @@ final class ReactExecutionSupport {
             LlmClient llm, List<LlmMessage> messages, LlmCallContext ctx,
             Instant deadline, AgentConfig config, String taskId) throws InterruptedException {
 
+        List<LlmMessage> request = messages;
         for (int attempt = 1; ; attempt++) {
             try {
-                return completeWithin(llm, messages, ctx, deadline, config);
+                return completeWithin(llm, request, ctx, deadline, config);
             } catch (LlmException e) {
                 Duration backoff = backoffFor(attempt);
                 if (!e.isRetryable()
@@ -585,11 +586,31 @@ final class ReactExecutionSupport {
                         || Instant.now().plus(backoff).isAfter(deadline)) {
                     throw e;
                 }
-                log.warn("LLM call failed for task [{}] (attempt {}/{}, {}): retrying in {} ms — {}",
-                        taskId, attempt, LLM_MAX_ATTEMPTS, e.errorType(), backoff.toMillis(), e.getMessage());
+                if (e.isEmptyResponse()) {
+                    // The same request to the same model yields the same empty answer — a tool call the
+                    // server could not parse is reproduced, not shaken off by waiting. So the retry is not
+                    // identical: it tells the model what went wrong and what to do instead. Built from the
+                    // original messages each time, so the correction is never stacked.
+                    request = withEmptyResponseCorrection(messages);
+                }
+                log.warn("LLM call failed for task [{}] (attempt {}/{}, {}): retrying in {} ms{} — {}",
+                        taskId, attempt, LLM_MAX_ATTEMPTS, e.errorType(), backoff.toMillis(),
+                        e.isEmptyResponse() ? " with a correction appended" : "", e.getMessage());
                 Thread.sleep(backoff);
             }
         }
+    }
+
+    /** What the retry after an empty completion says to the model; public text because a tester reads it in the request. */
+    static final String EMPTY_RESPONSE_CORRECTION =
+            "Your previous reply was empty: nothing reached me, or a tool call in it could not be read. "
+                    + "Reply again, in one of two ways: call exactly one of the available tools, using its exact name "
+                    + "and valid JSON arguments; or, if no tool is needed, answer in plain text.";
+
+    private static List<LlmMessage> withEmptyResponseCorrection(List<LlmMessage> messages) {
+        List<LlmMessage> corrected = new java.util.ArrayList<>(messages);
+        corrected.add(LlmMessage.user(EMPTY_RESPONSE_CORRECTION));
+        return List.copyOf(corrected);
     }
 
     /** Exponential backoff for {@code attempt} (1-based), capped at {@link #LLM_RETRY_MAX_DELAY}. */

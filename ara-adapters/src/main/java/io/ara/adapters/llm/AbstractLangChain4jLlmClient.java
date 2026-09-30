@@ -204,11 +204,31 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
                     + "(finishReason={}, tokens in={}/out={}): {}",
                     providerId(), finishReason, inputTokens, outputTokens, response);
             throw LlmException.emptyResponse(providerId(),
-                    "Empty completion from '" + providerId() + "' (finishReason=" + finishReason + ")");
+                    "Empty completion from '" + providerId() + "' (finishReason=" + finishReason + ")"
+                            + emptyCompletionCause(outputTokens));
         }
 
         return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
                 toolCallJson, toolCallId, toolCalls);
+    }
+
+    /**
+     * What an empty completion most likely means, told from the one number that separates the two cases.
+     *
+     * <p>A provider that generated <em>no</em> tokens simply answered with nothing. One that generated
+     * tokens and still returned no text and no tool call <em>had something to say and lost it</em>: a
+     * model that writes a tool call in a format its server cannot parse (LM Studio logs
+     * {@code Failed to generate a tool call ... this tool call will be omitted}) produces exactly this
+     * — a few tokens, {@code finishReason=stop}, nothing in the response. Saying so tells the operator it
+     * is the model/server pair mangling a tool call, not an empty prompt or a broken connection, and that
+     * the place to look is the provider's own log.
+     */
+    private static String emptyCompletionCause(int outputTokens) {
+        return outputTokens > 0
+                ? " — the model generated " + outputTokens + " output token(s) but the server returned no text and"
+                        + " no tool call: a tool call in a format the server could not parse was most likely dropped"
+                        + " (check the provider's own log for 'Failed to generate a tool call')"
+                : " — the model generated no output tokens";
     }
 
     /**

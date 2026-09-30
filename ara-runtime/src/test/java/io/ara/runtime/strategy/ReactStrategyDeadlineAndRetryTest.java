@@ -220,6 +220,67 @@ class ReactStrategyDeadlineAndRetryTest {
         assertEquals(1, result.iterationsDone());
     }
 
+    // ── Retry: an empty completion is retried with a correction, not identically ──
+
+    /** Answers nothing until it has been told what went wrong — the way a model that dropped a tool call behaves. */
+    private static final class EmptyUntilCorrectedLlmClient implements LlmClient {
+        final List<List<LlmMessage>> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override
+        public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+            requests.add(messages);
+            boolean corrected = messages.stream().anyMatch(m -> m.content() != null
+                    && m.content().equals(ReactExecutionSupport.EMPTY_RESPONSE_CORRECTION));
+            if (!corrected) {
+                throw LlmException.emptyResponse("test-provider", "Empty completion (finishReason=stop)");
+            }
+            return new LlmCompletion("Action: FINAL_ANSWER\nAnswer: recovered", 5, 5, "stop", null);
+        }
+
+        @Override public String providerId() { return "empty-stub"; }
+    }
+
+    @Test
+    void anEmptyCompletionIsRetriedWithACorrectionAppendedAndRecovers() {
+        EmptyUntilCorrectedLlmClient llm = new EmptyUntilCorrectedLlmClient();
+        AgentConfig config = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.of("stub"))
+                .executionTimeout(Duration.ofSeconds(30))
+                .maxIterations(10)
+                .build();
+
+        ExecutionResult result = new ReactStrategy().execute(
+                AgentTask.of("hello"), llm, seededMemory("hello"), ToolRegistry.empty(), config);
+
+        assertTrue(result.isSuccess(), "an identical retry reproduces the empty answer; a corrected one does not");
+        assertEquals("recovered", result.output());
+        assertEquals(2, llm.requests.size(), "one empty answer, one corrected retry");
+        List<LlmMessage> retry = llm.requests.get(1);
+        assertEquals(llm.requests.get(0).size() + 1, retry.size(), "exactly one message added, never stacked");
+        assertEquals(ReactExecutionSupport.EMPTY_RESPONSE_CORRECTION, retry.get(retry.size() - 1).content());
+    }
+
+    /** Other transient failures keep retrying the request unchanged: only an empty answer earns a correction. */
+    @Test
+    void aRateLimitIsStillRetriedWithTheSameRequest() {
+        List<List<LlmMessage>> seen = new java.util.concurrent.CopyOnWriteArrayList<>();
+        LlmClient llm = new LlmClient() {
+            int calls;
+            @Override public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+                seen.add(messages);
+                if (++calls == 1) throw LlmException.rateLimit("test-provider", "429");
+                return new LlmCompletion("Action: FINAL_ANSWER\nAnswer: ok", 1, 1, "stop", null);
+            }
+            @Override public String providerId() { return "rl-stub"; }
+        };
+        AgentConfig config = AgentConfig.defaults().primaryLlm(LlmProfile.of("stub"))
+                .executionTimeout(Duration.ofSeconds(30)).maxIterations(10).build();
+
+        new ReactStrategy().execute(AgentTask.of("hello"), llm, seededMemory("hello"), ToolRegistry.empty(), config);
+
+        assertEquals(seen.get(0), seen.get(1), "no correction for a rate limit");
+    }
+
     // ── Retry: non-retryable LlmException fails immediately, without retrying ──
 
     private static final class AlwaysAuthFailureLlmClient implements LlmClient {

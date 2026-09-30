@@ -73,6 +73,34 @@ class OllamaLlmClientTest {
         }
     }
 
+    /**
+     * The message tells a silent model from one that lost its answer: tokens were generated but nothing came
+     * back, which is what a tool call the server could not parse looks like.
+     */
+    @Test
+    void anEmptyReplyThatCostTokensSaysAToolCallWasProbablyDropped() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering(StubResponses.OLLAMA_EMPTY_WITH_TOKENS)) {
+            LlmClient client = clientPointedAt(provider);
+
+            LlmException ex = assertThrows(LlmException.class, () -> complete(client));
+
+            assertTrue(ex.getMessage().contains("generated 12 output token(s)")
+                            && ex.getMessage().contains("tool call in a format the server could not parse"),
+                    ex.getMessage());
+        }
+    }
+
+    @Test
+    void anEmptyReplyWithNoTokensSaysTheModelGeneratedNothing() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering(StubResponses.OLLAMA_EMPTY)) {
+            LlmClient client = clientPointedAt(provider);
+
+            LlmException ex = assertThrows(LlmException.class, () -> complete(client));
+
+            assertTrue(ex.getMessage().contains("generated no output tokens"), ex.getMessage());
+        }
+    }
+
     @Test
     void mapsAnOrdinaryReply() throws Exception {
         try (StubLlmProvider provider = StubLlmProvider.answering(StubResponses.OLLAMA)) {
