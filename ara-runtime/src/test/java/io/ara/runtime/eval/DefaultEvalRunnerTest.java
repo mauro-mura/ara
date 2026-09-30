@@ -299,6 +299,75 @@ class DefaultEvalRunnerTest {
         assertTrue(r.runCosts().stream().allMatch(s -> s.tokens() == 0 && s.money().amount().signum() == 0));
     }
 
+    // ── per-sample evidence ───────────────────────────────────────────────────────────
+
+    private DefaultEvalRunner runner(AraAgent agent, EvalSampleListener listener) {
+        return new DefaultEvalRunner(repo, StrategyRegistry.defaults(), specHash -> agent,
+                suiteId -> Optional.empty(), () -> null, listener);
+    }
+
+    /**
+     * What the aggregate cannot say: a mean of 0.33 is the same number for "two wrong answers"
+     * and "two runs that never answered". The sample says which, with the answer itself.
+     */
+    @Test
+    void everyExecutionIsReportedWithItsAnswerScoreAndRationale() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "YES"));
+        List<EvalSample> seen = new java.util.ArrayList<>();
+
+        EvalResult r = runner(agent(in -> "NO"), seen::add).run("spec-A", SUITE, 3);
+
+        assertEquals(3, seen.size(), "one sample per execution");
+        EvalSample first = seen.get(0);
+        assertEquals(r.evalId(), first.evalId(), "samples join to the result they belong to");
+        assertEquals("c1", first.caseId());
+        assertEquals("NO", first.content(), "the answer the agent actually gave");
+        assertTrue(first.succeeded());
+        assertEquals(0.0, first.score(), 1e-9);
+        assertEquals(List.of(0, 1, 2), seen.stream().map(EvalSample::run).toList());
+    }
+
+    @Test
+    void aRunThatNeverAnsweredSaysWhyInsteadOfAnEmptyRationale() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "non_empty", Map.of());
+        List<EvalSample> seen = new java.util.ArrayList<>();
+
+        runner(failingAgent(), seen::add).run("spec-A", SUITE, 3);
+
+        EvalSample sample = seen.get(0);
+        assertEquals(false, sample.succeeded());
+        assertEquals("boom", sample.failureReason());
+        assertTrue(sample.rationale().contains("no answer") && sample.rationale().contains("boom"),
+                "a zero with no explanation is what made transport failures look like incapacity: "
+                        + sample.rationale());
+        assertEquals("", sample.content());
+    }
+
+    /** The task's correlation id is the runId of the agent's spans — the join to the trace. */
+    @Test
+    void theTaskIsRunUnderTheSamplesCorrelationId() {
+        addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "non_empty", Map.of());
+        List<String> correlationIds = new java.util.ArrayList<>();
+        AraAgent probe = new AraAgent() {
+            private final AgentId id = AgentId.generate();
+            @Override public AgentId agentId() { return id; }
+            @Override public AgentConfig config() { return null; }
+            @Override public AgentState currentState() { return AgentState.IDLE; }
+            @Override public AgentResponse execute(AgentTask task) {
+                correlationIds.add(task.correlationId());
+                return AgentResponse.success(task.taskId(), id, "ok", 1, 0, 0, Duration.ofMillis(1), List.of());
+            }
+            @Override public void terminate() {}
+        };
+        List<EvalSample> seen = new java.util.ArrayList<>();
+
+        runner(probe, seen::add).run("spec-A", SUITE, 3);
+
+        assertEquals(seen.stream().map(EvalSample::correlationId).toList(), correlationIds);
+        assertEquals(3, correlationIds.stream().distinct().count(), "each execution is its own run");
+        assertTrue(correlationIds.get(0).startsWith(seen.get(0).evalId() + "/c1/"));
+    }
+
     // measuredCosts_feedTopologyCostGate_asARatioOfMedians and
     // topologyEvalWithNoRecordedCosts_isNotComputable live in the meta-agent module, beside
     // PromotionPipeline.TopologyCostGate — this file keeps only the generic,

@@ -73,6 +73,7 @@ public final class DefaultEvalRunner implements EvalRunner {
     private final Function<String, AraAgent> agentForSpecHash;
     private final Function<String, Optional<EvalResult>> baselineForSuite;
     private final Supplier<RunBudget> evalBudgetCap;
+    private final EvalSampleListener samples;
 
     public DefaultEvalRunner(EvalRepository repo, StrategyRegistry strategies,
                              Function<String, AraAgent> agentForSpecHash) {
@@ -96,6 +97,19 @@ public final class DefaultEvalRunner implements EvalRunner {
                              Function<String, AraAgent> agentForSpecHash,
                              Function<String, Optional<EvalResult>> baselineForSuite,
                              Supplier<RunBudget> evalBudgetCap) {
+        this(repo, strategies, agentForSpecHash, baselineForSuite, evalBudgetCap, EvalSampleListener.NONE);
+    }
+
+    /**
+     * @param samples told about every single execution — the answer and the score's rationale,
+     *                which {@link EvalResult} does not keep (see {@link EvalSample})
+     */
+    public DefaultEvalRunner(EvalRepository repo, StrategyRegistry strategies,
+                             Function<String, AraAgent> agentForSpecHash,
+                             Function<String, Optional<EvalResult>> baselineForSuite,
+                             Supplier<RunBudget> evalBudgetCap,
+                             EvalSampleListener samples) {
+        this.samples          = Objects.requireNonNull(samples, "samples must not be null");
         this.repo             = Objects.requireNonNull(repo, "repo must not be null");
         this.strategies       = Objects.requireNonNull(strategies, "strategies must not be null");
         this.agentForSpecHash = Objects.requireNonNull(agentForSpecHash, "agentForSpecHash must not be null");
@@ -121,6 +135,9 @@ public final class DefaultEvalRunner implements EvalRunner {
         }
         AraAgent agent = Objects.requireNonNull(agentForSpecHash.apply(specHash),
                 "no agent could be resolved for spec " + specHash);
+        // Fixed before the first run rather than at the end: the samples reported while the eval
+        // runs must carry the id the result will have, or nothing could join them to it.
+        String evalId = UUID.randomUUID().toString();
 
         List<EvalCase> cases = repo.findCases(suiteId, holdout).stream()
                 .filter(EvalCase::countsTowardVerdict)   // DRAFT cases stay in the corpus, out of the verdict (ADR-0071 D4)
@@ -143,8 +160,18 @@ public final class DefaultEvalRunner implements EvalRunner {
                                     + "' (case " + c.caseId() + ") — register one or leave the case DRAFT"));
             double[] scores = new double[n];
             for (int i = 0; i < n; i++) {
-                AgentResponse response = agent.execute(AgentTask.of(c.input(), c.context()));
-                scores[i] = scoreOf(response, c, strategy);
+                // The correlation id becomes the runId of the agent's trace spans. Before, a run
+                // was keyed by its random task id, which named nothing; this one names the eval,
+                // the case and the execution, so a span is traceable to the sample it produced.
+                String correlationId = evalId + "/" + c.caseId() + "/" + i;
+                AgentResponse response = agent.execute(
+                        AgentTask.of(c.input(), c.context(), correlationId, "system"));
+                EvaluationResult scored = scoreOf(response, c, strategy);
+                scores[i] = scored.score();
+                samples.onSample(new EvalSample(evalId, c.caseId(), c.holdout(), i, correlationId,
+                        response.isSuccess(), response.failureReasonOpt().orElse(null),
+                        response.isSuccess() ? response.content() : "",
+                        scored.score(), scored.rationale(), scored.metadata(), response.elapsedTime()));
                 Spend spend = costOf(response);
                 runCosts.add(spend);
                 if (cap != null && cap.charge(spend) instanceof RunBudget.Charge.Exceeded ex) {
@@ -165,18 +192,21 @@ public final class DefaultEvalRunner implements EvalRunner {
                         + (cases.size() - perCase.size()) + " case(s) not run before the cap stopped the eval")
                 : verdict(perCase, blocking, baseline, holdout);
 
-        EvalResult result = new EvalResult(UUID.randomUUID().toString(), specHash, suiteId, n,
+        EvalResult result = new EvalResult(evalId, specHash, suiteId, n,
                 perCase, perTag, regressions, verdict, List.copyOf(runCosts));
         repo.saveResult(result);
         return result;
     }
 
-    private static double scoreOf(AgentResponse response, EvalCase c, EvaluationStrategy strategy) {
+    private static EvaluationResult scoreOf(AgentResponse response, EvalCase c, EvaluationStrategy strategy) {
         if (!response.isSuccess()) {
-            return 0.0;   // an agent that could not complete the task scores zero, whatever the verifier says
+            // an agent that could not complete the task scores zero, whatever the verifier says
+            return EvaluationResult.fail(0.0, "no answer: "
+                    + response.failureReasonOpt().orElse("the agent did not complete"));
         }
         EvaluationResult r = strategy.evaluate(response, c);
-        return Math.max(0.0, Math.min(1.0, r.score()));
+        double clamped = Math.max(0.0, Math.min(1.0, r.score()));
+        return clamped == r.score() ? r : new EvaluationResult(r.passed(), clamped, r.rationale(), r.metadata());
     }
 
     /**
