@@ -144,7 +144,8 @@ public final class McpClientFactory {
         var transportBuilder = HttpClientStreamableHttpTransport.builder(serverUrl)
                 .jsonMapper(DEFAULT_JSON_MAPPER);
         if (bearerToken != null && !bearerToken.isBlank()) {
-            transportBuilder.customizeRequest(request -> request.header("Authorization", "Bearer " + bearerToken));
+            transportBuilder.httpRequestCustomizer((request, method, endpoint, body, context) ->
+                    request.header("Authorization", "Bearer " + bearerToken));
         }
         var transport = transportBuilder.build();
         return connect(transport, executor, ownsExecutor);
