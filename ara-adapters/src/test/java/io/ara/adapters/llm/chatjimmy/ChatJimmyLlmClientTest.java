@@ -18,7 +18,10 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Flow;
@@ -342,6 +345,123 @@ class ChatJimmyLlmClientTest {
                     "expected a 407 challenge followed by an authenticated retry");
         } finally {
             proxy.stop(0);
+        }
+    }
+
+    /** The four headers that carry a bare address; {@code Forwarded} is the structured one. */
+    private static final List<String> BARE_IP_HEADERS =
+            List.of("x-forwarded-for", "x-real-ip", "true-client-ip", "x-client-ip");
+
+    private static ChatJimmyLlmClient rotatingClientPointedAt(StubLlmProvider provider) {
+        return ChatJimmyLlmClient.builder()
+                .baseUrl(provider.baseUrl())
+                .modelName("llama3.1-8B")
+                .timeout(Duration.ofSeconds(10))
+                .rotateClientIpHeaders(true)
+                .build();
+    }
+
+    private static void assertAllFiveHeadersCarryTheSameAddress(Map<String, List<String>> headers) {
+        String address = null;
+        for (String header : BARE_IP_HEADERS) {
+            List<String> values = headers.get(header);
+            assertNotNull(values, () -> header + " missing from " + headers.keySet());
+            assertEquals(1, values.size(), () -> header + " sent more than once: " + values);
+            if (address == null) address = values.get(0);
+            else assertEquals(address, values.get(0),
+                    () -> header + " disagrees with the other client-address headers");
+        }
+        String claimed = address;
+        assertTrue(IpAddressObfuscator.usesKnownPrefix(claimed),
+                () -> "header carries an address outside the pool: " + claimed);
+
+        // RFC 7239's structured form wraps the same address rather than replacing it, so a
+        // consumer reading either header sees one origin.
+        assertEquals(List.of("for=" + claimed), headers.get("forwarded"));
+    }
+
+    @Test
+    void client_ip_headers_are_absent_unless_rotation_is_asked_for() throws Exception {
+        // The default is the whole point: turning the feature on must be a decision, so the
+        // default client has to send no trace of it.
+        try (StubLlmProvider provider = StubLlmProvider.answering("plain reply")) {
+            clientPointedAt(provider).complete(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").build());
+
+            Map<String, List<String>> headers = provider.nextRequestHeaders();
+            for (String header : BARE_IP_HEADERS) {
+                assertFalse(headers.containsKey(header), () -> header + " sent without rotation enabled");
+            }
+            assertFalse(headers.containsKey("forwarded"));
+        }
+    }
+
+    @Test
+    void complete_carries_one_rotated_address_on_all_five_headers() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering("rotated reply")) {
+            rotatingClientPointedAt(provider).complete(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").build());
+
+            assertAllFiveHeadersCarryTheSameAddress(provider.nextRequestHeaders());
+        }
+    }
+
+    @Test
+    void consecutive_requests_rotate_the_address() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering("first")) {
+            ChatJimmyLlmClient client = rotatingClientPointedAt(provider);
+            for (int call = 0; call < 4; call++) {
+                client.complete(
+                        List.of(LlmMessage.user("hi")),
+                        new LlmCallContext.Builder().agentType("test").build());
+            }
+
+            Set<String> seen = new HashSet<>();
+            for (int call = 0; call < 4; call++) {
+                seen.add(provider.nextRequestHeaders().get("x-forwarded-for").get(0));
+            }
+            // Regenerating per request is what stops one origin accumulating the whole burst's
+            // rate-limit budget. A regression that hoisted generation to construction time would
+            // still satisfy every other test here — this is the one that catches it.
+            assertTrue(seen.size() > 1,
+                    () -> "four consecutive requests all claimed the same origin: " + seen);
+        }
+    }
+
+    @Test
+    void stream_carries_the_headers_too() throws Exception {
+        // The streaming path builds its own HttpRequest through the same baseRequest helper; this
+        // is what keeps the two from drifting apart.
+        try (StubLlmProvider provider = StubLlmProvider.streamingText(List.of("hello"), Duration.ofMillis(10))) {
+            Flow.Publisher<String> publisher = rotatingClientPointedAt(provider).stream(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").build());
+
+            CountDownLatch done = new CountDownLatch(1);
+            publisher.subscribe(new Flow.Subscriber<>() {
+                @Override public void onSubscribe(Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
+                @Override public void onNext(String item) { }
+                @Override public void onError(Throwable throwable) { done.countDown(); }
+                @Override public void onComplete() { done.countDown(); }
+            });
+
+            assertTrue(done.await(10, TimeUnit.SECONDS), "stream never completed");
+            assertAllFiveHeadersCarryTheSameAddress(provider.nextRequestHeaders());
+        }
+    }
+
+    @Test
+    void list_models_carries_the_headers_too() throws Exception {
+        // The catalogue call goes to the same upstream as the chat call. Leaving it unrotated
+        // would advertise the real address moments after a rotated chat request.
+        try (StubLlmProvider provider = StubLlmProvider.answering(
+                "{\"data\":[{\"id\":\"llama3.1-8B\"}]}")) {
+            List<String> models = rotatingClientPointedAt(provider).listModels();
+
+            assertTrue(models.contains("llama3.1-8B"));
+            assertAllFiveHeadersCarryTheSameAddress(provider.nextRequestHeaders());
         }
     }
 }

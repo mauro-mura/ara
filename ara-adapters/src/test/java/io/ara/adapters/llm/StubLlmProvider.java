@@ -4,13 +4,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.Headers;
 
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -19,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * A provider API standing in for OpenAI/Anthropic/Ollama on loopback: serves a canned reply and
- * keeps the request bodies it received.
+ * keeps the request bodies and headers it received.
  *
  * <p>Adapter tests need this rather than a mocked chat model because the behaviour worth
  * pinning down lives past the adapter — in what langchain4j finally serialises, and in how it
@@ -34,10 +38,12 @@ public final class StubLlmProvider implements AutoCloseable {
 
     private final HttpServer server;
     private final BlockingQueue<String> received = new ArrayBlockingQueue<>(8);
+    private final BlockingQueue<Map<String, List<String>>> receivedHeaders = new ArrayBlockingQueue<>(8);
 
     private StubLlmProvider(HttpHandler replyWriter) throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
+            receivedHeaders.offer(lowercasedHeaders(exchange.getRequestHeaders()));
             try (InputStream in = exchange.getRequestBody()) {
                 received.offer(new String(in.readAllBytes(), StandardCharsets.UTF_8));
             }
@@ -45,6 +51,20 @@ public final class StubLlmProvider implements AutoCloseable {
             exchange.close();
         });
         server.start();
+    }
+
+    /**
+     * Header names as {@link com.sun.net.httpserver.HttpExchange} reports them are normalised to
+     * {@code Xxxx-Yyy} — {@code x-forwarded-for} arrives as {@code X-forwarded-for}. Lowercasing
+     * here keeps a test's assertions about the header the adapter chose to send rather than about
+     * the JDK server's capitalisation convention, which is not the thing under test and would
+     * otherwise have to be repeated in every assertion.
+     */
+    private static Map<String, List<String>> lowercasedHeaders(Headers headers) {
+        Map<String, List<String>> lowercased = new LinkedHashMap<>();
+        headers.forEach((name, values) ->
+                lowercased.put(name.toLowerCase(Locale.ROOT), List.copyOf(values)));
+        return lowercased;
     }
 
     /** Starts a stub answering every request with {@code responseBody} in one shot. */
@@ -134,6 +154,22 @@ public final class StubLlmProvider implements AutoCloseable {
         String body = received.poll(10, TimeUnit.SECONDS);
         assertNotNull(body, "the adapter never sent a request");
         return MAPPER.readTree(body);
+    }
+
+    /**
+     * The headers of the next request received, keyed by lowercased header name. Fails the test if
+     * none arrives.
+     *
+     * <p>Separate from {@link #nextRequest()} rather than merged into it because the two
+     * answer different questions: the body says what the adapter decided to send, the headers
+     * say how it introduced itself. A test that asserts on both would have to consume one
+     * request to check either, and half the adapter's behaviour here is per-request anyway —
+     * a rotated address differs between calls precisely because it is regenerated each time.
+     */
+    public Map<String, List<String>> nextRequestHeaders() throws Exception {
+        Map<String, List<String>> headers = receivedHeaders.poll(10, TimeUnit.SECONDS);
+        assertNotNull(headers, "the adapter never sent a request");
+        return headers;
     }
 
     @Override
