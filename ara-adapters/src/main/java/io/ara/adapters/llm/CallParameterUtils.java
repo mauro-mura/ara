@@ -5,7 +5,8 @@ import io.ara.core.llm.LlmCallContext;
 
 /**
  * Applies the per-call sampling parameters carried by an {@link LlmCallContext} to a
- * langchain4j {@link ChatRequest.Builder}.
+ * langchain4j {@link ChatRequest.Builder}: temperature, top-p, max output tokens and stop
+ * sequences.
  *
  * <p>Shared by every adapter rather than reimplemented per provider — the same reasoning as
  * {@link ToolConversionUtils}: request-level parameters are a langchain4j concept, identical
@@ -48,5 +49,14 @@ public final class CallParameterUtils {
         if (context.temperature() != null) reqBuilder.temperature(context.temperature());
         if (context.topP() != null)        reqBuilder.topP(context.topP());
         reqBuilder.maxOutputTokens(context.maxOutputTokens());
+        // Forwarded like the sampling parameters above, and for the same reason the chatjimmy
+        // adapter already forwards them: a model whose generation_config.json omits a tool-call
+        // terminator from its stop/EOS set (e.g. gpt-oss-20b missing token 200012, </call>)
+        // will not stop after a tool call, producing a run-on or unparseable completion. Passing
+        // the terminator as an explicit stop sequence makes the server cut generation there
+        // regardless of the model's own config — a client-side fix that needs no change to the
+        // model files. Left unset when the caller supplied none, so a provider's own default
+        // stop handling survives.
+        if (context.hasStopSequences()) reqBuilder.stopSequences(context.stopSequences());
     }
 }

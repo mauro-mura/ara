@@ -77,10 +77,14 @@ public final class InMemoryDocumentStore implements KbStore {
         // to publish the already-computed entries, in one bulk `addAll` — which also keeps this
         // document's chunks contiguous and atomic with respect to a concurrent indexDocument for
         // a different docId, exactly as the old per-chunk-under-lock loop did.
+        //
+        // U27: batched into one embedAll() call instead of one embed() per chunk, for the same
+        // reason as DocumentStore.indexDocument — a real adapter turns this into one provider
+        // round trip regardless of chunk count, rather than one per chunk.
+        List<List<Float>> vectors = embeddingClient.embedAll(chunks);
         List<Entry> newEntries = new ArrayList<>(chunks.size());
-        for (String chunkText : chunks) {
-            List<Float> vector = embeddingClient.embed(chunkText);
-            newEntries.add(new Entry(docId, title, chunkText, normalize(toFloatArray(vector))));
+        for (int i = 0; i < chunks.size(); i++) {
+            newEntries.add(new Entry(docId, title, chunks.get(i), normalize(toFloatArray(vectors.get(i)))));
         }
 
         lock.writeLock().lock();

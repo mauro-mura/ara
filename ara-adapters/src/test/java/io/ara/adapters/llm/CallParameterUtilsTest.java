@@ -13,6 +13,8 @@ import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Asserts that every adapter forwards {@link LlmCallContext}'s per-call sampling parameters to
@@ -77,6 +79,40 @@ class CallParameterUtilsTest {
             assertEquals(CALL_TEMPERATURE, request.get("temperature").asDouble());
             assertEquals(CALL_TOP_P,       request.get("top_p").asDouble());
             assertEquals(CALL_MAX_TOKENS,  request.get("max_tokens").asInt());
+        }
+    }
+
+    /**
+     * A model whose {@code generation_config.json} omits a tool-call terminator from its
+     * stop/EOS set — the reported {@code gpt-oss-20b} case, missing token 200012 ({@code
+     * </call>}) — runs on past the tool call. Forwarding the terminator as an explicit stop
+     * sequence makes the server cut generation there, with no change to the model files. This
+     * pins that the sequence actually reaches the wire (OpenAI serialises it as {@code stop}).
+     */
+    @Test
+    void openAiSendsStopSequences() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering(StubResponses.OPENAI)) {
+            LlmClient client = OpenAiLlmClient.builder()
+                    .apiKey("test-key")
+                    .baseUrl(provider.baseUrl())
+                    .modelName("gpt-oss-20b")
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            LlmCallContext context = new LlmCallContext.Builder()
+                    .agentType("test")
+                    .maxOutputTokens(CALL_MAX_TOKENS)
+                    .build()
+                    .withStopSequences("</call>");
+
+            complete(client, context);
+
+            JsonNode stop = provider.nextRequest().get("stop");
+            assertNotNull(stop, "the stop sequence never reached the wire");
+            // OpenAI accepts either a bare string or an array for `stop`; langchain4j sends an
+            // array. Either shape must carry the terminator.
+            String serialised = stop.isArray() ? stop.toString() : stop.asText();
+            assertTrue(serialised.contains("</call>"), serialised);
         }
     }
 

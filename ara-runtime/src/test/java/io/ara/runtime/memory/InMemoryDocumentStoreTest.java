@@ -102,6 +102,45 @@ class InMemoryDocumentStoreTest {
         }
     }
 
+    /** Counts calls to each method separately, so a test can prove which path was taken. */
+    private static final class CountingEmbeddingClient implements EmbeddingClient {
+        final AtomicInteger embedCalls    = new AtomicInteger();
+        final AtomicInteger embedAllCalls = new AtomicInteger();
+
+        @Override
+        public List<Float> embed(String text) {
+            embedCalls.incrementAndGet();
+            return List.of(1f);
+        }
+
+        @Override
+        public List<List<Float>> embedAll(List<String> texts) {
+            embedAllCalls.incrementAndGet();
+            return texts.stream().<List<Float>>map(t -> List.of(1f)).toList();
+        }
+
+        @Override
+        public int dimensions() { return 1; }
+    }
+
+    @Test
+    void indexDocument_batchesEveryChunkIntoOneEmbedAllCall() {
+        CountingEmbeddingClient counting = new CountingEmbeddingClient();
+        InMemoryDocumentStore kb = new InMemoryDocumentStore("k", counting);
+
+        // Long enough to force several 600-char chunks (ChunkUtil.CHUNK_SIZE), so a
+        // regression back to a per-chunk embed() loop would show up as embedAllCalls == 1
+        // but embedCalls > 0, or as embedAllCalls > 1.
+        String longContent = "paragraph one. ".repeat(100);
+        int chunkCount = kb.indexDocument("doc", "title", longContent);
+
+        assertTrue(chunkCount > 1, "the test fixture must actually produce multiple chunks");
+        assertEquals(1, counting.embedAllCalls.get(),
+                "indexDocument must call embedAll exactly once regardless of chunk count");
+        assertEquals(0, counting.embedCalls.get(),
+                "indexDocument must not fall back to a per-chunk embed() loop");
+    }
+
     @Test
     void deleteDocument_removesChunksAndRegistryEntry() {
         InMemoryDocumentStore kb = store();

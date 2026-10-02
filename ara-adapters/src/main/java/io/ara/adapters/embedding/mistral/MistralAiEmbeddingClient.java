@@ -2,6 +2,8 @@ package io.ara.adapters.embedding.mistral;
 
 import java.util.List;
 
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.mistralai.MistralAiEmbeddingModel;
 import io.ara.adapters.embedding.AbstractEmbeddingClientBuilder;
 import io.ara.adapters.embedding.AbstractEmbeddingClientBuilder.Endpoint;
@@ -77,6 +79,11 @@ public final class MistralAiEmbeddingClient implements EmbeddingClient {
     }
 
     @Override
+    public List<List<Float>> embedAll(List<String> texts) {
+        return delegate.embedAll(texts);
+    }
+
+    @Override
     public int dimensions() {
         return dimensions;
     }
@@ -106,6 +113,24 @@ public final class MistralAiEmbeddingClient implements EmbeddingClient {
             try {
                 List<Float> vector = model.embed(text).content().vectorAsList();
                 return EmbeddingVectors.validate(PROVIDER, modelName, vector, dimensions);
+            } catch (EmbeddingException ex) {
+                throw ex;
+            } catch (RuntimeException ex) {
+                throw mapException(ex);
+            }
+        }
+
+        @Override
+        public List<List<Float>> embedAll(List<String> texts) {
+            try {
+                List<TextSegment> segments = texts.stream().map(TextSegment::from).toList();
+                List<Embedding> embeddings = model.embedAll(segments).content();
+                List<List<Float>> vectors = new java.util.ArrayList<>(embeddings.size());
+                for (Embedding embedding : embeddings) {
+                    vectors.add(EmbeddingVectors.validate(
+                            PROVIDER, modelName, embedding.vectorAsList(), dimensions));
+                }
+                return vectors;
             } catch (EmbeddingException ex) {
                 throw ex;
             } catch (RuntimeException ex) {

@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.ollama.OllamaEmbeddingModel;
 import io.ara.adapters.embedding.EmbeddingEndpointPool;
 import io.ara.adapters.embedding.EmbeddingProviderErrorMapper;
@@ -80,6 +82,11 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
     }
 
     @Override
+    public List<List<Float>> embedAll(List<String> texts) {
+        return delegate.embedAll(texts);
+    }
+
+    @Override
     public int dimensions() {
         return dimensions;
     }
@@ -108,6 +115,24 @@ public final class OllamaEmbeddingClient implements EmbeddingClient {
             try {
                 List<Float> vector = model.embed(text).content().vectorAsList();
                 return EmbeddingVectors.validate(PROVIDER, modelName, vector, dimensions);
+            } catch (EmbeddingException ex) {
+                throw ex;
+            } catch (RuntimeException ex) {
+                throw mapException(ex);
+            }
+        }
+
+        @Override
+        public List<List<Float>> embedAll(List<String> texts) {
+            try {
+                List<TextSegment> segments = texts.stream().map(TextSegment::from).toList();
+                List<Embedding> embeddings = model.embedAll(segments).content();
+                List<List<Float>> vectors = new ArrayList<>(embeddings.size());
+                for (Embedding embedding : embeddings) {
+                    vectors.add(EmbeddingVectors.validate(
+                            PROVIDER, modelName, embedding.vectorAsList(), dimensions));
+                }
+                return vectors;
             } catch (EmbeddingException ex) {
                 throw ex;
             } catch (RuntimeException ex) {

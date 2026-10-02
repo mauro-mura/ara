@@ -81,16 +81,36 @@ public final class EmbeddingEndpointPool implements EmbeddingClient {
 
     @Override
     public List<Float> embed(String text) {
+        return withFailover("embed", candidate -> candidate.embed(text));
+    }
+
+    @Override
+    public List<List<Float>> embedAll(List<String> texts) {
+        return withFailover("embedAll", candidate -> candidate.embedAll(texts));
+    }
+
+    /**
+     * Runs {@code call} against each endpoint in declaration order, applying the pool's failover
+     * policy, and returns the first success. Shared by {@link #embed} and {@link #embedAll} so
+     * the non-failover-abort rule, the "last candidate" error selection and the attempt logging
+     * are defined exactly once: a batched {@code embedAll} fails over on the same conditions a
+     * single {@code embed} does, since both ultimately hit the same endpoint over the same wire.
+     *
+     * @param op   the operation name, for the "failover succeeded" log line only
+     * @param call the per-endpoint call to attempt
+     * @return the first endpoint's successful result
+     */
+    private <T> T withFailover(String op, java.util.function.Function<EmbeddingClient, T> call) {
         EmbeddingException lastEmbeddingFailure = null;
         RuntimeException   lastFailure           = null;
 
         for (int i = 0; i < endpoints.size(); i++) {
             EmbeddingClient candidate = endpoints.get(i);
             try {
-                List<Float> result = candidate.embed(text);
+                T result = call.apply(candidate);
                 if (i > 0) {
-                    log.info("Failover succeeded with endpoint '{}' (primary failed after {} attempt(s))",
-                            candidate.providerId(), i);
+                    log.info("Failover succeeded with endpoint '{}' on {}() (primary failed after {} attempt(s))",
+                            candidate.providerId(), op, i);
                 }
                 lastUsedEndpoint = candidate.providerId();
                 return result;

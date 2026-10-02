@@ -121,4 +121,70 @@ class EmbeddingEndpointPoolTest {
 
         assertEquals("failover[openai-x→openai-x@https://fallback]", pool.providerId());
     }
+
+    // ── embedAll: same failover policy, applied to the whole batch ────────────
+
+    /** A client whose embedAll is observable, so a test can tell it was reached (or not). */
+    private static EmbeddingClient batchClient(String id, int dimensions, List<List<Float>> batchResult) {
+        return new EmbeddingClient() {
+            @Override public List<Float> embed(String text) { throw new UnsupportedOperationException(); }
+            @Override public List<List<Float>> embedAll(List<String> texts) { return batchResult; }
+            @Override public int dimensions() { return dimensions; }
+            @Override public String providerId() { return id; }
+        };
+    }
+
+    private static EmbeddingClient failingBatchClient(String id, int dimensions, RuntimeException failure) {
+        return new EmbeddingClient() {
+            @Override public List<Float> embed(String text) { throw new UnsupportedOperationException(); }
+            @Override public List<List<Float>> embedAll(List<String> texts) { throw failure; }
+            @Override public int dimensions() { return dimensions; }
+            @Override public String providerId() { return id; }
+        };
+    }
+
+    @Test
+    void embedAll_returnsPrimaryResult_whenPrimarySucceeds() {
+        List<List<Float>> primaryResult = List.of(List.of(1f), List.of(2f));
+        EmbeddingClient primary   = batchClient("p", 1, primaryResult);
+        EmbeddingClient secondary = failingBatchClient("s", 1, new RuntimeException("must not be used"));
+
+        EmbeddingEndpointPool pool = new EmbeddingEndpointPool(List.of(primary, secondary));
+
+        assertEquals(primaryResult, pool.embedAll(List.of("a", "b")));
+        assertEquals("p", pool.lastUsedEndpoint());
+    }
+
+    /**
+     * The whole batch fails over as one unit: a primary that fails partway through is retried
+     * on the secondary from scratch, for the whole input list — not per-element. This is a
+     * deliberate simplicity/cost trade-off (a secondary re-embeds inputs the primary may have
+     * already billed for) over the complexity of a partial-batch retry.
+     */
+    @Test
+    void embedAll_failsOverToNextEndpoint_asOneBlock() {
+        EmbeddingClient primary = failingBatchClient("p", 1,
+                EmbeddingException.rateLimit("p", "rate limited"));
+        List<List<Float>> secondaryResult = List.of(List.of(4f), List.of(5f), List.of(6f));
+        EmbeddingClient secondary = batchClient("s", 1, secondaryResult);
+
+        EmbeddingEndpointPool pool = new EmbeddingEndpointPool(List.of(primary, secondary));
+
+        assertEquals(secondaryResult, pool.embedAll(List.of("x", "y", "z")));
+        assertEquals("s", pool.lastUsedEndpoint());
+    }
+
+    @Test
+    void embedAll_abortsImmediately_onNonFailoverError() {
+        EmbeddingClient primary = failingBatchClient("p", 1,
+                EmbeddingException.authenticationError("p", "invalid api key"));
+        EmbeddingClient secondary = batchClient("s", 1, List.of(List.of(1f)));
+
+        EmbeddingEndpointPool pool = new EmbeddingEndpointPool(List.of(primary, secondary));
+
+        EmbeddingException ex = assertThrows(EmbeddingException.class,
+                () -> pool.embedAll(List.of("a")));
+        assertEquals("p", ex.provider());
+        assertFalse(ex.shouldFailover());
+    }
 }

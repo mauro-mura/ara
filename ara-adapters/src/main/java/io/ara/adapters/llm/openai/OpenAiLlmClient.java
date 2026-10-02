@@ -74,15 +74,26 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     private final Map<String, String> customHeaders;
     private final boolean documentSupport;
     /**
-     * Forces HTTP/1.1 on the streaming model's underlying JDK {@code HttpClient}.
+     * Forces HTTP/1.1 on <em>both</em> the blocking and the streaming model's underlying JDK
+     * {@code HttpClient}.
      *
-     * <p>Some OpenAI-compatible gateways
-     * use HTTP/2 multiplexing that buffers SSE data-frames server-side and delivers them all
-     * at once at the end of the response instead of flushing each token as it arrives. The
-     * fix is the same one LangChain4j already documents for vLLM:
-     * {@code HttpClient.Version.HTTP_1_1} disables multiplexing so each {@code data:} frame
-     * is flushed immediately — making streaming actually visible to the user. See
-     * https://github.com/langchain4j/langchain4j/issues/3682.
+     * <p>It addresses two distinct failures of OpenAI-compatible endpoints, which is why it
+     * must cover both call paths rather than streaming alone:
+     * <ul>
+     *   <li><b>SSE buffering (streaming only).</b> Some gateways use HTTP/2 multiplexing that
+     *       buffers SSE data-frames server-side and delivers them all at once at the end of the
+     *       response instead of flushing each token as it arrives. {@code HTTP_1_1} disables
+     *       multiplexing so each {@code data:} frame is flushed immediately. See
+     *       https://github.com/langchain4j/langchain4j/issues/3682.</li>
+     *   <li><b>Upgrade rejection (every request, blocking included).</b> A vLLM served through
+     *       uvicorn's {@code httptools} path mistakes the HTTP/2 h2c upgrade handshake the JDK
+     *       client may attempt for a WebSocket handshake, rejects it, logs
+     *       {@code "Unsupported upgrade request."} and drops the request body — so even a plain
+     *       {@code complete()} call fails. Pinning HTTP/1.1 never sends the upgrade header.</li>
+     * </ul>
+     *
+     * <p>Because the second failure hits the blocking path too, the flag is applied to
+     * {@code chatModel} as well as the streaming model — see {@link #applyHttp1IfForced}.
      */
     private final boolean forceHttp1;
     /**
@@ -91,6 +102,54 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
      * allocates and streams the vocabulary needlessly.
      */
     private final Set<String> supportedMediaTypes;
+
+    // ── Model catalogue ───────────────────────────────────────────────────────
+
+    /**
+     * Enumeration of OpenAI models commonly used through this adapter.
+     *
+     * <p>Only hosted-OpenAI models belong here; an OpenAI-<em>compatible</em> endpoint
+     * (Azure, Groq, LM Studio, Together AI, a corporate gateway) serves its own catalogue, so
+     * for those keep using {@link Builder#modelName(String)} with the id the endpoint expects.
+     *
+     * <p>The {@code o}-series are reasoning models: they reject {@code temperature} values
+     * other than the default and expect {@code max_completion_tokens} rather than
+     * {@code max_tokens}. Point this adapter at one only if you are prepared to leave
+     * {@link Builder#temperature(double)} unset — see the class notes on OpenAI-compatible
+     * endpoints.
+     *
+     * <p>Model ids and context windows are from the
+     * <a href="https://platform.openai.com/docs/models">OpenAI models overview</a>
+     * (last verified: 2026-10). Context window is the combined input+output token budget.
+     */
+    public enum Models {
+        // GPT-5 family
+        GPT_5           ("gpt-5",            400_000),
+        GPT_5_MINI      ("gpt-5-mini",       400_000),
+        GPT_5_NANO      ("gpt-5-nano",       400_000),
+        // GPT-4.1 family (1M-token context)
+        GPT_4_1         ("gpt-4.1",        1_000_000),
+        GPT_4_1_MINI    ("gpt-4.1-mini",   1_000_000),
+        GPT_4_1_NANO    ("gpt-4.1-nano",   1_000_000),
+        // GPT-4o family
+        GPT_4O          ("gpt-4o",           128_000),
+        GPT_4O_MINI     ("gpt-4o-mini",      128_000),
+        // o-series reasoning models (see enum javadoc on temperature / max tokens)
+        O3              ("o3",               200_000),
+        O3_MINI         ("o3-mini",          200_000),
+        O1              ("o1",               200_000),
+        O1_MINI         ("o1-mini",          128_000);
+
+        /** OpenAI model identifier string. */
+        public final String id;
+        /** Maximum context window in tokens (combined input + output). */
+        public final int contextWindow;
+
+        Models(String id, int contextWindow) {
+            this.id            = id;
+            this.contextWindow = contextWindow;
+        }
+    }
 
     private OpenAiLlmClient(Builder builder) {
         LlmSettings s = builder.settings();
@@ -115,7 +174,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 ? MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT)
                 : MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
 
-        this.chatModel = OpenAiChatModel.builder()
+        this.chatModel = applyHttp1IfForced(OpenAiChatModel.builder()
                 .apiKey(s.apiKey())
                 .baseUrl(s.baseUrl())
                 .modelName(s.modelName())
@@ -126,8 +185,37 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .customHeaders(customHeaders)
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
-                .maxRetries(0)
+                .maxRetries(0))
                 .build();
+    }
+
+    /**
+     * Installs an HTTP/1.1-pinned JDK client on the blocking chat-model builder when
+     * {@link #forceHttp1} is set, and returns the builder for chaining. A no-op otherwise, so
+     * the default build is byte-for-byte what it was before this flag reached the blocking path.
+     *
+     * <p>Shared with {@link #getStreamingModel()} through {@link #http1ClientBuilder()}: both
+     * the blocking and the streaming model must pin HTTP/1.1 for the same reason — not just the
+     * SSE-buffering the streaming case documents, but the {@code Connection: Upgrade} rejection
+     * a uvicorn/{@code httptools} vLLM applies to <em>every</em> request, {@code complete()}
+     * included. See the {@link #forceHttp1} field javadoc.
+     */
+    private OpenAiChatModel.OpenAiChatModelBuilder applyHttp1IfForced(
+            OpenAiChatModel.OpenAiChatModelBuilder builder) {
+        if (forceHttp1) builder.httpClientBuilder(http1ClientBuilder());
+        return builder;
+    }
+
+    /**
+     * A {@link JdkHttpClientBuilder} pinned to HTTP/1.1. Pinning the version removes the h2c
+     * upgrade handshake the JDK client would otherwise attempt — the handshake a
+     * uvicorn/{@code httptools} vLLM mistakes for a WebSocket upgrade, rejecting it and dropping
+     * the request body. One builder shape, used by both the blocking and the streaming model.
+     */
+    private static JdkHttpClientBuilder http1ClientBuilder() {
+        java.net.http.HttpClient.Builder jdkBuilder = java.net.http.HttpClient.newBuilder()
+                .version(java.net.http.HttpClient.Version.HTTP_1_1);
+        return JdkHttpClient.builder().httpClientBuilder(jdkBuilder);
     }
 
     @Override
@@ -202,13 +290,10 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
 
                     if (forceHttp1) {
                         // Force HTTP/1.1 to prevent gateway-side HTTP/2 buffering from batching
-                        // SSE frames — see the forceHttp1 field javadoc.
-                        java.net.http.HttpClient.Builder jdkBuilder =
-                                java.net.http.HttpClient.newBuilder()
-                                        .version(java.net.http.HttpClient.Version.HTTP_1_1);
-                        JdkHttpClientBuilder jdkHttpClientBuilder =
-                                JdkHttpClient.builder().httpClientBuilder(jdkBuilder);
-                        smBuilder.httpClientBuilder(jdkHttpClientBuilder);
+                        // SSE frames, and to drop the h2c upgrade a uvicorn/httptools vLLM
+                        // rejects — see the forceHttp1 field javadoc. Same builder as the
+                        // blocking model, via http1ClientBuilder().
+                        smBuilder.httpClientBuilder(http1ClientBuilder());
                     }
 
                     streamingModel = smBuilder.build();
@@ -259,6 +344,9 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         private boolean forceHttp1 = false;
         private Map<String, String> customHeaders = Map.of();
 
+        /** Sets the model from the {@link Models} catalogue (preferred for hosted OpenAI). */
+        public Builder model(Models model)        { this.modelName = model.id; return this; }
+
         /**
          * Nucleus sampling threshold. Unset by default (OpenAI applies its own default,
          * {@code 1.0}). OpenAI recommends altering either {@code temperature} or
@@ -296,11 +384,12 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         public Builder documentSupport(boolean v) { this.documentSupport = v; return this; }
 
         /**
-         * Forces HTTP/1.1 on the streaming model to prevent gateway buffering of SSE frames.
-         * Set this to {@code true} when the endpoint is behind a proxy or gateway that uses
-         * HTTP/2 multiplexing.
-         * Has no effect on the blocking {@link #complete} path, which uses the default {@link
-         * OpenAiChatModel} (not affected by HTTP/2 buffering).
+         * Forces HTTP/1.1 on both the blocking and the streaming model, preventing HTTP/2
+         * SSE buffering (streaming) and the h2c upgrade handshake a uvicorn/{@code httptools}
+         * vLLM rejects on every request (blocking included). Set this to {@code true} when the
+         * endpoint is behind a proxy or gateway that buffers SSE frames, or a vLLM that logs
+         * {@code "Unsupported upgrade request."} and returns an empty/failed completion. See the
+         * {@code forceHttp1} field javadoc for the two failures in detail.
          */
         public Builder forceHttp1(boolean v) {
             this.forceHttp1 = v; return this;

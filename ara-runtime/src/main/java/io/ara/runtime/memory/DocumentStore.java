@@ -113,10 +113,17 @@ public final class DocumentStore implements KbStore {
         List<String> chunks = chunk(content);
         log.info("[DocumentStore] Indexing '{}' → {} chunks", title, chunks.size());
 
+        // One batched embedding call for every chunk, rather than one network round trip per
+        // chunk: embedAll() either issues a genuine provider batch request (OpenAI, Mistral,
+        // Ollama all accept an array of inputs) or, for a client that never overrode it, falls
+        // back to the same per-chunk loop this replaced — so this is never worse, and for every
+        // real adapter it turns an N-chunk document from N round trips into one.
+        List<List<Float>> vectors = embeddingClient.embedAll(chunks);
+
         ArrayNode points = MAPPER.createArrayNode();
         for (int i = 0; i < chunks.size(); i++) {
             String chunkText = chunks.get(i);
-            List<Float> vector = embeddingClient.embed(chunkText);
+            List<Float> vector = vectors.get(i);
 
             ObjectNode payload = MAPPER.createObjectNode();
             payload.put("doc_id",      docId);

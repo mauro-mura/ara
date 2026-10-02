@@ -2,6 +2,10 @@ package io.ara.adapters.embedding.openai;
 
 import java.util.List;
 
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.http.client.jdk.JdkHttpClient;
+import dev.langchain4j.http.client.jdk.JdkHttpClientBuilder;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import io.ara.adapters.embedding.AbstractEmbeddingClientBuilder;
 import io.ara.adapters.embedding.AbstractEmbeddingClientBuilder.Endpoint;
@@ -47,11 +51,25 @@ public final class OpenAiEmbeddingClient implements EmbeddingClient {
     private final EmbeddingClient delegate;
     private final String          modelName;
     private final int             dimensions;
+    /**
+     * Forces HTTP/1.1 on the embedding model's underlying JDK {@code HttpClient} — the exact
+     * counterpart of {@code OpenAiLlmClient}'s flag, for the exact same class of endpoint.
+     *
+     * <p>A vLLM served through uvicorn's {@code httptools} path drops the body of any request
+     * that carries {@code Connection: Upgrade} and logs {@code "Unsupported upgrade request."}:
+     * the parser mistakes the HTTP/2 h2c upgrade handshake the JDK client may attempt for a
+     * WebSocket handshake, refuses it, and hands the application a body-less request — so the
+     * embedding call fails before the model is ever reached. Pinning HTTP/1.1 removes the
+     * upgrade header, which is what makes the request go through unchanged. Same fix, same
+     * reasoning as the chat client; see {@code OpenAiLlmClient}'s {@code forceHttp1}.
+     */
+    private final boolean         forceHttp1;
 
     private OpenAiEmbeddingClient(Builder builder) {
         EmbeddingSettings s = builder.settings();
         this.modelName  = s.modelName();
         this.dimensions = s.dimensions();
+        this.forceHttp1 = builder.forceHttp1;
         List<EmbeddingClient> perEndpoint = s.endpoints().stream()
                 .map(endpoint -> buildEndpointClient(endpoint, s))
                 .toList();
@@ -59,7 +77,7 @@ public final class OpenAiEmbeddingClient implements EmbeddingClient {
     }
 
     private EmbeddingClient buildEndpointClient(Endpoint endpoint, EmbeddingSettings s) {
-        OpenAiEmbeddingModel model = OpenAiEmbeddingModel.builder()
+        OpenAiEmbeddingModel.OpenAiEmbeddingModelBuilder modelBuilder = OpenAiEmbeddingModel.builder()
                 .apiKey(endpoint.apiKey())
                 .baseUrl(endpoint.baseUrl())
                 .modelName(s.modelName())
@@ -67,14 +85,29 @@ public final class OpenAiEmbeddingClient implements EmbeddingClient {
                 .timeout(s.timeout())
                 .logRequests(s.logRequests())
                 .logResponses(s.logResponses())
-                .maxRetries(0)
-                .build();
-        return new EndpointClient(model, endpoint.baseUrl());
+                .maxRetries(0);
+
+        if (forceHttp1) {
+            // Force HTTP/1.1 so no h2c upgrade header is ever sent — see the forceHttp1 field
+            // javadoc. Mirrors OpenAiLlmClient's streaming-model workaround exactly.
+            java.net.http.HttpClient.Builder jdkBuilder = java.net.http.HttpClient.newBuilder()
+                    .version(java.net.http.HttpClient.Version.HTTP_1_1);
+            JdkHttpClientBuilder jdkHttpClientBuilder =
+                    JdkHttpClient.builder().httpClientBuilder(jdkBuilder);
+            modelBuilder.httpClientBuilder(jdkHttpClientBuilder);
+        }
+
+        return new EndpointClient(modelBuilder.build(), endpoint.baseUrl());
     }
 
     @Override
     public List<Float> embed(String text) {
         return delegate.embed(text);
+    }
+
+    @Override
+    public List<List<Float>> embedAll(List<String> texts) {
+        return delegate.embedAll(texts);
     }
 
     @Override
@@ -107,6 +140,24 @@ public final class OpenAiEmbeddingClient implements EmbeddingClient {
             try {
                 List<Float> vector = model.embed(text).content().vectorAsList();
                 return EmbeddingVectors.validate(PROVIDER, modelName, vector, dimensions);
+            } catch (EmbeddingException ex) {
+                throw ex;
+            } catch (RuntimeException ex) {
+                throw mapException(ex);
+            }
+        }
+
+        @Override
+        public List<List<Float>> embedAll(List<String> texts) {
+            try {
+                List<TextSegment> segments = texts.stream().map(TextSegment::from).toList();
+                List<Embedding> embeddings = model.embedAll(segments).content();
+                List<List<Float>> vectors = new java.util.ArrayList<>(embeddings.size());
+                for (Embedding embedding : embeddings) {
+                    vectors.add(EmbeddingVectors.validate(
+                            PROVIDER, modelName, embedding.vectorAsList(), dimensions));
+                }
+                return vectors;
             } catch (EmbeddingException ex) {
                 throw ex;
             } catch (RuntimeException ex) {
@@ -147,6 +198,18 @@ public final class OpenAiEmbeddingClient implements EmbeddingClient {
      * {@code modelName}, {@code dimensions}, at least one {@link #endpoint}.
      */
     public static final class Builder extends AbstractEmbeddingClientBuilder<Builder> {
+
+        private boolean forceHttp1 = false;
+
+        /**
+         * Forces HTTP/1.1 on the embedding model, preventing an HTTP/2 h2c upgrade handshake
+         * that some OpenAI-compatible servers reject. Set this to {@code true} when the
+         * endpoint is a vLLM (or similar) that logs {@code "Unsupported upgrade request."} and
+         * returns an empty/failed embedding — the uvicorn {@code httptools} parser drops the
+         * body of any request carrying {@code Connection: Upgrade}. Same flag, same reason as
+         * {@code OpenAiLlmClient.Builder#forceHttp1(boolean)}.
+         */
+        public Builder forceHttp1(boolean v) { this.forceHttp1 = v; return this; }
 
         /**
          * Builds the {@link OpenAiEmbeddingClient}.

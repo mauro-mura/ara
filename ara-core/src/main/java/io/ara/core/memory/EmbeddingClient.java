@@ -23,6 +23,28 @@ public interface EmbeddingClient {
     List<Float> embed(String text);
 
     /**
+     * Produces one vector per input text, in the same order as {@code texts}.
+     *
+     * <p>Defaulted to a sequential loop over {@link #embed(String)} so every existing
+     * implementation (demo clients, test doubles) keeps working untouched. Real provider
+     * adapters should override it to issue a single batched request: the OpenAI, Mistral and
+     * Ollama embeddings APIs all accept an array of inputs, so a document of N chunks costs one
+     * round trip instead of N. The ordering guarantee is what lets a caller zip the returned
+     * vectors back onto the texts it passed — an override MUST preserve it.
+     *
+     * @param texts the texts to embed; none may be blank
+     * @return a list of vectors, one per input, each of {@link #dimensions()} elements, in input order
+     * @throws RuntimeException if the embedding call fails
+     */
+    default List<List<Float>> embedAll(List<String> texts) {
+        List<List<Float>> vectors = new java.util.ArrayList<>(texts.size());
+        for (String text : texts) {
+            vectors.add(embed(text));
+        }
+        return vectors;
+    }
+
+    /**
      * Returns the fixed dimension of all vectors produced by this client.
      * Must be consistent across calls and match the vector store configuration.
      *
