@@ -49,14 +49,20 @@ import io.ara.core.tool.AraTool;
  * <p>chatjimmy.ai's backend takes no credential at all — no API key, no cookie, no session
  * token — so {@link Builder} requires none either.
  *
- * <h2>Deliberately not ported</h2>
- * <p>The reference project also rotates the {@code X-Forwarded-For}/{@code X-Real-IP}/
+ * <h2>Presenting a different client address</h2>
+ * <p>The reference project rotates the {@code X-Forwarded-For}/{@code X-Real-IP}/
  * {@code True-Client-IP}/{@code X-Client-IP}/{@code Forwarded} headers through fake residential
- * IP ranges to mask the caller's origin from chatjimmy.ai's own rate-limiting. That is a
- * detection-evasion mechanism against a third party's abuse controls, not a wire-format
- * translation, and it is not implemented here: this client sends only the headers chatjimmy.ai
- * actually needs to accept a request ({@code Content-Type}, {@code Accept}, {@code Origin},
- * {@code Referer}, an honest {@code User-Agent} identifying this client).
+ * IP ranges so that a burst of requests from one machine does not present as one
+ * origin to the upstream's per-origin rate limiting.
+ * {@link Builder#rotateClientIpHeaders(boolean)} ports that: on, each request
+ * carries one {@link IpAddressObfuscator}-generated address on all five headers, so
+ * they cannot contradict each other. It is off by default — see the builder method
+ * for why this one is the caller's decision.
+ *
+ * <p>Only those header values change. The {@code User-Agent} stays honest and
+ * identifies this client, no credential is invented — chatjimmy.ai's backend takes
+ * none — and the TCP source address remains this host's: rotation is a claim about
+ * origin made in headers, not a different network path.
  *
  * <h2>Tool calling</h2>
  * <p>chatjimmy.ai has no structured function-calling channel — tools are described in the
@@ -97,6 +103,11 @@ public class ChatJimmyLlmClient implements LlmClient {
     private static final String DEFAULT_MODEL = "llama3.1-8B";
     private static final int DEFAULT_TOP_K = 8;
     private static final String USER_AGENT = "ara-adapters-chatjimmy/1.0 (+https://github.com/xmor/ara)";
+    private static final String FORWARDED_HEADER = "Forwarded";
+
+    /** The client-address headers that carry a bare IPv4 literal, unlike {@link #FORWARDED_HEADER}. */
+    private static final List<String> BARE_CLIENT_IP_HEADERS =
+            List.of("X-Forwarded-For", "X-Real-IP", "True-Client-IP", "X-Client-IP");
 
     // ── Upstream text-stream markers ─────────────────────────────────────────
 
@@ -130,6 +141,7 @@ public class ChatJimmyLlmClient implements LlmClient {
     private final Integer defaultMaxTokens;
     private final int topK;
     private final Duration timeout;
+    private final boolean rotateClientIpHeaders;
 
     private ChatJimmyLlmClient(Builder builder) {
         this.baseUrl = builder.baseUrl;
@@ -139,6 +151,7 @@ public class ChatJimmyLlmClient implements LlmClient {
         this.defaultMaxTokens = builder.maxTokens;
         this.topK = builder.topK;
         this.timeout = builder.timeout;
+        this.rotateClientIpHeaders = builder.rotateClientIpHeaders;
 
         HttpClient.Builder httpBuilder = HttpClient.newBuilder()
                 .connectTimeout(builder.timeout);
@@ -237,13 +250,16 @@ public class ChatJimmyLlmClient implements LlmClient {
 
     /** Fetches the model catalogue from {@code GET /api/models}, model ids only. */
     public List<String> listModels() {
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + MODELS_PATH))
                 .timeout(timeout)
                 .header("Accept", "application/json")
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .build();
+                .header("User-Agent", USER_AGENT);
+        // Same upstream, same rotation decision: exempting this one request would
+        // leave a catalogue call arriving from the real address moments after a
+        // chat call that did not.
+        applyClientIpHeaders(builder);
+        HttpRequest request = builder.GET().build();
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() >= 400) {
@@ -428,7 +444,7 @@ public class ChatJimmyLlmClient implements LlmClient {
     // ── HTTP ──────────────────────────────────────────────────────────────────
 
     private HttpRequest.Builder baseRequest(String path) {
-        return HttpRequest.newBuilder()
+        HttpRequest.Builder request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path))
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
@@ -436,6 +452,32 @@ public class ChatJimmyLlmClient implements LlmClient {
                 .header("Origin", baseUrl)
                 .header("Referer", baseUrl + "/")
                 .header("User-Agent", USER_AGENT);
+        applyClientIpHeaders(request);
+        return request;
+    }
+
+    /**
+     * Presents a client address other than this host's own, on the five headers a
+     * reverse proxy would read it from — but only when
+     * {@link Builder#rotateClientIpHeaders(boolean)} asked for it. Off by default:
+     * unlike every other field on this builder, it changes what the upstream sees
+     * about where a request came from, so it is the caller's decision, not a
+     * default the adapter makes on their behalf.
+     *
+     * <p>One address per request, reused across all five headers. Drawing a fresh
+     * one per header would be less code and a worse claim: no client reports five
+     * different origins for one connection, so the disagreement is exactly what a
+     * countermeasure can key on. {@code Forwarded} is the structured form from
+     * RFC 7239 and takes the address as a {@code for=} parameter; the other four
+     * carry it bare.
+     */
+    private void applyClientIpHeaders(HttpRequest.Builder request) {
+        if (!rotateClientIpHeaders) return;
+        String clientIp = IpAddressObfuscator.generate();
+        for (String header : BARE_CLIENT_IP_HEADERS) {
+            request.header(header, clientIp);
+        }
+        request.header(FORWARDED_HEADER, "for=" + clientIp);
     }
 
     private HttpResponse<String> send(ObjectNode body) {
@@ -718,6 +760,7 @@ public class ChatJimmyLlmClient implements LlmClient {
         private int proxyPort;
         private String proxyUsername;
         private String proxyPassword;
+        private boolean rotateClientIpHeaders;
 
         /** Overrides the default {@code https://chatjimmy.ai} base URL (useful for testing). */
         public Builder baseUrl(String baseUrl) { this.baseUrl = baseUrl; return this; }
@@ -770,6 +813,28 @@ public class ChatJimmyLlmClient implements LlmClient {
             this.proxyPort = port;
             this.proxyUsername = username;
             this.proxyPassword = password;
+            return this;
+        }
+
+        /**
+         * Presents a different client address on every outbound request, drawn by
+         * {@link IpAddressObfuscator} from a pool of real residential prefixes, so
+         * that consecutive requests from one host do not all appear to share an
+         * origin.
+         *
+         * <p>Off by default. It only rewrites header values — the TCP source address
+         * is this host's either way — but that is enough to change how the upstream
+         * accounts for the traffic, so turning it on is a decision about how this
+         * deployment wants to be seen rather than a translation detail. Turn it on
+         * when the upstream rate-limits per origin and one address is not enough
+         * headroom; leave it off when an honest address is worth more than the
+         * extra headroom.
+         *
+         * <p>Applies to every request this client makes, chat, stream and
+         * {@link ChatJimmyLlmClient#listModels()} alike.
+         */
+        public Builder rotateClientIpHeaders(boolean rotate) {
+            this.rotateClientIpHeaders = rotate;
             return this;
         }
 
