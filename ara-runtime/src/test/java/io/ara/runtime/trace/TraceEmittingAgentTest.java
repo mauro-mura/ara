@@ -201,6 +201,26 @@ class TraceEmittingAgentTest {
         assertNull(root.outputRef(), "a failed run has no output blob");
     }
 
+    /**
+     * A contract refusal is recognised by what it is — the typed violation on the response — not by its
+     * wording, so the reason text here is deliberately one {@code FailureKind.classify} would call OTHER.
+     */
+    @Test
+    void aContractRefusalIsKindedFromItsTypedViolation_notFromItsReasonText() {
+        io.ara.core.agent.ContractViolation outputViolation = new io.ara.core.agent.ContractViolation(
+                io.ara.core.agent.ContractViolation.Phase.OUTPUT, List.of());
+        io.ara.core.agent.ContractViolation inputViolation = new io.ara.core.agent.ContractViolation(
+                io.ara.core.agent.ContractViolation.Phase.INPUT, List.of());
+
+        new TraceEmittingAgent(agent(t -> failure(t, "the answer broke the contract").withViolation(outputViolation)),
+                traces, blobs).execute(AgentTask.of("go", Map.of(), "run-out", "tester"));
+        new TraceEmittingAgent(agent(t -> failure(t, "the request broke the contract").withViolation(inputViolation)),
+                traces, blobs).execute(AgentTask.of("go", Map.of(), "run-in", "tester"));
+
+        assertEquals("CONTRACT_OUTPUT_VIOLATION", traces.findByRunId("run-out").get(0).failureKind());
+        assertEquals("CONTRACT_REQUEST_VIOLATION", traces.findByRunId("run-in").get(0).failureKind());
+    }
+
     @Test
     void aThrownExecutionStillRecordsAFailedTraceAndRethrows() {
         AgentTask task = AgentTask.of("boom", Map.of(), "run-throw", "tester");

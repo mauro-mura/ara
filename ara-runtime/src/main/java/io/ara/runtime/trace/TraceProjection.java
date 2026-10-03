@@ -104,7 +104,7 @@ public final class TraceProjection {
                 .endedAt(endedAt);
         root.specHash(specHash);
         if (!ok) {
-            root.failureKind(FailureKind.classify(response.failureReason()).name());   // ADR-0074 D6
+            root.failureKind(FailureKind.of(response).name());   // ADR-0074 D6 — typed for a contract refusal, by reason text otherwise
         }
 
         List<TraceSpan> spans = new ArrayList<>();

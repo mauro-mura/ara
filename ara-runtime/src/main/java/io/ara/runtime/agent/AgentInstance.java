@@ -765,7 +765,8 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         switch (FailureKind.classify(reason)) {
             case BUDGET_EXCEEDED -> interceptorChain.onBudgetExceeded(context, stepName, reason);
             case CANCELLED       -> interceptorChain.onCancelled(context, stepName);
-            case SESSION_BUSY, TIMEOUT, MAX_ITERATIONS, UNEXPECTED_ERROR, OTHER ->
+            case SESSION_BUSY, TIMEOUT, MAX_ITERATIONS, UNEXPECTED_ERROR, OTHER,
+                 CONTRACT_REQUEST_VIOLATION, CONTRACT_OUTPUT_VIOLATION ->   // never from classify(reason); listed so a future typed caller is not silently dropped
                     interceptorChain.onError(context, stepName, new RuntimeException(reason));
         }
     }

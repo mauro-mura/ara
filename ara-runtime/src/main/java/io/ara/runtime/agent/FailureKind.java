@@ -1,6 +1,7 @@
 package io.ara.runtime.agent;
 
 import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.ContractViolation;
 
 /**
  * Bounded classification of an {@link AgentResponse#failureReason()}.
@@ -45,8 +46,36 @@ public enum FailureKind {
     MAX_ITERATIONS,
     /** An exception escaped the strategy. */
     UNEXPECTED_ERROR,
+    /**
+     * The agent's {@code AgentContract} refused the <em>request</em> — its input or its media — before the
+     * model was called ({@link ContractViolation.Phase#callerFault()}). Never produced by {@link #classify}:
+     * only {@link #of(AgentResponse)} can tell, because it reads the typed violation, not the reason text.
+     */
+    CONTRACT_REQUEST_VIOLATION,
+    /**
+     * The agent's {@code AgentContract} refused the <em>answer</em> — the output schema or an output
+     * processor — after every repair attempt the contract allows. The agent did answer, and its own contract
+     * said no: unlike the other kinds, this one names a failure that has a semantic cause. Never produced by
+     * {@link #classify}; see {@link #of(AgentResponse)}.
+     */
+    CONTRACT_OUTPUT_VIOLATION,
     /** Anything not recognised — never a guess. */
     OTHER;
+
+    /**
+     * The kind of a failed response — from its typed {@link AgentResponse#violation()} when the agent's
+     * contract refused the task, and otherwise from the reason text, as {@link #classify} does.
+     *
+     * <p>The typed route is the one thing {@link #classify}'s "known limitation" asks for, for the one
+     * failure that already carries a typed cause: a contract refusal is recognised by what it <em>is</em>,
+     * so rewording the message cannot make it slide into {@link #OTHER}.
+     */
+    public static FailureKind of(AgentResponse response) {
+        if (response.violation() != null) {
+            return response.violation().phase().callerFault() ? CONTRACT_REQUEST_VIOLATION : CONTRACT_OUTPUT_VIOLATION;
+        }
+        return classify(response.failureReason());
+    }
 
     /**
      * Best-effort classification of a failure reason. Matched by literal prefix/substring

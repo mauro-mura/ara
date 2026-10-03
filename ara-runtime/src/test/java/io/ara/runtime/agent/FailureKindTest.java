@@ -40,6 +40,39 @@ class FailureKindTest {
                 FailureKind.classify("ReAct: Max iterations reached"));
     }
 
+    // ── the typed route: a contract refusal ───────────────────────────────────
+
+    private static io.ara.core.agent.AgentResponse refused(io.ara.core.agent.ContractViolation.Phase phase, String reason) {
+        return io.ara.core.agent.AgentResponse.failure("t", io.ara.core.common.AgentId.of("a"), reason,
+                java.time.Duration.ZERO).withViolation(new io.ara.core.agent.ContractViolation(phase, java.util.List.of()));
+    }
+
+    @Test
+    void aContractRefusalIsKindedByItsPhase_whateverItsReasonSays() {
+        assertEquals(FailureKind.CONTRACT_REQUEST_VIOLATION,
+                FailureKind.of(refused(io.ara.core.agent.ContractViolation.Phase.INPUT, "reworded beyond recognition")));
+        assertEquals(FailureKind.CONTRACT_REQUEST_VIOLATION,
+                FailureKind.of(refused(io.ara.core.agent.ContractViolation.Phase.MEDIA, "x")));
+        assertEquals(FailureKind.CONTRACT_OUTPUT_VIOLATION,
+                FailureKind.of(refused(io.ara.core.agent.ContractViolation.Phase.OUTPUT, "x")));
+    }
+
+    @Test
+    void aFailureWithoutAViolation_isKindedByItsReason_asBefore() {
+        io.ara.core.agent.AgentResponse timedOut = io.ara.core.agent.AgentResponse.failure("t",
+                io.ara.core.common.AgentId.of("a"), "Execution exceeded timeout of 5m", java.time.Duration.ZERO);
+
+        assertEquals(FailureKind.TIMEOUT, FailureKind.of(timedOut));
+    }
+
+    @Test
+    void theContractKinds_areNeverProducedByTheTextClassifier() {
+        // classify() reads only text; "Contract output violation: …" is exactly what a refusal's reason says,
+        // and it must still not be called a contract kind from the text — only the typed violation may.
+        assertEquals(FailureKind.OTHER, FailureKind.classify("Contract output violation: Schema violations (1): $.a: x"));
+        assertEquals(FailureKind.OTHER, FailureKind.classify("Contract input violation: x"));
+    }
+
     @ParameterizedTest
     @NullSource
     @ValueSource(strings = {"", "   ", "something nobody planned for", "session busy"})
