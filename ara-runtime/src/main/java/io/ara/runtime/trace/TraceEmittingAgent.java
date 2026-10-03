@@ -1,6 +1,7 @@
 package io.ara.runtime.trace;
 
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AgentContract;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentState;
 import io.ara.core.agent.AgentTask;
@@ -12,6 +13,7 @@ import io.ara.core.common.AgentId;
 import io.ara.core.trace.BlobStore;
 import io.ara.core.trace.TraceSpan;
 import io.ara.core.trace.TraceStore;
+import io.ara.runtime.agent.ContractAware;
 import io.ara.runtime.agent.Reconfigurable;
 import io.ara.runtime.agent.RunStateAware;
 import io.ara.runtime.agent.SessionHistoryAware;
@@ -33,13 +35,14 @@ import java.util.Objects;
  * <p>Meant to be the <em>outermost</em> decorator (wraps {@code ContractEnforcingAgent} or
  * a bare {@code AgentInstance}). It forwards the optional marker interfaces
  * ({@code SessionScoped}, {@code Reconfigurable}, {@code SessionHistoryAware},
- * {@code RunStateAware}, {@code UserMemoryAware}) to the delegate the same way
+ * {@code RunStateAware}, {@code UserMemoryAware}, {@code ContractAware}) to the delegate the same way
  * {@code ContractEnforcingAgent} does, so it is safe to register in the {@code AgentRegistry}
  * in place of the agent it wraps. Callers that already hold the {@link AgentResponse} can
  * skip the wrapper and call {@link #emit}.
  */
 public final class TraceEmittingAgent implements AraAgent, SessionHistoryAware, RunStateAware,
-                                                 UserMemoryAware, Reconfigurable, SessionScoped {
+                                                 UserMemoryAware, Reconfigurable, SessionScoped,
+                                                 ContractAware {
 
     private static final Logger log = LoggerFactory.getLogger(TraceEmittingAgent.class);
 
@@ -129,6 +132,11 @@ public final class TraceEmittingAgent implements AraAgent, SessionHistoryAware, 
     @Override public void terminate() { delegate.terminate(); }
 
     // ── optional marker interfaces forwarded to the delegate (same pattern as ContractEnforcingAgent) ──
+
+    @Override
+    public AgentContract contract() {
+        return delegate instanceof ContractAware c ? c.contract() : AgentContract.empty();
+    }
 
     @Override
     public List<ConversationTurn> conversationHistory(SessionId sessionId) {

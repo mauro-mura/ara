@@ -27,6 +27,8 @@ import java.util.Objects;
  *   <li>outputSchema enforcement — appends JSON format instructions (ADR-014)</li>
  *   <li>{@code inner.execute()} — via {@code PromptOverridable} if shaping occurred</li>
  *   <li>OutputProcessor chain — transforms / validates the response</li>
+ *   <li>Repair — while the output chain rejects and {@code outputRepairAttempts()} allows,
+ *       re-executes with the rejection fed back, then re-runs step 5</li>
  * </ol>
  *
  * <p>Registered in {@link AgentRegistry} in place of the raw {@code AgentInstance},
@@ -34,7 +36,7 @@ import java.util.Objects;
  * passes through the contract enforcement.
  */
 public final class ContractEnforcingAgent implements AraAgent, SessionHistoryAware, RunStateAware, UserMemoryAware,
-                                                      Reconfigurable, SessionScoped {
+                                                      Reconfigurable, SessionScoped, ContractAware {
 
     private final AraAgent      inner;
     private final AgentContract contract;
@@ -48,6 +50,11 @@ public final class ContractEnforcingAgent implements AraAgent, SessionHistoryAwa
     public AgentResponse execute(AgentTask task) {
         Objects.requireNonNull(task, "task must not be null");
         return ContractEnforcer.apply(contract, inner, task, Instant.now());
+    }
+
+    @Override
+    public AgentContract contract() {
+        return contract;
     }
 
     /** Delegates to the wrapped agent; empty if it does not record session history. */

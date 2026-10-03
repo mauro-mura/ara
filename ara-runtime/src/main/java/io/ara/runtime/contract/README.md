@@ -89,14 +89,29 @@ output, or both, depending on the contract:
 - **`JsonSchemaValidator`** — also implements `SchemaProvider`.
   - `jsonOnly()` — well-formedness only.
   - `requiring("a", "b")` — well-formedness + presence of the named top-level fields.
-  - `forOutput(schema)` — well-formedness + the `required` array declared *inside* the
-    JSON Schema itself, **and** exposes that same schema via `jsonSchema()` so the
+  - `forOutput(schema)` — full JSON Schema validation (networknt `json-schema-validator`:
+    types, nested `properties`/`items`, `required`, `enum`/`const`, bounds, `pattern`,
+    `additionalProperties`, `oneOf`/`anyOf`/`allOf`, local `$ref`; dialect from `$schema`,
+    draft 2020-12 by default), **and** exposes that same schema via `jsonSchema()` so the
     identical instance can be passed to both `.outputSchema(validator)` and
     `.addOutputProcessor(validator)` on the `AgentContract` builder — declared once, never
     duplicated. Calling `jsonSchema()` on an instance built via `jsonOnly()`/`requiring()`
     throws `IllegalStateException` — only `forOutput(...)` instances carry a schema.
-  - Only validates the fields it's told to check; does **not** perform full JSON Schema
-    structural validation (types, patterns, nested `required`, …).
+  - A rejection lists every violation with its JSON Path (`$.items[2].price: string found,
+    number expected`), up to 10. `format` is asserted, messages are always English, remote
+    `$ref` is never fetched. An invalid schema throws `IllegalArgumentException` at
+    `forOutput(...)`, not on the first payload.
+  - Until it moved onto networknt, `forOutput` checked only the top-level `required` array —
+    a payload that passed then can be rejected now.
+
+### Repairing a rejected output
+
+`AgentContract.builder().outputRepairAttempts(n)` (default `0`, off) makes
+`ContractEnforcer` re-execute the agent up to `n` times when the output chain rejects, each
+time with the original input followed by the rejected answer and the rejection reason —
+which, from `JsonSchemaValidator`, names every failing path. Only output rejections are
+repaired; input/media rejections and failures of the agent itself are returned as they
+are. Tokens, cost, iterations and steps of every attempt add up in the final response.
 - **`RegexValidator`** — `matching(regex)` requires the pattern; `notMatching(regex)`
   forbids it. Optional `description` overload for a clearer rejection message than the
   raw regex. **Does not null-guard its input** — unlike every other processor in this

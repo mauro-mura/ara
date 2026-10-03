@@ -30,6 +30,10 @@ import java.util.Optional;
  * @param steps           ordered execution trace (thoughts, tool calls, observations)
  * @param llmProvider     LLM provider id used for this execution (e.g. {@code "gpt-mini"},
  *                        {@code "langchain4j-gpt-4o"}); {@code null} when not tracked
+ * @param violation       why the agent's {@link AgentContract} refused the task, as data;
+ *                        {@code null} unless {@code failureReason} comes from the contract
+ *                        (see {@link ContractViolation}). A failure of the agent itself
+ *                        never sets it
  */
 public record AgentResponse(
         String taskId,
@@ -44,7 +48,8 @@ public record AgentResponse(
         String failureReason,
         Instant completedAt,
         List<ExecutionStep> steps,
-        String llmProvider
+        String llmProvider,
+        ContractViolation violation
 ) {
 
     public AgentResponse {
@@ -56,6 +61,32 @@ public record AgentResponse(
         Objects.requireNonNull(elapsedTime, "elapsedTime must not be null");
         Objects.requireNonNull(completedAt, "completedAt must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
+        // violation stays nullable: most responses are not a contract violation
+    }
+
+    /**
+     * The 13-component shape from before {@code violation} was added, kept so every existing
+     * {@code new AgentResponse(...)} call keeps compiling and linking, with
+     * {@code violation = null}. Deliberately not deprecated: for a response that is not a
+     * contract violation — which is almost all of them — it is the right constructor, and
+     * there is nothing to migrate to.
+     */
+    public AgentResponse(
+            String taskId, AgentId agentId, String content, AgentState finalState,
+            int iterationsUsed, int inputTokens, int outputTokens, Money estimatedCost,
+            Duration elapsedTime, String failureReason, Instant completedAt,
+            List<ExecutionStep> steps, String llmProvider
+    ) {
+        this(taskId, agentId, content, finalState, iterationsUsed, inputTokens, outputTokens,
+                estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider, null);
+    }
+
+    /**
+     * Returns the contract violation wrapped in an {@link Optional}, empty when this response
+     * is not one.
+     */
+    public Optional<ContractViolation> violationOpt() {
+        return Optional.ofNullable(violation);
     }
 
     /**
@@ -221,19 +252,33 @@ public record AgentResponse(
     public AgentResponse withContent(String newContent) {
         Objects.requireNonNull(newContent, "newContent must not be null");
         return new AgentResponse(taskId, agentId, newContent, finalState, iterationsUsed,
-                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
+                llmProvider, violation);
     }
 
     /** Returns a copy of this response with {@code llmProvider} set. */
     public AgentResponse withLlmProvider(String llmProvider) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
-                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
+                llmProvider, violation);
     }
 
     /** Returns a copy of this response with {@code estimatedCost} replaced. */
     public AgentResponse withCost(Money estimatedCost) {
         Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
-                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider);
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
+                llmProvider, violation);
+    }
+
+    /**
+     * Returns a copy of this response marked as refused by the agent's contract. It does not
+     * touch {@code failureReason} or {@code finalState}: the caller sets those, the same way
+     * it would for any other failure.
+     */
+    public AgentResponse withViolation(ContractViolation newViolation) {
+        return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
+                llmProvider, newViolation);
     }
 }

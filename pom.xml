@@ -91,6 +91,13 @@
         <javalin.version>6.7.0</javalin.version>
         <!-- real token counting for SlidingWindowMemoryManager (ara-adapters only) -->
         <jtokkit.version>1.1.0</jtokkit.version>
+        <!--
+        JSON Schema validation for JsonSchemaValidator (ara-runtime). Kept equal to the
+        version the MCP SDK's mcp-json-jackson2 pulls into ara-adapters (2.0.4 for
+        mcp.sdk.version 2.0.1): two paths to the same artifact at different versions
+        would trip dependencyConvergence. Bump both together.
+        -->
+        <json-schema-validator.version>2.0.4</json-schema-validator.version>
 
         <!--
         Coverage floor enforced by the jacoco `check` execution below. The values are
@@ -161,6 +168,24 @@
                 <groupId>com.knuddels</groupId>
                 <artifactId>jtokkit</artifactId>
                 <version>${jtokkit.version}</version>
+            </dependency>
+
+            <!--
+            networknt json-schema-validator — full JSON Schema (draft 4 → 2020-12) behind
+            JsonSchemaValidator (ara-runtime). jackson-dataformat-yaml is excluded: it is
+            loaded lazily only for YAML input, which ARA never feeds it, and its older
+            jackson-core would otherwise contend with jackson.version.
+            -->
+            <dependency>
+                <groupId>com.networknt</groupId>
+                <artifactId>json-schema-validator</artifactId>
+                <version>${json-schema-validator.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>com.fasterxml.jackson.dataformat</groupId>
+                        <artifactId>jackson-dataformat-yaml</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <!-- Logging -->
