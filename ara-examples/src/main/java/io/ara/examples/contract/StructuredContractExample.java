@@ -111,7 +111,7 @@ public final class StructuredContractExample {
         System.out.println();
 
         // ── 1. The contract: both sides, one repair attempt, one custom rule ─────────────────────
-        JsonSchemaValidator in = JsonSchemaValidator.forOutput(INPUT_SCHEMA);
+        JsonSchemaValidator in = JsonSchemaValidator.forInput(INPUT_SCHEMA);
         JsonSchemaValidator out = JsonSchemaValidator.forOutput(OUTPUT_SCHEMA);
         AgentContract contract = AgentContract.builder()
                 .inputSchema(in).addInputProcessor(in)             // declared once, enforced by the same instance

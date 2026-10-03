@@ -208,6 +208,32 @@ class JsonSchemaValidatorTest {
         assertEquals(ORDER_SCHEMA, ORDER.jsonSchema());
     }
 
+    // ── forInput: the same validator, named for the side it guards ─────────────
+
+    @Test
+    void forInput_validatesExactlyAsForOutputDoes() {
+        JsonSchemaValidator in = JsonSchemaValidator.forInput(ORDER_SCHEMA);
+
+        pass(in, """
+                {"id":"ORD-1","status":"OPEN","items":[{"sku":"ABC","price":9.5}]}""");
+        assertEquals(reject(ORDER, "{\"id\":\"x\",\"status\":\"LOST\",\"items\":[]}"),
+                reject(in, "{\"id\":\"x\",\"status\":\"LOST\",\"items\":[]}"),
+                "the same payload gets the same rejection from either name");
+    }
+
+    @Test
+    void forInput_exposesItsSchema_forTheInputSchemaSlot() {
+        io.ara.core.agent.AgentContract contract = io.ara.core.agent.AgentContract.builder()
+                .inputSchema(JsonSchemaValidator.forInput(ORDER_SCHEMA)).build();
+
+        assertEquals(ORDER_SCHEMA, contract.inputSchema().jsonSchema());
+    }
+
+    @Test
+    void forInput_refusesABrokenSchemaAtConstruction_likeForOutput() {
+        assertThrows(IllegalArgumentException.class, () -> JsonSchemaValidator.forInput("{oops"));
+    }
+
     // ── jsonOnly / requiring: unchanged behaviour ─────────────────────────────
 
     @Test

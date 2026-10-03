@@ -115,6 +115,21 @@ public final class JsonSchemaValidator implements InputProcessor, OutputProcesso
         return new JsonSchemaValidator(jsonSchema, compile(jsonSchema), List.of());
     }
 
+    /**
+     * {@link #forOutput(String)} under the name that says which side it guards: validates the payload against
+     * the full JSON Schema {@code jsonSchema} and exposes it as a {@link SchemaProvider}, so the same instance
+     * goes to both {@code AgentContract.Builder.inputSchema(...)} and {@code addInputProcessor(...)}.
+     *
+     * <p>Nothing differs between the two: the validator is one class used as an {@link InputProcessor} and as an
+     * {@link OutputProcessor}, and the schema engine does not know which it is. The alias exists because
+     * {@code forOutput(...)} on a validator that guards a request reads, to the next person, like a mistake.
+     *
+     * @throws IllegalArgumentException as {@link #forOutput(String)}
+     */
+    public static JsonSchemaValidator forInput(String jsonSchema) {
+        return forOutput(jsonSchema);
+    }
+
     // ── SchemaProvider ────────────────────────────────────────────────────────
 
     @Override
