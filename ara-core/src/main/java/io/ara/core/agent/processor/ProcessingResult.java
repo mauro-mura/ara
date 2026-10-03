@@ -21,6 +21,12 @@ import java.util.Objects;
  * {@link Issue}s, so a caller that is not reading English prose (an HTTP client, another
  * program) gets them as data rather than by parsing the reason. {@code issues} is empty
  * for every processor that has only a sentence to offer, which is all of them but one.
+ *
+ * <p><b>The two have different readers.</b> The {@code issues} go to the host, through
+ * {@code AgentResponse.violation()}. The model — when the contract repairs a rejected answer — is sent
+ * the {@code reason}, and only that. A processor that wants the model to fix the right thing must name
+ * <em>where</em> in its reason, as {@code JsonSchemaValidator}'s does ("{@code $.items[1].price: string
+ * found, number expected}"); structured issues alone do not reach it.
  */
 public sealed interface ProcessingResult
         permits ProcessingResult.Pass, ProcessingResult.Reject {

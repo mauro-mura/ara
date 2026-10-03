@@ -344,6 +344,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `basics/InterceptorEventsExample` | stub | Every `AgentInterceptor` event in order, around one run |
 | `pipeline/ClassifyAndActExample` | none | Classify-and-act at its smallest — no model, no API key |
 | `pipeline/TicketTriageCascadeExample` | stub | The three-tier cascade: rules → model → human |
+| `contract/StructuredContractExample` | stub | An agent's input *and* output contract: full JSON Schema on both sides with every violation and its path, a refusal as data (`AgentResponse.violation()`, `Phase.callerFault()`), a custom rule with structured issues, and `outputRepairAttempts` sending a rejected answer back — the example checks its own claims |
 | `crew/CodeReviewCrewExample` | stub / **live** | Three specialist reviewers fan out on virtual threads; a lead agent merges their findings |
 | `hitl/HumanInTheLoopExample` | stub | A tool call parked on an `ApprovalGate` until an operator decides |
 | `memory/MemoryAgentExample` | stub | Token-budgeted working memory: summarise, offload, and recall |
