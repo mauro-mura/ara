@@ -550,7 +550,7 @@ public final class LocalAgentScheduler implements AgentScheduler {
      * Minimal 5-field cron evaluator (minute hour dom month dow).
      *
      * <p><b>Public API.</b> Applications may use this class to validate a cron expression
-     * {@em before} registering a schedule and to compute how far in the future its next
+     * <em>before</em> registering a schedule and to compute how far in the future its next
      * fire lies — both useful for persistence-backed schedulers that want to fail fast on
      * bad expressions at input time rather than when the schedule is registered.
      *

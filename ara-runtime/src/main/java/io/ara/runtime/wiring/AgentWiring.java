@@ -1,5 +1,6 @@
 package io.ara.runtime.wiring;
 
+import io.ara.runtime.artifact.ArtifactSink;
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.tool.ToolRegistry;
@@ -23,7 +24,8 @@ public record AgentWiring(
         AgentConfig config,
         LlmClient llm,
         ToolRegistry toolRegistry,
-        List<Lease<?>> leases
+        List<Lease<?>> leases,
+        ArtifactSink artifactSink
 ) implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(AgentWiring.class);
@@ -33,6 +35,15 @@ public record AgentWiring(
         Objects.requireNonNull(llm, "llm must not be null");
         Objects.requireNonNull(toolRegistry, "toolRegistry must not be null");
         leases = List.copyOf(Objects.requireNonNull(leases, "leases must not be null"));
+        Objects.requireNonNull(artifactSink, "artifactSink must not be null");
+    }
+
+    /**
+     * The shape from before {@code artifactSink} existed, with a sink that emits nothing: every wiring
+     * built by hand, and every agent of a runtime that never asked for artifacts, keeps behaving as before.
+     */
+    public AgentWiring(AgentConfig config, LlmClient llm, ToolRegistry toolRegistry, List<Lease<?>> leases) {
+        this(config, llm, toolRegistry, leases, ArtifactSink.none());
     }
 
     /**

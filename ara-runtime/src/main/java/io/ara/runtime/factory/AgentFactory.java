@@ -18,6 +18,7 @@ import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmClientFactory;
 import io.ara.core.llm.LlmTransport;
 import io.ara.core.mcp.McpClient;
+import io.ara.core.artifact.ArtifactExtractor;
 import io.ara.core.media.MediaStore;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.telemetry.AraTelemetry;
@@ -83,6 +84,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
     private final String defaultLlmClientId;
     private final LlmClientFactory llmClientFactory;
     private final MediaStore       mediaStore;
+    private final ArtifactExtractor artifactExtractor;
     private final Function<AgentConfig, MemoryManager> memoryManagerFactory;
     private final Function<AgentConfig, ToolRegistry>  toolRegistryFactory;
     private final ExecutionPlanner executionPlanner;
@@ -133,6 +135,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         this.telemetry            = builder.telemetry;
         this.sessionStore         = builder.sessionStore;
         this.mediaStore           = builder.mediaStore;
+        this.artifactExtractor    = builder.artifactExtractor;
         this.traceStore           = builder.traceStore;
         this.traceBlobStore       = builder.traceBlobStore;
         this.traceSpecHash        = builder.traceSpecHash;
@@ -307,7 +310,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         ToolRegistry toolRegistry = toolRegistryFactory.apply(config);
         WiringFactory wiringFactory = new DefaultWiringFactory(
                 llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
-                mediaStore, telemetry);
+                mediaStore, telemetry, artifactExtractor);
         AgentInterceptorChain chain = new AgentInterceptorChain(interceptors);
         return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore);
     }
@@ -487,6 +490,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         private String defaultLlmClientId = "default";
         private LlmClientFactory llmClientFactory;
         private MediaStore       mediaStore = MediaStore.noop();
+        private ArtifactExtractor artifactExtractor = ArtifactExtractor.none();
         private final Map<String, McpServerBinding> mcpServers = new LinkedHashMap<>();
         private Function<AgentConfig, MemoryManager>  memoryManagerFactory;
         private Function<AgentConfig, ToolRegistry>   toolRegistryFactory;
@@ -528,6 +532,16 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
          */
         public Builder mediaStore(MediaStore mediaStore) {
             this.mediaStore = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets how the final answer of each agent is split into artifacts stored in the {@link #mediaStore}.
+         * Defaults to {@link ArtifactExtractor#none()}: no artifacts, and a response identical to what it was
+         * before they existed. It has no effect while the store is {@link MediaStore#noop()}, which cannot hold them.
+         */
+        public Builder artifactExtractor(ArtifactExtractor artifactExtractor) {
+            this.artifactExtractor = Objects.requireNonNull(artifactExtractor, "artifactExtractor must not be null");
             return this;
         }
 

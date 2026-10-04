@@ -258,6 +258,7 @@ final class RuntimeAssembler {
                 .telemetry(b.telemetry)
                 .sessionStore(b.sessionStore)
                 .mediaStore(b.mediaStore)
+                .artifactExtractor(b.artifactExtractor)
                 .interceptors(b.interceptors)
                 .registry(registry)
                 .build();

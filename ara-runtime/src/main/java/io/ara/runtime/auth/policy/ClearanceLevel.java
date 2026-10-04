@@ -3,8 +3,8 @@ package io.ara.runtime.auth.policy;
 import java.util.Locale;
 
 /**
- * The clearance hierarchy {@link ClearancePolicy} enforces (ADR-033): {@code STANDARD} <
- * {@code SENSITIVE} < {@code CONFIDENTIAL} < {@code SECRET}, in declaration order so
+ * The clearance hierarchy {@link ClearancePolicy} enforces (ADR-033): {@code STANDARD} &lt;
+ * {@code SENSITIVE} &lt; {@code CONFIDENTIAL} &lt; {@code SECRET}, in declaration order so
  * {@link Enum#compareTo} is the comparison — no separate ordinal table to keep in sync.
  */
 public enum ClearanceLevel {

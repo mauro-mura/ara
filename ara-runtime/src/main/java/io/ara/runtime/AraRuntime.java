@@ -706,8 +706,8 @@ public final class AraRuntime implements AutoCloseable {
      * that need the full catalog of configured models, not a per-call resolution.
      *
      * @return an immutable map from transport id to client; never {@code null}, never empty
-     *         (a runtime cannot be built with zero registered clients — see
-     *         {@link Builder#validate()})
+     *         (a runtime cannot be built with zero registered clients — the invariant is
+     *         enforced at build time by the package-private {@code RuntimeAssembler})
      */
     public Map<String, LlmClient> llmClients() { return llmClients; }
 
@@ -984,6 +984,7 @@ public final class AraRuntime implements AutoCloseable {
         io.ara.core.trace.BlobStore  traceBlobStore;
         java.util.function.Function<io.ara.core.agent.AgentConfig, String> traceSpecHash;
         MediaStore   mediaStore   = MediaStore.noop();
+        io.ara.core.artifact.ArtifactExtractor artifactExtractor = io.ara.core.artifact.ArtifactExtractor.none();
         ApprovalGate approvalGate;
         io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry =
                 new io.ara.runtime.auth.InMemoryTemporaryScopeRegistry();
@@ -1271,6 +1272,22 @@ public final class AraRuntime implements AutoCloseable {
          */
         public Builder mediaStore(MediaStore mediaStore) {
             this.mediaStore = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets how the final answer of every agent is split into artifacts — a code block, a document — that
+         * the response then carries as {@link io.ara.core.media.MediaRef}s into the {@link MediaStore}
+         * (see {@code AgentResponse#artifacts()}). Defaults to {@link io.ara.core.artifact.ArtifactExtractor#none()}:
+         * no artifacts, a response identical to what it was before they existed. It has no effect while the
+         * store is {@link MediaStore#noop()}, which cannot hold them; {@link
+         * io.ara.runtime.artifact.FencedBlockArtifactExtractor} is the one the runtime ships.
+         *
+         * <p>Runtime-wide rather than per-agent for the same reason as the store: two agents in one delegation
+         * chain must agree on what a part is, or an artifact handed from one to the other means two things.
+         */
+        public Builder artifactExtractor(io.ara.core.artifact.ArtifactExtractor artifactExtractor) {
+            this.artifactExtractor = Objects.requireNonNull(artifactExtractor, "artifactExtractor must not be null");
             return this;
         }
 

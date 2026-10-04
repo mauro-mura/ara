@@ -209,3 +209,60 @@ instruction through as an answer.
 
 Runnable end-to-end: `io.ara.examples.multimodal.MultimodalInputExample` — a PDF to
 Mistral and an image to Ollama, through one provider-agnostic method.
+
+---
+
+## Artifacts in the response — code blocks and documents
+
+An answer is a conversation turn; a block of code or a document inside it is *output*. When
+a consumer wants those parts — to run a check on a code block, to hand a document to another
+agent — re-parsing the text each time means every consumer finds them by its own rule. The
+runtime can do it once, store each part in the same `MediaStore` that holds task media, and
+return the references on the response:
+
+```java
+AraRuntime runtime = AraRuntime.builder()
+        .llmClient("mistral", mistral)
+        .mediaStore(MediaStore.inMemory())                         // artifacts need a store that accepts writes
+        .artifactExtractor(new FencedBlockArtifactExtractor())     // defaults to ArtifactExtractor.none()
+        .build();
+
+AgentResponse response = agent.execute(AgentTask.of("write a function and its query"));
+
+for (MediaRef artifact : response.artifacts()) {                   // block-1.py, block-2.sql, ... in answer order
+    byte[] bytes = media.get(artifact.mediaId()).orElseThrow();
+}
+```
+
+The text of the answer is unchanged — artifacts are in addition to it. Each is a `MediaRef`
+like an input attachment: the SHA-256 of the content, a name, a size, no payload. So the
+same block twice is one entry in the store, and a reference can be passed on as the
+attachment of another task.
+
+**It is off unless you turn it on.** Without an extractor, or with `MediaStore.noop()`
+(which cannot hold anything), `artifacts()` is empty and the runtime behaves exactly as it
+did before this existed. Only a completed task has artifacts; a failed one has none.
+
+**The model never produces an artifact.** The system derives the parts from the answer the
+model already wrote. Asking the model to create one would put a long text in the arguments
+of a tool call, which are JSON, and the escaping of that text would move there — the very
+problem an artifact avoids.
+
+**What `FencedBlockArtifactExtractor` does.** Every fenced code block becomes
+`block-N.<extension>` (`python` → `.py`, `sql` → `.sql`; no extension when the fence declares
+no language or one that is not a plain word, like `c++`), stored as `text/plain`. The media
+vocabulary is closed on purpose — it also decides what a task may carry *in* — so the
+language rides in the name rather than in a new MIME type. A fence that is never closed is
+not a block, and a block of only whitespace is skipped. A block that itself contains a line
+of three backticks ends there, as in any reader that does not use longer fences. For answers
+with another structure — a table, a patch — implement `ArtifactExtractor` (a pure function
+of the text, thread-safe) and pass it to the builder.
+
+**A failure to extract never fails the agent.** The task was already completed, so an
+extractor that throws or a store that refuses a part costs the artifacts and nothing else:
+the response keeps its text and carries none, never a partial list, and the failure is
+logged at `warn`.
+
+**Known limit.** Artifacts are derived from the answer as the agent produced it. If an
+agent's contract has an output processor that rewrites the text, the artifacts correspond to
+the text before the rewrite.

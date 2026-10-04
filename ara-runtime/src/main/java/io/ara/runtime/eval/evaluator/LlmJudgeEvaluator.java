@@ -30,13 +30,13 @@ import java.util.regex.Pattern;
  * case — a console criterion's effective blocking is {@code blocking && expected != null},
  * because a veto only a probabilistic evaluator can trigger is the "judge hacking" shape
  * ADR-0059 D2 exists to exclude. So the guarantee is real, and it is also entirely somebody
- * else's: a caller that omits the key gets {@link DefaultEvalRunner#isBlocking}'s name-based
+ * else's: a caller that omits the key gets {@code DefaultEvalRunner.isBlocking}'s name-based
  * default, and a caller that sets it to anything but {@code "false"} gets a veto.
  *
  * <p><b>Two ways to fail, neither fatal and neither a vote.</b> A judge agent that does not
  * complete scores {@code 0.0} ({@link EvaluationResult#error}); a reply carrying no readable
  * {@code SCORE:} line scores {@link #UNPARSEABLE_SCORE}. Both land under
- * {@link DefaultEvalRunner#JUDGE_ADVISORY_THRESHOLD}, so both end in {@code NeedsReview} —
+ * {@link io.ara.runtime.eval.DefaultEvalRunner#JUDGE_ADVISORY_THRESHOLD}, so both end in {@code NeedsReview} —
  * the escalation path ADR-0059 D2 asks for — and neither crashes the run. The two numbers are
  * not the same and must not be made so: {@link #UNPARSEABLE_SCORE} is a contract with callers
  * that retry an unreadable grade, which detect that condition by the {@code judge_raw_reply}
@@ -53,7 +53,7 @@ public final class LlmJudgeEvaluator implements EvaluationStrategy {
     /**
      * Neutral-low score for a judge reply this evaluator could not parse — advisory, not a veto.
      *
-     * <p>The value is pinned just under {@link DefaultEvalRunner#JUDGE_ADVISORY_THRESHOLD}, and
+     * <p>The value is pinned just under {@link io.ara.runtime.eval.DefaultEvalRunner#JUDGE_ADVISORY_THRESHOLD}, and
      * that ordering is the only reason an unreadable grade reaches {@code NeedsReview} rather
      * than a canary. Nothing enforces it but a test that runs the whole cascade
      * ({@code DefaultEvalRunnerTest.anUnreadableJudgeReply_needsReview_andNeverPromotes}): raise
@@ -145,7 +145,7 @@ public final class LlmJudgeEvaluator implements EvaluationStrategy {
         if (last == null) {
             return null;
         }
-        return Math.max(0.0, Math.min(1.0, Double.parseDouble(last)));
+        return Math.clamp(Double.parseDouble(last), 0.0, 1.0);
     }
 
     private static String stripScoreLine(String judgeReply) {

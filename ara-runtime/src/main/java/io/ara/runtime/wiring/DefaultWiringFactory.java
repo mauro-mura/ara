@@ -1,5 +1,7 @@
 package io.ara.runtime.wiring;
 
+import io.ara.core.artifact.ArtifactExtractor;
+import io.ara.runtime.artifact.ArtifactSink;
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmConfig;
@@ -47,6 +49,7 @@ public final class DefaultWiringFactory implements WiringFactory {
     private final Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory;
     private final MediaStore mediaStore;
     private final AraTelemetry telemetry;
+    private final ArtifactSink artifactSink;
 
     /** Convenience constructor for agents with no ARA-managed MCP servers and no media. */
     public DefaultWiringFactory(
@@ -107,7 +110,28 @@ public final class DefaultWiringFactory implements WiringFactory {
             MediaStore mediaStore,
             AraTelemetry telemetry
     ) {
+        this(llmTransports, defaultLlmClientId, mcpTransports, mcpServers,
+                statelessToolRegistryFactory, mediaStore, telemetry, ArtifactExtractor.none());
+    }
+
+    /**
+     * @param artifactExtractor how the final answer of each agent is split into artifacts that are stored
+     *                          in {@code mediaStore}. {@link ArtifactExtractor#none()} (the default of the
+     *                          shorter constructors) means no artifacts, and so does a {@code mediaStore}
+     *                          that is {@link MediaStore#noop()} — the pair cannot store anything.
+     */
+    public DefaultWiringFactory(
+            ResourceRegistry<LlmTransport, LlmClient> llmTransports,
+            String defaultLlmClientId,
+            ResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports,
+            Map<String, McpServerBinding> mcpServers,
+            Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory,
+            MediaStore mediaStore,
+            AraTelemetry telemetry,
+            ArtifactExtractor artifactExtractor
+    ) {
         this.mediaStore                    = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
+        this.artifactSink                  = ArtifactSink.of(artifactExtractor, mediaStore);
         this.llmTransports                = Objects.requireNonNull(llmTransports, "llmTransports must not be null");
         this.defaultLlmClientId            = Objects.requireNonNull(defaultLlmClientId, "defaultLlmClientId must not be null");
         this.mcpTransports                 = mcpTransports;
@@ -188,7 +212,7 @@ public final class DefaultWiringFactory implements WiringFactory {
                     ? baseRegistry
                     : new CompositeToolRegistry(mcpTools, baseRegistry);
 
-            return new AgentWiring(config, llm, toolRegistry, List.copyOf(acquired));
+            return new AgentWiring(config, llm, toolRegistry, List.copyOf(acquired), artifactSink);
         } catch (RuntimeException e) {
             for (Lease<?> lease : acquired) {
                 try {

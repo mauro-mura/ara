@@ -716,11 +716,15 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         AgentExecutionContext doneCtx = context(taskId, session, result.iterationsDone(), result.tokensUsed());
         interceptorChain.after(doneCtx, "Executing", result.output());
 
-        AgentResponse response = AgentResponse.success(
+        AgentResponse answered = AgentResponse.success(
                 taskId, agentId(), result.output(),
                 result.iterationsDone(), result.promptTokens(), result.outputTokens(),
                 costOf(result, config), elapsed, result.steps())
                 .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
+        // Only a completed task has artifacts, and only the final answer is split: a failure keeps its
+        // partial text and no references, since nothing was finished enough to be handed on.
+        List<MediaRef> artifacts = session.wiring().artifactSink().emit(answered.content());
+        AgentResponse response = artifacts.isEmpty() ? answered : answered.withArtifacts(artifacts);
         // ADR-0086: called before clearWorkingMemory() so an implementation that reacts to
         // a finished turn (e.g. consolidation) still sees this turn's full window.
         session.memoryManager().onTurnCompleted(task, response);

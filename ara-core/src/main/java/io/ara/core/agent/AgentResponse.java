@@ -2,6 +2,7 @@ package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
 import io.ara.core.common.Money;
+import io.ara.core.media.MediaRef;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -34,6 +35,11 @@ import java.util.Optional;
  *                        {@code null} unless {@code failureReason} comes from the contract
  *                        (see {@link ContractViolation}). A failure of the agent itself
  *                        never sets it
+ * @param artifacts       the parts of {@code content} the runtime extracted and stored as
+ *                        references (a code block, a document), in the order they appear; empty
+ *                        unless the runtime was given an extractor and a store that accepts
+ *                        writes. Their bytes live in the runtime's {@code MediaStore}, never in
+ *                        this record, so a long output does not inflate the response
  */
 public record AgentResponse(
         String taskId,
@@ -49,7 +55,8 @@ public record AgentResponse(
         Instant completedAt,
         List<ExecutionStep> steps,
         String llmProvider,
-        ContractViolation violation
+        ContractViolation violation,
+        List<MediaRef> artifacts
 ) {
 
     public AgentResponse {
@@ -61,6 +68,7 @@ public record AgentResponse(
         Objects.requireNonNull(elapsedTime, "elapsedTime must not be null");
         Objects.requireNonNull(completedAt, "completedAt must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
+        artifacts = artifacts != null ? List.copyOf(artifacts) : List.of();
         // violation stays nullable: most responses are not a contract violation
     }
 
@@ -79,6 +87,22 @@ public record AgentResponse(
     ) {
         this(taskId, agentId, content, finalState, iterationsUsed, inputTokens, outputTokens,
                 estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider, null);
+    }
+
+    /**
+     * The 14-component shape from before {@code artifacts} was added, kept for the same reason as
+     * the 13-component one: every existing {@code new AgentResponse(...)} keeps compiling and
+     * linking, with no artifacts. A response that carries none — almost all of them — has nothing
+     * to migrate to.
+     */
+    public AgentResponse(
+            String taskId, AgentId agentId, String content, AgentState finalState,
+            int iterationsUsed, int inputTokens, int outputTokens, Money estimatedCost,
+            Duration elapsedTime, String failureReason, Instant completedAt,
+            List<ExecutionStep> steps, String llmProvider, ContractViolation violation
+    ) {
+        this(taskId, agentId, content, finalState, iterationsUsed, inputTokens, outputTokens,
+                estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider, violation, List.of());
     }
 
     /**
@@ -248,19 +272,30 @@ public record AgentResponse(
         );
     }
 
+    /**
+     * Returns a copy of this response with its artifacts replaced. Only the runtime calls this, after
+     * storing the bytes: a reference whose payload is not in the store would resolve to nothing.
+     */
+    public AgentResponse withArtifacts(List<MediaRef> newArtifacts) {
+        Objects.requireNonNull(newArtifacts, "newArtifacts must not be null");
+        return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
+                inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
+                llmProvider, violation, newArtifacts);
+    }
+
     /** Returns a copy of this response with {@code content} replaced by {@code newContent}. */
     public AgentResponse withContent(String newContent) {
         Objects.requireNonNull(newContent, "newContent must not be null");
         return new AgentResponse(taskId, agentId, newContent, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation);
+                llmProvider, violation, artifacts);
     }
 
     /** Returns a copy of this response with {@code llmProvider} set. */
     public AgentResponse withLlmProvider(String llmProvider) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation);
+                llmProvider, violation, artifacts);
     }
 
     /** Returns a copy of this response with {@code estimatedCost} replaced. */
@@ -268,7 +303,7 @@ public record AgentResponse(
         Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation);
+                llmProvider, violation, artifacts);
     }
 
     /**
@@ -279,6 +314,6 @@ public record AgentResponse(
     public AgentResponse withViolation(ContractViolation newViolation) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, newViolation);
+                llmProvider, newViolation, artifacts);
     }
 }
