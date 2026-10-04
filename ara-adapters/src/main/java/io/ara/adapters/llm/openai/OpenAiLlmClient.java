@@ -313,7 +313,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
             return LlmException.rateLimit(PROVIDER, msg);
         }
         if (msg.contains("context_length_exceeded")) {
-            return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
+            return LlmException.contextLengthExceeded(PROVIDER, modelName, msg);
         }
 
         return fallbackClassify(PROVIDER, msg, ex, timeout);

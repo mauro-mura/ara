@@ -31,6 +31,7 @@ or the `goalAchieved` field.
 | `PlanExecuteStrategy` | `"plan_execute"` | ReWOO-inspired: one planning call produces a numbered step list, each step executes in an isolated context, one synthesis call produces the final answer. |
 | `ReflexionStrategy` | `"reflexion"` | Decorator (Shinn et al., 2023): wraps a delegate strategy, and on failure generates a verbal self-critique and retries the **whole episode** with all reflections injected into memory. |
 | `RetrievalAugmentedStrategy` | `"rag+" + delegate.strategyName()` | Decorator: retrieves context once per task and transparently injects it into every LLM call the wrapped strategy makes. |
+| `MeteringStrategy` | the wrapped strategy's own name | Decorator the **runtime** installs (`AgentInstance` wraps whatever the planner selected), never selected by name — a different `plannerStrategy` would change `SpecLineage.hash`. Records every LLM call on the `SpendMeter` the task's `RunContext` carries (a no-op when there is none), so a composition can report what its components spent whatever their strategy. Measures, never enforces: unrelated to `RunBudget`. Streamed calls carry no usage and are counted as unmetered. |
 
 **`"reflexion"` vs `"reflact"`** — both add self-critique, at opposite granularities, and
 they are complementary rather than alternatives:

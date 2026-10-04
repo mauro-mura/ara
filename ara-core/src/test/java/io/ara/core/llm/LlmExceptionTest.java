@@ -80,9 +80,30 @@ class LlmExceptionTest {
 
     @Test
     void contextLengthExceeded_mapsToInvalidRequestCategory_abortsFailover() {
-        LlmException ex = LlmException.contextLengthExceeded("openai", "gpt-4o", 200_000, 128_000);
+        LlmException ex = LlmException.contextLengthExceeded("openai", "gpt-4o",
+                "maximum context length is 128000 tokens, however you requested 200050 tokens");
         assertEquals(ErrorCategory.INVALID_REQUEST, ex.errorCategory());
         assertFalse(ex.shouldFailover());
+    }
+
+    @Test
+    void contextLengthExceeded_keeps_the_provider_message_rather_than_fabricating_counts() {
+        // The provider's body is the only place the real limit and the real request size appear.
+        // The old (int, int) signature forced every caller to invent both, and all three passed
+        // 0 — so the message read "Context length exceeded: 0 tokens (max: 0)" while the numbers
+        // that matter were on the floor, and a reader debugging the overflow was told the
+        // request had no tokens at all.
+        //
+        // The two contains() assertions below are what actually guard this: they fail against
+        // the old formatting, which replaced the provider's text with the fabricated counts.
+        // There is deliberately no assertion that the old "(max: 0)" wording is gone — the new
+        // format cannot emit it, so such an assertion would pass whatever the code did.
+        LlmException ex = LlmException.contextLengthExceeded("openai", "gpt-4o",
+                "maximum context length is 128000 tokens, however you requested 200050 tokens");
+
+        assertTrue(ex.getMessage().contains("128000"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("200050"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("gpt-4o"), ex.getMessage());
     }
 
     @Test

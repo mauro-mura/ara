@@ -202,8 +202,12 @@ public class MistralLlmClient extends AbstractLangChain4jLlmClient {
         if (msg.contains("500") || msg.contains("502") || msg.contains("503")) {
             return LlmException.serverError(PROVIDER, msg, 500);
         }
-        if (msg.contains("too large") || msg.contains("context") && msg.contains("length")) {
-            return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
+        // "too large" is Mistral's own wording for an oversized body; "context" + "length" is how the
+        // overflow is phrased when it is not. The parentheses do not change how this evaluates —
+        // && already binds tighter than || — they only record which reading was intended, so a
+        // later edit that adds an || clause here does not quietly regroup the condition.
+        if (msg.contains("too large") || (msg.contains("context") && msg.contains("length"))) {
+            return LlmException.contextLengthExceeded(PROVIDER, modelName, msg);
         }
 
         return fallbackClassify(PROVIDER, msg, ex, timeout);

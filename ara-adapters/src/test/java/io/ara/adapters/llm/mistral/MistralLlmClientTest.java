@@ -155,4 +155,48 @@ class MistralLlmClientTest {
                 List.of(LlmMessage.user("hi")), contextWith(MediaStore.noop())));
         assertEquals("mistral", ex.provider());
     }
+
+    @Test
+    void a_context_length_overflow_reports_the_providers_own_token_counts() throws Exception {
+        // The regression this pins: mapException used to call contextLengthExceeded with 0, 0, so
+        // the message that reached the operator was "Context length exceeded: 0 tokens (max: 0)"
+        // — two invented numbers, while the real limit and the real request size sat unused in the
+        // provider body this very branch had just matched on. Someone reading that message to find
+        // out why their conversation overflowed was told it had no tokens at all.
+        String overflow = "{\"error\":{\"message\":\"This model's maximum context length is 32768 "
+                + "tokens. However, you requested 41002 tokens.\",\"type\":\"context_length_exceeded\"}}";
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(400, overflow)) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")), contextWith(MediaStore.noop())));
+
+            assertEquals(LlmException.ErrorType.CONTEXT_LENGTH_EXCEEDED, ex.errorType());
+            assertFalse(ex.isRetryable(), "the same conversation overflows again on every retry");
+            assertTrue(ex.getMessage().contains("32768"),
+                    "the provider's real limit must survive: " + ex.getMessage());
+            assertTrue(ex.getMessage().contains("41002"),
+                    "the provider's real request size must survive: " + ex.getMessage());
+        }
+    }
+
+    @Test
+    void a_phrase_mentioning_context_but_not_length_is_not_treated_as_an_overflow() throws Exception {
+        // The narrowness of the match above: "context" on its own shows up in plenty of ordinary
+        // 400s ("invalid context for this request"), and treating those as an overflow would
+        // report a non-retryable context-length failure for a malformed payload — sending the
+        // reader to trim a conversation that was never the problem.
+        //
+        // Note this pins the *match*, not the parentheses around it: && binds tighter than || in
+        // Java, so "a || b && c" and "a || (b && c)" are the same expression. The explicit
+        // grouping is there to say which reading was meant, not because the code would otherwise
+        // behave differently.
+        String body = "{\"error\":{\"message\":\"Invalid context supplied to the model\",\"type\":\"invalid_request\"}}";
+        try (StubLlmProvider provider = StubLlmProvider.failingWith(400, body)) {
+            LlmException ex = assertThrows(LlmException.class, () ->
+                    clientPointedAt(provider).complete(
+                            List.of(LlmMessage.user("hi")), contextWith(MediaStore.noop())));
+
+            assertNotEquals(LlmException.ErrorType.CONTEXT_LENGTH_EXCEEDED, ex.errorType());
+        }
+    }
 }

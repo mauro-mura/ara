@@ -27,10 +27,11 @@ import java.util.concurrent.Flow;
  * retrieval, no individual strategy should have to know about.
  *
  * <h2>Why a decorator, and why one the runtime installs</h2>
- * Only the ReAct family charges a {@code RunBudget} today; {@code PlanExecuteStrategy},
- * {@code ReflexionStrategy} and {@code RetrievalAugmentedStrategy} do not. Teaching each of
- * them to report spend would be eight copies of one rule, and the next strategy would have to
- * remember it. Every strategy makes its LLM calls through the client it is passed, so one
+ * The ReAct loop (ReAct, ReSpAct) and {@code ReflActStrategy} charge a {@code RunBudget};
+ * {@code PlanExecuteStrategy} does not, and {@code ReflexionStrategy} and
+ * {@code RetrievalAugmentedStrategy} wrap another strategy and inherit whatever it does.
+ * Teaching each strategy to report spend would be one copy of the rule per strategy, and the
+ * next strategy would have to remember it. Every strategy makes its LLM calls through the client it is passed, so one
  * decorator around that client measures all of them, present and future.
  *
  * <p>It is <b>not</b> selected by name. {@code AgentConfig.plannerStrategy()} is part of the

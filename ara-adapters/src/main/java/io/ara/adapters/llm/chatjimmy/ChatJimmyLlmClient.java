@@ -278,8 +278,7 @@ public class ChatJimmyLlmClient implements LlmClient {
         } catch (LlmException ex) {
             throw ex;
         } catch (IOException | InterruptedException ex) {
-            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
-            throw LlmException.networkError(PROVIDER, ex.getMessage(), ex);
+            throw asNetworkFailure(ex);
         }
     }
 
@@ -506,9 +505,30 @@ public class ChatJimmyLlmClient implements LlmClient {
         } catch (LlmException ex) {
             throw ex;
         } catch (IOException | InterruptedException ex) {
-            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
-            throw LlmException.networkError(PROVIDER, ex.getMessage(), ex);
+            throw asNetworkFailure(ex);
         }
+    }
+
+    /**
+     * Wraps a transport failure from {@link java.net.http.HttpClient#send} as a network
+     * {@link LlmException}, re-asserting the interrupt flag when the cause was an
+     * {@link InterruptedException}.
+     *
+     * <p>One helper rather than the {@code if (ex instanceof InterruptedException)
+     * Thread.currentThread().interrupt();} line repeated at each call site: {@code send} declares
+     * both exceptions, so the multi-catch has to name them together, but the flag clearing is
+     * invisible at the catch site — the JVM clears a thread's interrupt status when it throws
+     * {@code InterruptedException}, so without restoring it a cancellation that arrived as an
+     * interrupt (see {@code completeWithin}, whose interrupt-based cancellation lands here) is
+     * silently dropped and every later blocking call on that thread waits anyway.
+     *
+     * <p>Interruption stays a {@code NETWORK} error rather than a distinct type: from the caller's
+     * side a cancelled call and a dead socket are the same "this attempt produced no answer", and
+     * both are worth retrying on a fresh call.
+     */
+    private static LlmException asNetworkFailure(Exception ex) {
+        if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
+        return LlmException.networkError(PROVIDER, ex.getMessage(), ex);
     }
 
     /**
@@ -573,10 +593,17 @@ public class ChatJimmyLlmClient implements LlmClient {
         } catch (LlmException ex) {
             publisher.closeExceptionally(ex);
         } catch (IOException | InterruptedException ex) {
-            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
-            publisher.closeExceptionally(LlmException.networkError(PROVIDER, ex.getMessage(), ex));
-        } catch (Exception ex) {
-            publisher.closeExceptionally(LlmException.networkError(PROVIDER, ex.getMessage(), ex));
+            publisher.closeExceptionally(asNetworkFailure(ex));
+        } catch (RuntimeException ex) {
+            // Safety net, not a duplicate of the branch above: this worker runs on a virtual
+            // thread that nobody joins, so anything escaping here leaves the publisher open and
+            // the subscriber waiting for an onComplete that will never arrive (see
+            // ReactExecutionSupport.streamAndCollect's bounded wait, which is what would notice).
+            // Deliberately NOT a network error — that is retryable, so a genuine bug in
+            // drainBuffer would present as an endlessly retried connection fault. UNKNOWN is
+            // non-retryable and names the real cause.
+            publisher.closeExceptionally(new LlmException(
+                    "chatjimmy stream failed: " + ex, ex, LlmException.ErrorType.UNKNOWN, PROVIDER, null, false));
         }
     }
 

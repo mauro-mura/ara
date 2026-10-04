@@ -63,9 +63,26 @@ public class LlmException extends RuntimeException {
         return new LlmException(message, null, ErrorType.AUTHENTICATION, provider, 401, false);
     }
 
-    public static LlmException contextLengthExceeded(String provider, String model, int tokens, int maxTokens) {
-        String msg = String.format("Context length exceeded: %d tokens (max: %d) for model '%s'",
-                tokens, maxTokens, model);
+    /**
+     * The provider refused the request because it exceeded the model's context window.
+     *
+     * <p>Takes the provider's own message rather than the two token counts every caller used to
+     * pass and had nothing real to fill in with: all three adapter call sites passed
+     * {@code 0, 0}, so this used to render "Context length exceeded: 0 tokens (max: 0)" —
+     * fabricated numbers that read as measured facts and sent whoever debugged the overflow
+     * looking for a zero-token request. The provider states the real limit and the real count
+     * in the body it already sent ("maximum context length is 128000 tokens, however you
+     * requested 200050"), and that body is what {@code message} carries.
+     *
+     * <p>Non-retryable and {@code shouldFailover()} false, which is the point: the same
+     * conversation will overflow again on every other endpoint in a fallback pool, so walking
+     * the list wastes a round trip per candidate to reach the same conclusion. Callers that do
+     * know both counts can still put them in {@code message}.
+     *
+     * @param message the provider's own description of the overflow
+     */
+    public static LlmException contextLengthExceeded(String provider, String model, String message) {
+        String msg = "Context length exceeded for model '" + model + "': " + message;
         return new LlmException(msg, null, ErrorType.CONTEXT_LENGTH_EXCEEDED, provider, 400, false);
     }
 

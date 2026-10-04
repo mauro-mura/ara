@@ -194,6 +194,79 @@ class ChatJimmyLlmClientTest {
     }
 
     @Test
+    void per_call_max_output_tokens_overrides_the_client_level_default() throws Exception {
+        // LlmCallContext.maxOutputTokens() is a non-nullable int, so a call that carries a
+        // context always supplies one and the builder value cannot apply to it — the same
+        // precedence CallParameterUtils gives the LangChain4j adapters. Pinned here because the
+        // client-level knob looks like it should win (it is set here) and silently does not.
+        try (StubLlmProvider provider = StubLlmProvider.answering("ok")) {
+            ChatJimmyLlmClient client = ChatJimmyLlmClient.builder()
+                    .baseUrl(provider.baseUrl())
+                    .maxTokens(999)
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            client.complete(
+                    List.of(LlmMessage.user("hi")),
+                    new LlmCallContext.Builder().agentType("test").maxOutputTokens(256).build());
+
+            assertEquals(256, provider.nextRequest().path("chatOptions").path("maxTokens").asInt());
+        }
+    }
+
+    @Test
+    void client_level_max_tokens_is_sent_when_the_call_carries_no_context() throws Exception {
+        // The other half of the precedence above, and the reason the knob exists at all: with
+        // neither side setting a value the field is omitted entirely rather than filled in with
+        // an invented default, so chatjimmy.ai applies its own limit.
+        try (StubLlmProvider provider = StubLlmProvider.answering("ok")) {
+            ChatJimmyLlmClient.builder()
+                    .baseUrl(provider.baseUrl())
+                    .maxTokens(999)
+                    .timeout(Duration.ofSeconds(10))
+                    .build()
+                    .complete(List.of(LlmMessage.user("hi")), (LlmCallContext) null);
+
+            assertEquals(999, provider.nextRequest().path("chatOptions").path("maxTokens").asInt());
+        }
+
+        try (StubLlmProvider provider = StubLlmProvider.answering("ok")) {
+            ChatJimmyLlmClient.builder()
+                    .baseUrl(provider.baseUrl())
+                    .timeout(Duration.ofSeconds(10))
+                    .build()
+                    .complete(List.of(LlmMessage.user("hi")), (LlmCallContext) null);
+
+            assertTrue(provider.nextRequest().path("chatOptions").path("maxTokens").isMissingNode(),
+                    "unset on both sides must be omitted, not defaulted");
+        }
+    }
+
+    @Test
+    void complete_restores_the_interrupt_flag_when_the_calling_thread_is_cancelled() throws Exception {
+        // Simulates the deadline watchdog in ReactExecutionSupport.completeWithin firing while
+        // the request is in flight: HttpClient.send throws InterruptedException, which the JVM
+        // clears the interrupt flag for as it unwinds. Swallowing that loses the cancellation
+        // exactly where it was meant to take effect — every later blocking call on this thread
+        // would wait anyway, including the retry that should not have been attempted.
+        try (StubLlmProvider provider = StubLlmProvider.answering("unused")) {
+            Thread.currentThread().interrupt();
+            try {
+                LlmException ex = assertThrows(LlmException.class, () ->
+                        clientPointedAt(provider).complete(
+                                List.of(LlmMessage.user("hi")),
+                                new LlmCallContext.Builder().agentType("test").build()));
+
+                assertEquals(LlmException.ErrorType.NETWORK, ex.errorType());
+                assertTrue(Thread.currentThread().isInterrupted(),
+                        "the interrupt flag must survive the catch, or the cancellation is dropped");
+            } finally {
+                Thread.interrupted();   // clear it, so it cannot leak into the next test on this thread
+            }
+        }
+    }
+
+    @Test
     void complete_maps_upstream_500_to_a_retryable_server_error() throws Exception {
         try (StubLlmProvider provider = StubLlmProvider.failingWith(500, "internal error")) {
             LlmException ex = assertThrows(LlmException.class, () ->

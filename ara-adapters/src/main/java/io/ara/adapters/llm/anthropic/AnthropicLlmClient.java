@@ -176,7 +176,7 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
             return LlmException.serverError(PROVIDER, msg, 500);
         }
         if (msg.contains("context_length") || msg.contains("too long") || msg.contains("max_tokens")) {
-            return LlmException.contextLengthExceeded(PROVIDER, modelName, 0, 0);
+            return LlmException.contextLengthExceeded(PROVIDER, modelName, msg);
         }
 
         return fallbackClassify(PROVIDER, msg, ex, timeout);
