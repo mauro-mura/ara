@@ -16,9 +16,13 @@ import java.util.Optional;
  * as its test bed, defeating the promotion gate (ADR-0083). The filtering lives in the
  * implementation, not in the caller.
  *
- * <p>{@code AgentConfig}, not {@code AgentSpec}: the resolver only needs the behavioural
- * payload, and keeping this port on the published {@code ara-core} type decouples it from
- * where {@code AgentSpec} lives and from ADR-0082's eventual shape.
+ * <p><b>Why the behavioural payload, not the whole spec.</b> The port predates
+ * {@link AgentSpec}'s move here (ADR-0134) and outlives the reason it originally stated:
+ * the fast-path needs only the payload it builds the worker from. An archived entry
+ * (ADR-0082 D2) carries {@code specHash}, not the full spec, so an implementation backed
+ * by the real archive resolves configs directly; resolving {@code specHash → AgentSpec}
+ * is the caller's job, done where the spec is actually kept. A port on {@code AgentSpec}
+ * would force every implementation into that second lookup it does not need.
  */
 public interface SpecArchive {
 
