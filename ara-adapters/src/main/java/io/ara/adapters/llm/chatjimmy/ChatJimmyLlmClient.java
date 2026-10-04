@@ -766,7 +766,7 @@ public class ChatJimmyLlmClient implements LlmClient {
         private String modelName = DEFAULT_MODEL;
         private Double temperature;
         private Double topP;
-        private Integer maxTokens = 1024;
+        private Integer maxTokens;
         private int topK = DEFAULT_TOP_K;
         private Duration timeout = Duration.ofSeconds(30);
         private String proxyHost;
@@ -787,7 +787,19 @@ public class ChatJimmyLlmClient implements LlmClient {
         /** Nucleus sampling threshold. Left unset (upstream default) unless set here or per-call. */
         public Builder topP(double topP) { this.topP = topP; return this; }
 
-        /** Maximum output tokens. Defaults to {@code 1024}. */
+        /**
+         * Sets the client-level maximum output tokens.
+         *
+         * <p><b>Only consulted for a call that carries no {@link LlmCallContext}.</b>
+         * {@link LlmCallContext#maxOutputTokens()} is a non-nullable {@code int}, so any call
+         * that does have a context supplies a value from {@code AgentConfig.maxTokensPerStep()}
+         * and this setter is ignored for it — the same precedence
+         * {@code CallParameterUtils} applies in the LangChain4j adapters. There is no "unset"
+         * token value to detect, so an override cannot be expressed per call.
+         *
+         * <p>Unset by default: with no value on either side the field is omitted and
+         * chatjimmy.ai applies its own limit, rather than the framework inventing one.
+         */
         public Builder maxTokens(int maxTokens) { this.maxTokens = maxTokens; return this; }
 
         /** {@code chatOptions.topK}. Defaults to {@code 8}, chatjimmy.ai's own default. */
