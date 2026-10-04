@@ -32,6 +32,7 @@ import io.ara.runtime.interceptor.AgentInterceptorChain;
 import io.ara.runtime.interceptor.InterceptingLlmClient;
 import io.ara.runtime.interceptor.InterceptingToolRegistry;
 import io.ara.runtime.strategy.ExecutionPlanner;
+import io.ara.runtime.strategy.MeteringStrategy;
 import io.ara.runtime.wiring.AgentWiring;
 import io.ara.runtime.wiring.Versioned;
 import io.ara.runtime.wiring.WiringFactory;
@@ -489,7 +490,10 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         if (hasInterceptors) {
             interceptorChain.after(planCtx, "Planning", strategy.strategyName());
         }
-        return strategy;
+        // Metering is the runtime's, not the config's: a no-op unless the task carries a
+        // SpendMeter, and named like the strategy it wraps, so nothing that reads the name
+        // (logs, spans, SpecLineage's hash) can tell it is there.
+        return MeteringStrategy.around(strategy);
     }
 
     /**

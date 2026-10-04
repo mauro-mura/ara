@@ -338,22 +338,35 @@ public class ChatJimmyLlmClient implements LlmClient {
      * LangChain4j adapters: a per-call value from {@code context} overrides the client-level
      * default, and a value neither side ever set is simply omitted from the request rather than
      * substituted with some other default.
+     *
+     * <p>{@code maxTokens} is the one asymmetric case, and it is deliberate rather than an
+     * oversight — see {@link Builder#maxTokens(int)}. {@link LlmCallContext#maxOutputTokens()}
+     * is a non-nullable {@code int} (ReactStrategy's cost projection needs a concrete number
+     * whatever the provider sends), so there is no "unset" to detect and a context that exists
+     * always supplies the value, overriding {@link Builder#maxTokens(int)}. That is exactly what
+     * {@code CallParameterUtils} does for the same field, so the two adapter families agree on
+     * the wire.
+     *
+     * <p>One precedence expression per parameter, rather than a branch per {@code context ==
+     * null} case: the two branches used to hold two copies of the same three decisions, and only
+     * the {@code maxTokens} line differed between them — the kind of near-duplicate that stays
+     * correct right up until one copy gains a fix the other does not.
      */
     private void applyCallParameters(ObjectNode chatOptions, LlmCallContext context) {
-        if (context != null) {
-            Double temperature = context.temperature() != null ? context.temperature() : defaultTemperature;
-            if (temperature != null) chatOptions.put("temperature", temperature);
-            Double topP = context.topP() != null ? context.topP() : defaultTopP;
-            if (topP != null) chatOptions.put("topP", topP);
-            chatOptions.put("maxTokens", context.maxOutputTokens());
-            if (context.hasStopSequences()) {
-                ArrayNode stops = chatOptions.putArray("stopSequences");
-                context.stopSequences().forEach(stops::add);
-            }
-        } else {
-            if (defaultTemperature != null) chatOptions.put("temperature", defaultTemperature);
-            if (defaultTopP != null) chatOptions.put("topP", defaultTopP);
-            if (defaultMaxTokens != null) chatOptions.put("maxTokens", defaultMaxTokens);
+        Double temperature = context != null ? context.temperature() : null;
+        if (temperature != null) chatOptions.put("temperature", temperature);
+        else if (defaultTemperature != null) chatOptions.put("temperature", defaultTemperature);
+
+        Double topP = context != null ? context.topP() : null;
+        if (topP != null) chatOptions.put("topP", topP);
+        else if (defaultTopP != null) chatOptions.put("topP", defaultTopP);
+
+        if (context != null) chatOptions.put("maxTokens", context.maxOutputTokens());
+        else if (defaultMaxTokens != null) chatOptions.put("maxTokens", defaultMaxTokens);
+
+        if (context != null && context.hasStopSequences()) {
+            ArrayNode stops = chatOptions.putArray("stopSequences");
+            context.stopSequences().forEach(stops::add);
         }
     }
 
