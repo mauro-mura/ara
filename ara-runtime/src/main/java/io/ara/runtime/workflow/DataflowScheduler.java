@@ -298,7 +298,10 @@ public final class DataflowScheduler {
                 // Captured HERE, on the control thread that owns sharedState — never read from
                 // the pool worker, which would race the control thread's own writes.
                 Map<String, Object> readSnapshot = snapshotReads(node);
-                completion.submit(() -> fire(node, occ, firingInput, readSnapshot, pool));
+                final String fInput = firingInput;
+                final Map<String, Object> fSnapshot = readSnapshot;
+                final ExecutorService fPool = pool;
+                completion.submit(() -> fire(node, occ, fInput, fSnapshot, fPool));
             }
 
             if (inFlight == 0) {
@@ -340,7 +343,7 @@ public final class DataflowScheduler {
                 int sub = childIndex++;
                 journal.add(new JournalEntry.Started(child.childId(), 0, child.input()));
                 journal.add(new JournalEntry.Finished(child.childId(), 0, child.input(), child.outcome()));
-                if (child.outcome() instanceof NodeOutcome.Completed childCompleted && spec.collectInto() != null) {
+                if (child.outcome() instanceof NodeOutcome.Completed childCompleted && spec != null && spec.collectInto() != null) {
                     Optional<WorkflowResult> collided = applyWrite(fired.nodeId(), fired.occurrence(), sub,
                             new WorkflowNode.Write(spec.collectInto(), out -> List.of(out)), childCompleted);
                     if (collided.isPresent()) {
@@ -375,6 +378,45 @@ public final class DataflowScheduler {
             }
         }
     }
+
+    private WorkflowResult trySubmitReady(Map<String, String> pendingSeed,
+                                        ExecutorCompletionService<Fired> completion,
+                                        Set<String> running) {
+        boolean submittedAnything = false;
+        for (WorkflowNode node : graph.nodes()) {
+            String id = node.id();
+            if (running.contains(id)) {
+                continue;
+            }
+            String input = pendingSeed.remove(id);
+            if (input == null) {
+                input = enablingInput(id);
+            }
+            if (input == null) {
+                continue;
+            }
+
+            int occ = occurrence.merge(id, 1, Integer::sum) - 1;
+            if (occ >= maxOccurrences) {
+                return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id, sharedState);
+            }
+            clocks.put(id + "#" + occ, consumeTokens(id) + 1);
+            journal.add(new JournalEntry.Started(id, occ, input));
+            running.add(id);
+            submittedAnything = true;
+            String firingInput = input;
+            Map<String, Object> readSnapshot = snapshotReads(node);
+            final String fInput = firingInput;
+            final Map<String, Object> fSnapshot = readSnapshot;
+            completion.submit(() -> fire(node, occ, fInput, fSnapshot, pool));
+        }
+        if (running.isEmpty()) {
+            return new WorkflowResult(journal, true, null, sharedState);
+        }
+        return null; // intermediate marker
+    }
+
+
 
     /**
      * P7/U20, 2026-09-23: {@link #deadline}-bounded replacement for a bare {@code
@@ -480,10 +522,13 @@ public final class DataflowScheduler {
             String parentId, int parentOccurrence, WorkflowNode.MapOverSpec spec, List<String> elements,
             ExecutorService pool, Instant deadline) {
 
+        List<MapOverChildTask> tasks = new ArrayList<>(elements.size());
         List<Future<MapOverChildResult>> futures = new ArrayList<>(elements.size());
         for (int i = 0; i < elements.size(); i++) {
             String childId = spec.workerId() + "[" + parentId + "#" + parentOccurrence + "." + i + "]";
             String elementInput = elements.get(i);
+            MapOverChildTask task = new MapOverChildTask(childId, elementInput);
+            tasks.add(task);
             futures.add(pool.submit(() -> {
                 try {
                     String childOutput = spec.workerBody().apply(elementInput);
@@ -504,7 +549,9 @@ public final class DataflowScheduler {
             }));
         }
         List<MapOverChildResult> results = new ArrayList<>(futures.size());
-        for (Future<MapOverChildResult> future : futures) {
+        for (int i = 0; i < futures.size(); i++) {
+            Future<MapOverChildResult> future = futures.get(i);
+            MapOverChildTask task = tasks.get(i);
             try {
                 // P7/U20: bounded by the same run deadline as drive()'s own wait — a
                 // hung child no longer blocks this loop (and every other in-flight
@@ -512,12 +559,21 @@ public final class DataflowScheduler {
                 results.add(deadline == null
                         ? future.get()
                         : future.get(Math.max(0, Duration.between(Instant.now(), deadline).toMillis()), TimeUnit.MILLISECONDS));
+            } catch (InterruptedException e) {
+                // E5: handle interrupts honestly — restore the interrupt flag and record failure
+                Thread.currentThread().interrupt();
+                results.add(new MapOverChildResult(task.childId(), task.elementInput(),
+                        new NodeOutcome.Failed("execution error: " + e)));
             } catch (Exception e) {
-                results.add(new MapOverChildResult("?", "", new NodeOutcome.Failed("execution error: " + e)));
+                results.add(new MapOverChildResult(task.childId(), task.elementInput(),
+                        new NodeOutcome.Failed("execution error: " + e)));
             }
         }
         return results;
     }
+
+    /** Holds child task metadata for accurate error reporting during mapOver execution. */
+    private static record MapOverChildTask(String childId, String elementInput) {}
 
     /**
      * Charges the run budget for one node occurrence (ADR-054 D6). The money / token spend

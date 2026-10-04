@@ -1144,7 +1144,7 @@ final class ReactExecutionSupport {
         }
 
         if (err.get() != null) {
-            throw new RuntimeException("Streaming LLM call failed: " + err.get().getMessage(), err.get());
+            throw new io.ara.core.llm.LlmException("Streaming LLM call failed: " + err.get().getMessage(), err.get());
         }
 
         String text = buf.toString();
