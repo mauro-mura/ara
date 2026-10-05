@@ -72,7 +72,7 @@ final class RuntimeAssembler {
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
         Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
         AgentFactory agentFactory = buildAgentFactory(
-                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry);
+                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry, cfg);
         AgentScheduler scheduler = new LocalAgentScheduler(registry, b.scheduleExecutionListener);
         return new AraRuntime(cfg, agentFactory, registry, b.agentProvider, scheduler, ctxStore,
                 b.approvalGate, b.temporaryScopeRegistry, b.abacPolicyEngine,
@@ -236,10 +236,16 @@ final class RuntimeAssembler {
             Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
             LocalMessageBus messageBus,
             Function<AgentConfig, MemoryManager> memFactory,
-            AgentRegistry registry) {
+            AgentRegistry registry,
+            AraRuntimeConfig cfg) {
 
         AgentFactory.Builder factoryBuilder = AgentFactory.builder()
-                .defaultLlmClient(b.defaultClientId);
+                .defaultLlmClient(b.defaultClientId)
+                // The breaker policy is runtime-wide, like the health registry it configures:
+                // an endpoint's health is shared by every session over the same transport, so
+                // the threshold that decides it has to be agreed on at the same grain rather
+                // than per agent (see CircuitState's javadoc).
+                .circuitBreaker(cfg.circuitFailureThreshold(), cfg.circuitCooldown());
         // Reuses instrumentedClients (built once in assemble()) — one wrapped instance per
         // registered client, not two. InstrumentedLlmClient adds no overhead beyond an
         // interface dispatch when telemetry is AraTelemetry.noop().

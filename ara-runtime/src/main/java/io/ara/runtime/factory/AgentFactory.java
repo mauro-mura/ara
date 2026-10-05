@@ -1,5 +1,7 @@
 package io.ara.runtime.factory;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -124,6 +126,22 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
     private final DefaultResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports;
     private final Map<String, McpServerBinding> mcpServers;
 
+    /**
+     * Circuit health per LLM endpoint, deliberately scoped exactly like {@link #llmTransports}:
+     * one instance for the whole factory, so every agent and every session that resolves the same
+     * {@code transportId} consults the same breaker state. Health used to live on the per-session
+     * breaker wrapper, which made each session — and each newly created session during an ongoing
+     * outage — re-learn a dead endpoint with its own full round of timeouts. See
+     * {@link CircuitStateRegistry} and {@code CircuitState} for the reasoning and the rejected
+     * alternative keys.
+     *
+     * <p>The threshold and cooldown come from the builder ({@link Builder#circuitBreaker}, fed by
+     * {@code AraRuntimeConfig} when the factory is assembled by {@code RuntimeAssembler}), and
+     * default to the breaker's own constants — so this field is configurable without any
+     * deployment that leaves it alone changing behaviour.
+     */
+    private final CircuitStateRegistry circuitStates;
+
     private AgentFactory(Builder builder) {
         this.defaultLlmClientId   = builder.defaultLlmClientId;
         this.llmClientFactory     = builder.llmClientFactory;
@@ -139,6 +157,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         this.traceStore           = builder.traceStore;
         this.traceBlobStore       = builder.traceBlobStore;
         this.traceSpecHash        = builder.traceSpecHash;
+        this.circuitStates        = new CircuitStateRegistry(
+                builder.circuitFailureThreshold, builder.circuitCooldown, Clock.systemUTC());
 
         this.llmTransports = new DefaultResourceRegistry<>(
                 transport -> {
@@ -310,7 +330,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         ToolRegistry toolRegistry = toolRegistryFactory.apply(config);
         WiringFactory wiringFactory = new DefaultWiringFactory(
                 llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
-                mediaStore, telemetry, artifactExtractor);
+                mediaStore, telemetry, artifactExtractor, circuitStates);
         AgentInterceptorChain chain = new AgentInterceptorChain(interceptors);
         return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore);
     }
@@ -502,6 +522,13 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         private io.ara.core.trace.TraceStore traceStore;
         private io.ara.core.trace.BlobStore  traceBlobStore;
         private java.util.function.Function<AgentConfig, String> traceSpecHash;
+        /**
+         * Circuit-breaker policy for the per-endpoint health registry, defaulted to the values
+         * {@code CircuitBreakerLlmClient} applies on its own so a builder that never calls
+         * {@link #circuitBreaker(int, Duration)} behaves exactly as before the knob existed.
+         */
+        private int      circuitFailureThreshold = CircuitBreakerLlmClient.DEFAULT_FAILURE_THRESHOLD;
+        private Duration circuitCooldown         = CircuitBreakerLlmClient.DEFAULT_COOLDOWN;
 
         private Builder() {}
 
@@ -636,6 +663,30 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
          */
         public Builder telemetry(AraTelemetry telemetry) {
             this.telemetry = Objects.requireNonNull(telemetry, "telemetry must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the per-endpoint circuit-breaker policy applied to every LLM candidate in a
+         * {@code FAILOVER} pool: how many consecutive failover-able failures open an endpoint's
+         * circuit, and how long it is skipped before a single trial call is allowed through.
+         *
+         * <p>Defaults to {@link CircuitBreakerLlmClient#DEFAULT_FAILURE_THRESHOLD} /
+         * {@link CircuitBreakerLlmClient#DEFAULT_COOLDOWN}. Lowering the threshold makes a dead
+         * primary stop costing its connect timeout sooner — with a threshold of {@code n}, a
+         * failover pool pays that timeout {@code n} times before it starts skipping the endpoint.
+         *
+         * @param failureThreshold consecutive failover-able failures that open the circuit; {@code >= 1}
+         * @param cooldown         how long the circuit stays open before one trial; must be positive
+         */
+        public Builder circuitBreaker(int failureThreshold, Duration cooldown) {
+            if (failureThreshold < 1)
+                throw new IllegalArgumentException("failureThreshold must be >= 1");
+            Objects.requireNonNull(cooldown, "cooldown must not be null");
+            if (cooldown.isZero() || cooldown.isNegative())
+                throw new IllegalArgumentException("cooldown must be positive");
+            this.circuitFailureThreshold = failureThreshold;
+            this.circuitCooldown         = cooldown;
             return this;
         }
 

@@ -14,6 +14,7 @@ import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.runtime.factory.CircuitBreakerLlmClient;
+import io.ara.runtime.factory.CircuitStateRegistry;
 import io.ara.runtime.factory.FailoverLlmClient;
 import io.ara.runtime.llm.LoggingLlmClient;
 import io.ara.runtime.llm.MediaResolvingLlmClient;
@@ -50,6 +51,8 @@ public final class DefaultWiringFactory implements WiringFactory {
     private final MediaStore mediaStore;
     private final AraTelemetry telemetry;
     private final ArtifactSink artifactSink;
+    /** Per-endpoint circuit health, keyed by {@code transportId} — see {@link CircuitStateRegistry}. */
+    private final CircuitStateRegistry circuitStates;
 
     /** Convenience constructor for agents with no ARA-managed MCP servers and no media. */
     public DefaultWiringFactory(
@@ -130,6 +133,32 @@ public final class DefaultWiringFactory implements WiringFactory {
             AraTelemetry telemetry,
             ArtifactExtractor artifactExtractor
     ) {
+        this(llmTransports, defaultLlmClientId, mcpTransports, mcpServers,
+                statelessToolRegistryFactory, mediaStore, telemetry, artifactExtractor,
+                // A factory built without one gets its own registry, so circuit health is shared by
+                // every session this factory wires — the previous behaviour of a breaker per
+                // session is never silently restored. AgentFactory passes the runtime-wide
+                // registry, which widens the sharing to every agent over the same endpoint.
+                new CircuitStateRegistry());
+    }
+
+    /**
+     * @param circuitStates runtime-wide health of each LLM endpoint, keyed by the same
+     *                      {@code transportId} the transport itself is shared by. Passing the
+     *                      registry that {@code AgentFactory} owns is what makes an outage cost one
+     *                      round of timeouts for the whole runtime instead of one per session.
+     */
+    public DefaultWiringFactory(
+            ResourceRegistry<LlmTransport, LlmClient> llmTransports,
+            String defaultLlmClientId,
+            ResourceRegistry<Supplier<McpClient>, McpClient> mcpTransports,
+            Map<String, McpServerBinding> mcpServers,
+            Function<AgentConfig, ToolRegistry> statelessToolRegistryFactory,
+            MediaStore mediaStore,
+            AraTelemetry telemetry,
+            ArtifactExtractor artifactExtractor,
+            CircuitStateRegistry circuitStates
+    ) {
         this.mediaStore                    = Objects.requireNonNull(mediaStore, "mediaStore must not be null");
         this.artifactSink                  = ArtifactSink.of(artifactExtractor, mediaStore);
         this.llmTransports                = Objects.requireNonNull(llmTransports, "llmTransports must not be null");
@@ -138,6 +167,7 @@ public final class DefaultWiringFactory implements WiringFactory {
         this.mcpServers                    = Map.copyOf(Objects.requireNonNull(mcpServers, "mcpServers must not be null"));
         this.statelessToolRegistryFactory  = Objects.requireNonNull(statelessToolRegistryFactory, "statelessToolRegistryFactory must not be null");
         this.telemetry                     = Objects.requireNonNull(telemetry, "telemetry must not be null");
+        this.circuitStates                 = Objects.requireNonNull(circuitStates, "circuitStates must not be null");
     }
 
     @Override
@@ -154,27 +184,34 @@ public final class DefaultWiringFactory implements WiringFactory {
         List<Lease<?>> acquired = new ArrayList<>();
         try {
             List<LlmClient> resolvedClients = new ArrayList<>(profilesToLease.size());
+            // Collected alongside the clients because the circuit breaker below is keyed by it: the
+            // health of an endpoint has to be shared by exactly the set of sessions that share its
+            // transport, and this is that transport's registry key.
+            List<String> transportIds = new ArrayList<>(profilesToLease.size());
             for (LlmProfile profile : profilesToLease) {
-                Lease<LlmClient> lease = leaseTransport(profile);
-                acquired.add(lease);
-                resolvedClients.add(lease.get());
+                LeasedTransport leased = leaseTransport(profile);
+                acquired.add(leased.lease());
+                resolvedClients.add(leased.lease().get());
+                transportIds.add(leased.transportId());
             }
 
             LlmClient llm = switch (policy) {
-                // Every candidate gets its own circuit breaker, so an endpoint that keeps failing
-                // is skipped on subsequent calls without paying its per-request timeout again and
-                // is re-probed by a single trial after a cooldown. State lives on the wrapper, and
-                // the wrapper on the session-pinned wiring (ADR-039): a session that outlives an
-                // outage keeps the open circuit across calls; a fresh session rebuilds the pool
-                // and the breaker from scratch. The reflection-only router (DefaultLlmRouter)
-                // deliberately stays on a plain FailoverLlmClient: it rebuilds the pool per call,
-                // so a breaker there would lose its circuit state — applying it would be worse
-                // than not applying it.
+                // Every candidate gets a circuit breaker over the health shared for its endpoint,
+                // so an endpoint that keeps failing is skipped on subsequent calls without paying
+                // its per-request timeout again and is re-probed by a single trial after a
+                // cooldown. The breaker wrapper still lives on the session-pinned wiring
+                // (ADR-039), but the state it reads does not: it belongs to the runtime-wide
+                // CircuitStateRegistry, keyed by transportId. Keeping the state on the wrapper
+                // meant each session held a private opinion about a transport they all share, so
+                // an outage cost one round of timeouts per session and every new session re-learnt
+                // it from CLOSED — see CircuitState for why health is not session state. The
+                // reflection-only router (DefaultLlmRouter) deliberately stays on a plain
+                // FailoverLlmClient: it rebuilds the pool per call, and now that health outlives
+                // the pool a breaker there would be sound but still pointless, since that path
+                // never reuses the wrapper it would attach it to.
                 case FAILOVER -> resolvedClients.size() == 1
                         ? resolvedClients.get(0)
-                        : new FailoverLlmClient(resolvedClients.stream()
-                                .<LlmClient>map(client -> new CircuitBreakerLlmClient(client, telemetry))
-                                .toList(), telemetry);
+                        : new FailoverLlmClient(buildBreakers(resolvedClients, transportIds), telemetry);
                 case ROUND_ROBIN -> new RoundRobinLlmClient(resolvedClients);
                 default -> resolvedClients.get(0);
             };
@@ -225,10 +262,27 @@ public final class DefaultWiringFactory implements WiringFactory {
         }
     }
 
-    private Lease<LlmClient> leaseTransport(LlmProfile profile) {
+    /**
+     * A leased transport together with the registry key it was leased under. The key travels with
+     * the lease because the caller needs it for the circuit breaker, and recomputing it there would
+     * mean duplicating the three-step resolution below — the id a profile resolves to is only
+     * unambiguous at the point the lease is taken.
+     */
+    private record LeasedTransport(String transportId, Lease<LlmClient> lease) { }
+
+    /** One breaker per candidate, each over the shared health of its own endpoint. */
+    private List<LlmClient> buildBreakers(List<LlmClient> clients, List<String> transportIds) {
+        List<LlmClient> breakers = new ArrayList<>(clients.size());
+        for (int i = 0; i < clients.size(); i++) {
+            breakers.add(circuitStates.breakerFor(transportIds.get(i), clients.get(i), telemetry));
+        }
+        return breakers;
+    }
+
+    private LeasedTransport leaseTransport(LlmProfile profile) {
         if (profile.inlineTransport() != null) {
             String id = ContentAddressedTransportId.forInlineTransport(profile.inlineTransport());
-            return llmTransports.pinOrCreate(id, profile::inlineTransport);
+            return new LeasedTransport(id, llmTransports.pinOrCreate(id, profile::inlineTransport));
         }
 
         String transportId = profile.transportId();
@@ -239,17 +293,22 @@ public final class DefaultWiringFactory implements WiringFactory {
                 // whatever is latest" for reproducibility/rollback — a missing version
                 // is a real configuration error, not a case to silently paper over by
                 // falling back to the default client like the follow-latest path below.
-                return llmTransports.pin(transportId, pinnedVersion);
+                //
+                // The pinned version is part of the health key: two agents pinning different
+                // versions of the same transportId talk to different endpoints, so one being
+                // down says nothing about the other.
+                return new LeasedTransport(transportId + "@v" + pinnedVersion,
+                        llmTransports.pin(transportId, pinnedVersion));
             }
             try {
-                return llmTransports.pin(transportId);
+                return new LeasedTransport(transportId, llmTransports.pin(transportId));
             } catch (IllegalStateException notPublished) {
                 // fall through to the default client, mirroring DefaultLlmRouter.resolve() step 3
             }
         }
 
         try {
-            return llmTransports.pin(defaultLlmClientId);
+            return new LeasedTransport(defaultLlmClientId, llmTransports.pin(defaultLlmClientId));
         } catch (IllegalStateException notPublished) {
             throw new IllegalStateException(
                     "No LlmClient found for transportId='" + transportId

@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.Set;
 
 import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.http.client.HttpClientBuilder;
 import dev.langchain4j.http.client.jdk.JdkHttpClient;
 import dev.langchain4j.http.client.jdk.JdkHttpClientBuilder;
 import dev.langchain4j.model.chat.request.ChatRequest;
@@ -93,9 +94,20 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
      * </ul>
      *
      * <p>Because the second failure hits the blocking path too, the flag is applied to
-     * {@code chatModel} as well as the streaming model — see {@link #applyHttp1IfForced}.
+     * {@code chatModel} as well as the streaming model — see {@link #applyCustomHttpClientIfNeeded}.
      */
     private final boolean forceHttp1;
+    /**
+     * Bounds the TCP/TLS handshake, independently of {@link #timeout}. {@code null} (the default)
+     * leaves the JDK's own behaviour in place, which is what every build did before this knob
+     * existed: langchain4j applies its single {@code timeout} to the whole call, so an
+     * unreachable endpoint is only given up on after the full request budget.
+     *
+     * <p>Set it short when this client is a candidate in a failover pool: a dead endpoint is then
+     * recognised in seconds rather than costing the whole request timeout on every call, while a
+     * provider that is merely slow still gets {@link #timeout} to answer in.
+     */
+    private final Duration connectTimeout;
     /**
      * Precomputed once: the media capability is a pure function of {@link #documentSupport},
      * which never changes after construction, so rebuilding the set on every request only
@@ -170,11 +182,12 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 ? builder.documentSupport
                 : (s.baseUrl() == null || s.baseUrl().isBlank());
         this.forceHttp1 = builder.forceHttp1;
+        this.connectTimeout = builder.connectTimeout;
         this.supportedMediaTypes = documentSupport
                 ? MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT)
                 : MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
 
-        this.chatModel = applyHttp1IfForced(OpenAiChatModel.builder()
+        this.chatModel = applyCustomHttpClientIfNeeded(OpenAiChatModel.builder()
                 .apiKey(s.apiKey())
                 .baseUrl(s.baseUrl())
                 .modelName(s.modelName())
@@ -190,32 +203,114 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
     }
 
     /**
-     * Installs an HTTP/1.1-pinned JDK client on the blocking chat-model builder when
-     * {@link #forceHttp1} is set, and returns the builder for chaining. A no-op otherwise, so
-     * the default build is byte-for-byte what it was before this flag reached the blocking path.
+     * Installs a customised JDK HTTP client on the blocking chat-model builder when this client
+     * needs one — {@link #forceHttp1} and/or {@link #connectTimeout} — and returns the builder for
+     * chaining. A no-op when neither is set, so the default build is byte-for-byte what it was
+     * before either flag existed.
      *
-     * <p>Shared with {@link #getStreamingModel()} through {@link #http1ClientBuilder()}: both
-     * the blocking and the streaming model must pin HTTP/1.1 for the same reason — not just the
-     * SSE-buffering the streaming case documents, but the {@code Connection: Upgrade} rejection
-     * a uvicorn/{@code httptools} vLLM applies to <em>every</em> request, {@code complete()}
+     * <p>Shared with {@link #getStreamingModel()} through {@link #jdkClientBuilder()}: both the
+     * blocking and the streaming model must apply the same transport settings — not just the
+     * SSE-buffering {@code forceHttp1} documents, but the {@code Connection: Upgrade} rejection a
+     * uvicorn/{@code httptools} vLLM applies to <em>every</em> request, {@code complete()}
      * included. See the {@link #forceHttp1} field javadoc.
      */
-    private OpenAiChatModel.OpenAiChatModelBuilder applyHttp1IfForced(
+    private OpenAiChatModel.OpenAiChatModelBuilder applyCustomHttpClientIfNeeded(
             OpenAiChatModel.OpenAiChatModelBuilder builder) {
-        if (forceHttp1) builder.httpClientBuilder(http1ClientBuilder());
+        if (needsCustomHttpClient()) builder.httpClientBuilder(jdkClientBuilder());
         return builder;
     }
 
+    /** Whether any transport-level override requires building our own JDK client. */
+    private boolean needsCustomHttpClient() {
+        return forceHttp1 || connectTimeout != null;
+    }
+
     /**
-     * A {@link JdkHttpClientBuilder} pinned to HTTP/1.1. Pinning the version removes the h2c
-     * upgrade handshake the JDK client would otherwise attempt — the handshake a
-     * uvicorn/{@code httptools} vLLM mistakes for a WebSocket upgrade, rejecting it and dropping
-     * the request body. One builder shape, used by both the blocking and the streaming model.
+     * The JDK HTTP client for this adapter, carrying whichever transport overrides are set.
+     *
+     * <p>Both overrides must travel on the <em>same</em> builder: langchain4j takes a single
+     * {@code httpClientBuilder}, so installing one per concern would mean the second silently
+     * replacing the first.
+     *
+     * <p>{@code HTTP_1_1} pinning removes the h2c upgrade handshake the JDK client would otherwise
+     * attempt — the handshake a uvicorn/{@code httptools} vLLM mistakes for a WebSocket upgrade,
+     * rejecting it and dropping the request body.
+     *
+     * <p>{@link #connectTimeout}, when set, bounds the TCP/TLS handshake independently of the
+     * request timeout. That separation is the point: langchain4j's single {@code timeout} is
+     * applied to the whole call, so an unreachable endpoint costs the <em>full</em> request budget
+     * before a failover pool can move on — 30s of dead wait per request for a host that will never
+     * answer. A short connect timeout fails that case fast while leaving a slow-but-alive provider
+     * its full time to respond.
      */
-    private static JdkHttpClientBuilder http1ClientBuilder() {
-        java.net.http.HttpClient.Builder jdkBuilder = java.net.http.HttpClient.newBuilder()
-                .version(java.net.http.HttpClient.Version.HTTP_1_1);
-        return JdkHttpClient.builder().httpClientBuilder(jdkBuilder);
+    private java.net.http.HttpClient.Builder jdkHttpClientBuilder() {
+        java.net.http.HttpClient.Builder jdkBuilder = java.net.http.HttpClient.newBuilder();
+        if (forceHttp1) jdkBuilder.version(java.net.http.HttpClient.Version.HTTP_1_1);
+        if (connectTimeout != null) jdkBuilder.connectTimeout(connectTimeout);
+        return jdkBuilder;
+    }
+
+    /** {@link #jdkHttpClientBuilder()} wrapped for langchain4j. */
+    private HttpClientBuilder jdkClientBuilder() {
+        JdkHttpClientBuilder jdk = JdkHttpClient.builder().httpClientBuilder(jdkHttpClientBuilder());
+        if (connectTimeout == null) return jdk;
+        jdk.connectTimeout(connectTimeout);
+        return new PinnedConnectTimeoutBuilder(jdk, connectTimeout);
+    }
+
+    /**
+     * Keeps {@link #connectTimeout} from being overwritten by the request timeout.
+     *
+     * <p>Necessary because langchain4j resolves the two from the same value and lets the model's
+     * win: {@code OpenAiChatModel} always calls {@code .connectTimeout(getOrDefault(timeout,
+     * ofSeconds(15)))} on the supplied builder, and {@code DefaultOpenAiClient} then prefers that
+     * over whatever the builder already carried
+     * ({@code getOrDefault(builder.connectTimeout, httpClientBuilder.connectTimeout())}). A
+     * connect timeout set on the JDK client underneath is therefore never consulted — verified
+     * against langchain4j 1.16.1, and the reason setting it there alone silently kept the full
+     * 30s handshake wait.
+     *
+     * <p>So this decorator accepts every other setting and ignores exactly one: an attempt to
+     * reset the connect timeout. {@code readTimeout} passes through untouched, which is what
+     * keeps the request budget the caller configured — the point of the knob is to separate the
+     * two, not to shorten the time a slow-but-alive provider is given to answer.
+     */
+    private static final class PinnedConnectTimeoutBuilder implements HttpClientBuilder {
+
+        private final JdkHttpClientBuilder delegate;
+        private final Duration             pinned;
+
+        PinnedConnectTimeoutBuilder(JdkHttpClientBuilder delegate, Duration pinned) {
+            this.delegate = delegate;
+            this.pinned   = pinned;
+        }
+
+        @Override
+        public Duration connectTimeout() {
+            return pinned;
+        }
+
+        /** Deliberately ignored — see the class javadoc. */
+        @Override
+        public HttpClientBuilder connectTimeout(Duration ignored) {
+            return this;
+        }
+
+        @Override
+        public Duration readTimeout() {
+            return delegate.readTimeout();
+        }
+
+        @Override
+        public HttpClientBuilder readTimeout(Duration readTimeout) {
+            delegate.readTimeout(readTimeout);
+            return this;
+        }
+
+        @Override
+        public dev.langchain4j.http.client.HttpClient build() {
+            return delegate.build();
+        }
     }
 
     @Override
@@ -288,12 +383,12 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .logRequests(logRequests)
                                     .logResponses(logResponses);
 
-                    if (forceHttp1) {
-                        // Force HTTP/1.1 to prevent gateway-side HTTP/2 buffering from batching
-                        // SSE frames, and to drop the h2c upgrade a uvicorn/httptools vLLM
-                        // rejects — see the forceHttp1 field javadoc. Same builder as the
-                        // blocking model, via http1ClientBuilder().
-                        smBuilder.httpClientBuilder(http1ClientBuilder());
+                    if (needsCustomHttpClient()) {
+                        // Same transport settings as the blocking model, via jdkClientBuilder():
+                        // HTTP/1.1 to prevent gateway-side HTTP/2 SSE buffering and to drop the
+                        // h2c upgrade a uvicorn/httptools vLLM rejects, plus the connect timeout
+                        // that lets a failover pool give up on an unreachable endpoint fast.
+                        smBuilder.httpClientBuilder(jdkClientBuilder());
                     }
 
                     streamingModel = smBuilder.build();
@@ -342,6 +437,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         /** Nullable on purpose: null means "derive from baseUrl" — see supportedMediaTypes(). */
         private Boolean documentSupport;
         private boolean forceHttp1 = false;
+        private Duration connectTimeout;
         private Map<String, String> customHeaders = Map.of();
 
         /** Sets the model from the {@link Models} catalogue (preferred for hosted OpenAI). */
@@ -393,6 +489,28 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
          */
         public Builder forceHttp1(boolean v) {
             this.forceHttp1 = v; return this;
+        }
+
+        /**
+         * Bounds the TCP/TLS handshake separately from {@link #timeout(Duration)}, which
+         * langchain4j applies to the whole call.
+         *
+         * <p>Leave it unset for the previous behaviour. Set it — a few seconds is usually right —
+         * when this client is one candidate of a {@code FAILOVER} pool: without it an endpoint
+         * that is simply unreachable is only abandoned after the full request timeout, so every
+         * request pays that wait before the pool can try the next provider. With it, an
+         * unreachable host is recognised in seconds, while a provider that is merely slow still
+         * gets the full {@link #timeout(Duration)} to answer.
+         *
+         * <p>Reaches both the blocking and the streaming model, and composes with
+         * {@link #forceHttp1(boolean)} on a single JDK HTTP client.
+         *
+         * @param v the connect timeout; must be positive
+         */
+        public Builder connectTimeout(Duration v) {
+            if (v != null && (v.isZero() || v.isNegative()))
+                throw new IllegalArgumentException("connectTimeout must be positive when set");
+            this.connectTimeout = v; return this;
         }
 
         /**

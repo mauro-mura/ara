@@ -9,12 +9,14 @@ import io.ara.core.common.AgentId;
 import io.ara.core.memory.EmbeddingClient;
 import io.ara.core.memory.MemoryEntry;
 import io.ara.core.memory.SemanticStore;
+import io.ara.core.memory.ToolCallMetadata;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -64,6 +66,113 @@ class SlidingWindowMemoryManagerContextTest {
         @Override public List<Float> embed(String text) { return List.of(0.1f, 0.2f, 0.3f); }
         @Override public int dimensions() { return 3; }
     };
+
+    @Test
+    void summarizeBoundaryNeverSplitsAToolCallGroup() {
+        // Two complete tool-call groups, then one big append that crosses the budget in a
+        // single pass. The old boundary check inspected the last EVICTED entry instead of the
+        // first KEPT one, so a header whose result sat just inside the anchor tail was evicted
+        // while its result survived — an orphaned "tool" message that providers reject with 400.
+        SlidingWindowMemoryManager m = new SlidingWindowMemoryManager(
+                seedBudget(), EvictionPolicy.SUMMARIZE, summarizer("SUMMARY", true, false));
+        m.appendToWorkingMemory("system", "system pad");
+        m.appendToWorkingMemory("user", "user pad");
+        m.appendToWorkingMemory("assistant_tool_calls", "{\"calls\":[1]}");
+        m.appendToWorkingMemory("tool", "r1", new ToolCallMetadata("c1", "t"));
+        m.appendToWorkingMemory("assistant_tool_calls", "{\"calls\":[2]}");
+        m.appendToWorkingMemory("tool", "r2", new ToolCallMetadata("c2", "t"));
+        m.appendToWorkingMemory("assistant", "assistant pad");
+        assertEquals(0, orphans(m.workingMemory()), "seeded window is well formed");
+
+        m.appendToWorkingMemory("user", "BIG ".repeat(75));
+        assertEquals(0, orphans(m.workingMemory()),
+                "eviction boundary must keep each tool result with its header");
+    }
+
+    /**
+     * Token budget that crosses only when the BIG append lands, over by exactly 1 — so exactly
+     * one eviction pass runs. A tighter budget would let the while loop run a second pass that
+     * evicts the orphaned result too, masking the boundary bug this test exists to catch.
+     */
+    private static int seedBudget() {
+        SlidingWindowMemoryManager probe = new SlidingWindowMemoryManager(
+                Integer.MAX_VALUE / 4, EvictionPolicy.SUMMARIZE, summarizer("SUMMARY", true, false));
+        probe.appendToWorkingMemory("system", "system pad");
+        probe.appendToWorkingMemory("user", "user pad");
+        probe.appendToWorkingMemory("assistant_tool_calls", "{\"calls\":[1]}");
+        probe.appendToWorkingMemory("tool", "r1", new ToolCallMetadata("c1", "t"));
+        probe.appendToWorkingMemory("assistant_tool_calls", "{\"calls\":[2]}");
+        probe.appendToWorkingMemory("tool", "r2", new ToolCallMetadata("c2", "t"));
+        probe.appendToWorkingMemory("assistant", "assistant pad");
+        int beforeBig = probe.estimatedTokens();
+        probe.appendToWorkingMemory("user", "BIG ".repeat(75));
+        return probe.estimatedTokens() - 1;
+    }
+
+    /** Number of tool results whose immediately preceding entry is not header or another tool. */
+    private static int orphans(List<MemoryEntry> window) {
+        int n = 0;
+        for (int i = 0; i < window.size(); i++) {
+            if (!"tool".equals(window.get(i).role())) continue;
+            if (i == 0) { n++; continue; }
+            String prev = window.get(i - 1).role();
+            if (!prev.equals("tool") && !isToolHeader(prev)) n++;
+        }
+        return n;
+    }
+
+    private static boolean isToolHeader(String role) {
+        return role.equals("assistant_tool_call") || role.equals("assistant_tool_calls");
+    }
+
+    @Test
+    void toolResultAppendNeverStrandsALaterResultOfTheSameGroup() {
+        // recordObservation appends each parallel tool result separately, and every append used
+        // to run eviction. With a budget the header + first result already exceed, eviction
+        // removed the whole group mid-assembly and the second result landed with no header.
+        // Eviction is now deferred on tool-result appends until the group is closed.
+        SlidingWindowMemoryManager m = new SlidingWindowMemoryManager(2, EvictionPolicy.DROP_OLDEST);
+        m.appendToWorkingMemory("assistant_tool_calls", "{\"calls\":[1,2]}");
+        m.appendToWorkingMemory("tool", "r1", new ToolCallMetadata("c1", "t"));
+        m.appendToWorkingMemory("tool", "r2", new ToolCallMetadata("c1", "t"));
+        List<MemoryEntry> w = m.workingMemory();
+        assertEquals(0, orphans(w),
+                "results of one parallel call must never be stranded headerless: " + roles(w));
+        assertTrue(w.stream().anyMatch(e -> isToolHeader(e.role())),
+                "mid-group eviction was deferred, the whole group is still intact");
+
+        // The next non-tool append closes the group — deferred eviction applies there.
+        m.appendToWorkingMemory("assistant", "assistant pad");
+        w = m.workingMemory();
+        assertEquals(0, orphans(w), "eviction after the group closes still never strands a result");
+        assertTrue(w.size() < 4, "deferred eviction did run: " + roles(w));
+    }
+
+    private static List<String> roles(List<MemoryEntry> w) {
+        return w.stream().map(MemoryEntry::role).toList();
+    }
+
+    @Test
+    void summarizeWithAnAgentOnAWindowTooSmallToCollapseDegradesInsteadOfThrowing() {
+        // evictSummarize() measured its middle with toolCallGroupBounds(ANCHOR_COUNT), which
+        // reads working.get(ANCHOR_COUNT) — index 2 of a 2-entry list. Any budget below what the
+        // freshly seeded [system, user] window already costs therefore threw
+        // IndexOutOfBoundsException out of appendToWorkingMemory, on the very first append.
+        // The two budgets below span both realistic triggers: a plain text seed, and a single
+        // attachment whose flat constant (PDF 6,000 / image 1,500) exceeds the budget outright.
+        int[] budgets = {5, 50, 1000, 4000};
+        for (int budget : budgets) {
+            SlidingWindowMemoryManager m = new SlidingWindowMemoryManager(
+                    budget, EvictionPolicy.SUMMARIZE, summarizer("SUMMARY", true, false));
+            assertDoesNotThrow(() -> {
+                m.appendToWorkingMemory("system", "You are a contract analyst.");
+                m.appendToWorkingMemory("user", "Review this contract.",
+                        List.of(new io.ara.core.media.MediaRef(
+                                "digest", "application/pdf", "contract.pdf", 10, null)));
+            }, "budget=" + budget + " must degrade to DROP_MIDDLE, never throw");
+            assertTrue(m.workingMemory().size() >= 1, "budget=" + budget + " kept at least one entry");
+        }
+    }
 
     @Test
     void summarizeWithoutAnAgentStillDegradesToDropMiddle() {

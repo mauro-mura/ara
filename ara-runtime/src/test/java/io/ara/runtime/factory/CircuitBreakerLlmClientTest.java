@@ -315,6 +315,94 @@ class CircuitBreakerLlmClientTest {
         assertEquals(CircuitBreakerLlmClient.State.CLOSED, cb.state());
     }
 
+    @Test
+    void stream_trialCancelledBeforeTerminalSignal_reopensInsteadOfStickingHalfOpen() {
+        // Regression: a hung stream (one token, then no onComplete/onError) used to strand the
+        // breaker in HALF_OPEN forever, fast-failing a recovered endpoint on every later call. The
+        // caller's deadline cancels the subscription; that cancel must reopen the circuit so the
+        // next cooldown can retry it.
+        FakeClock clock = new FakeClock(0);
+        AtomicReference<Flow.Subscription> upstream = new AtomicReference<>();
+        LlmClient hanging = new LlmClient() {
+            @Override public LlmCompletion complete(List<LlmMessage> messages, LlmCallContext context) {
+                throw LlmException.serverError("primary", "500", 500);
+            }
+            @Override public String providerId() { return "primary"; }
+            @Override public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
+                return subscriber -> {
+                    subscriber.onSubscribe(new Flow.Subscription() {
+                        @Override public void request(long n) { }
+                        @Override public void cancel() { }
+                    });
+                    subscriber.onNext("partial"); // token arrives, stream then never terminates
+                };
+            }
+        };
+        var cb = new CircuitBreakerLlmClient(hanging, 1, COOLDOWN, clock);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        assertEquals(CircuitBreakerLlmClient.State.OPEN, cb.state());
+        clock.advance(Duration.ofSeconds(30));
+
+        cb.stream(hello(), (LlmCallContext) null).subscribe(new Flow.Subscriber<>() {
+            @Override public void onSubscribe(Flow.Subscription s) { upstream.set(s); s.request(Long.MAX_VALUE); }
+            @Override public void onNext(String item) { }
+            @Override public void onError(Throwable t) { }
+            @Override public void onComplete() { }
+        });
+        assertEquals(CircuitBreakerLlmClient.State.HALF_OPEN, cb.state(), "trial in flight");
+
+        upstream.get().cancel();
+        assertEquals(CircuitBreakerLlmClient.State.OPEN, cb.state(),
+                "an abandoned trial reopens the circuit rather than stranding it in HALF_OPEN");
+    }
+
+    @Test
+    void stream_claimsTrialAtAssembly_soFailoverCanCatchTheFastFail() {
+        // The trial is claimed in stream(), not in subscribe(): FailoverLlmClient catches the
+        // fast-fail thrown from candidate.stream(...) to skip an OPEN breaker. Assembling the
+        // publisher must therefore flip OPEN -> HALF_OPEN once the cooldown has elapsed.
+        FakeClock clock = new FakeClock(0);
+        ScriptedClient delegate = new ScriptedClient("primary");
+        var cb = new CircuitBreakerLlmClient(delegate, 1, COOLDOWN, clock);
+
+        assertThrows(LlmException.class, () -> cb.complete(hello(), (LlmCallContext) null));
+        clock.advance(Duration.ofSeconds(30));
+
+        Flow.Publisher<String> publisher = cb.stream(hello(), (LlmCallContext) null);
+        assertEquals(CircuitBreakerLlmClient.State.HALF_OPEN, cb.state(),
+                "assembling the publisher after cooldown claims the single trial slot");
+        assertNotNull(publisher);
+    }
+
+    @Test
+    void stream_cancelAfterComplete_leavesHealthyCircuitUntouched() {
+        // A downstream that cancels after onComplete (a normal teardown) must not reopen a circuit
+        // the successful trial just closed: the verdict is rendered once, by onComplete.
+        FakeClock clock = new FakeClock(0);
+        AtomicReference<StreamScript> script = new AtomicReference<>(stream ->
+                stream.error(LlmException.serverError("primary", "stream 500", 500)));
+        var cb = new CircuitBreakerLlmClient(streamingClient("primary", script), 1, COOLDOWN, clock);
+
+        collect(cb);
+        assertEquals(CircuitBreakerLlmClient.State.OPEN, cb.state());
+        clock.advance(Duration.ofSeconds(30));
+        script.set(stream -> { stream.token("ok"); stream.complete(); });
+
+        AtomicReference<Flow.Subscription> sub = new AtomicReference<>();
+        cb.stream(hello(), (LlmCallContext) null).subscribe(new Flow.Subscriber<>() {
+            @Override public void onSubscribe(Flow.Subscription s) { sub.set(s); s.request(Long.MAX_VALUE); }
+            @Override public void onNext(String item) { }
+            @Override public void onError(Throwable t) { }
+            @Override public void onComplete() { }
+        });
+        assertEquals(CircuitBreakerLlmClient.State.CLOSED, cb.state(), "trial completed, circuit closed");
+
+        sub.get().cancel();
+        assertEquals(CircuitBreakerLlmClient.State.CLOSED, cb.state(),
+                "a cancel after onComplete is a no-op — the verdict was already rendered");
+    }
+
     // ── forwarding ──────────────────────────────────────────────────────────
 
     @Test

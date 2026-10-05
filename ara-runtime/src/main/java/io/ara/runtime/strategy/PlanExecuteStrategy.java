@@ -134,6 +134,10 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         int promptTokens;
         int outputTokens;
         final List<ExecutionStep> steps = new ArrayList<>();
+        // replan() returns a step list, not an ExecutionResult, so a budget breach detected
+        // there is parked here for the caller to return — keeps the failure reason honest
+        // ("budget exceeded") instead of masquerading as "produced no result".
+        ExecutionResult budgetFailure;
 
         void addUsage(LlmCompletion completion) {
             promptTokens += completion.promptTokens();
@@ -211,6 +215,12 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         }
         checkTimeout(run.deadline(), config);
         tally.addUsage(planCompletion);
+        ExecutionResult planBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                config, task, planCompletion.promptTokens(), planCompletion.outputTokens(),
+                tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
+        if (planBudgetExceeded != null) {
+            return planBudgetExceeded;
+        }
 
         List<String> plan = new ArrayList<>(parsePlanSteps(planCompletion.text()));
         if (plan.isEmpty()) {
@@ -243,6 +253,9 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
 
             String result = executeStep(stepIdx, plan, stepResults, run, tally);
 
+            if (tally.budgetFailure != null) {
+                return tally.budgetFailure;
+            }
             if (cancelled()) {
                 return fail("Cancelled", tally);
             }
@@ -266,6 +279,9 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
 
                     List<String> revisedSteps = replan(plan, stepResults, stepIdx, failureDesc, run, tally);
 
+                    if (tally.budgetFailure != null) {
+                        return tally.budgetFailure;
+                    }
                     if (!revisedSteps.isEmpty()) {
                         List<String> newPlan = new ArrayList<>(plan.subList(0, stepIdx));
                         newPlan.addAll(revisedSteps);
@@ -303,6 +319,12 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         }
         checkTimeout(run.deadline(), config);
         tally.addUsage(finalCompletion);
+        ExecutionResult synthesisBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                config, task, finalCompletion.promptTokens(), finalCompletion.outputTokens(),
+                tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
+        if (synthesisBudgetExceeded != null) {
+            return synthesisBudgetExceeded;
+        }
 
         String finalAnswer = finalCompletion.text() != null ? finalCompletion.text().strip() : "";
         if (finalAnswer.isBlank()) {
@@ -377,6 +399,18 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             }
             checkTimeout(run.deadline(), run.config());
             tally.addUsage(completion);
+            ExecutionResult budgetExceeded = ReactExecutionSupport.checkBudget(
+                    run.config(), run.task().taskId(),
+                    tally.promptTokens, tally.outputTokens, tally.iterations, tally.steps);
+            if (budgetExceeded == null) {
+                budgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                        run.config(), run.task(), completion.promptTokens(), completion.outputTokens(),
+                        tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
+            }
+            if (budgetExceeded != null) {
+                tally.budgetFailure = budgetExceeded;   // caller returns it
+                return lastResult;
+            }
             String text = completion.text() != null ? completion.text() : "";
 
             // extract() already falls back to inline text parsing when the completion
@@ -509,6 +543,18 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                     run.llm(), messages, run.ctx(), run.deadline(), run.config(), run.task().taskId());
             checkTimeout(run.deadline(), run.config());
             tally.addUsage(completion);
+            ExecutionResult replanBudgetExceeded = ReactExecutionSupport.checkBudget(
+                    run.config(), run.task().taskId(),
+                    tally.promptTokens, tally.outputTokens, tally.iterations, tally.steps);
+            if (replanBudgetExceeded == null) {
+                replanBudgetExceeded = ReactExecutionSupport.chargeRunBudget(
+                        run.config(), run.task(), completion.promptTokens(), completion.outputTokens(),
+                        tally.iterations, tally.promptTokens, tally.outputTokens, tally.steps);
+            }
+            if (replanBudgetExceeded != null) {
+                tally.budgetFailure = replanBudgetExceeded;   // caller returns it
+                return List.of();
+            }
             List<String> revised = parsePlanSteps(completion.text());
             log.debug("Replan produced {} step(s)", revised.size());
             return revised;

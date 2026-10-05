@@ -217,7 +217,15 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     private void add(MemoryEntry e) {
         working.add(e);
         charge(e);
-        if (maxTokens > 0) evictIfNeeded();
+        // A tool result is never a safe eviction point: the tool-call group it belongs to may
+        // still be receiving results — recordAssistantOutput writes one header per parallel
+        // batch and ReactExecutionSupport.recordObservation appends each result separately,
+        // with eviction firing on every append. Evicting here would drop the header together
+        // with the first result while later results of the same call are still on their way,
+        // stranding them headerless. Defer until the next non-tool append closes the group.
+        if (maxTokens > 0 && !"tool".equals(e.role())) {
+            evictIfNeeded();
+        }
     }
 
     /**
@@ -316,10 +324,29 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         // the window always shrinks by at least one entry — a single-entry summarise could
         // replace an entry with a same-size summary and never make progress.
         int size = working.size();
+        // toolCallGroupBounds() reads working.get(ANCHOR_COUNT) on entry, so a window with no
+        // room past the two leading anchors cannot even be measured — the "not enough middle to
+        // collapse" check below would then come too late, after the read that throws. This is
+        // the same shape as evictMiddle's own `size <= ANCHOR_COUNT * 2` guard, and it has to
+        // hold for a configuration an operator can reach without thinking about it: any budget
+        // below what a single attachment costs (a PDF is a flat 6,000, an image 1,500 —
+        // see TOKENS_PER_MEDIA) puts the freshly seeded [system, user] window over budget with
+        // only these two entries in it, on the very first append. Degrade, as every other
+        // SUMMARIZE edge case here does, instead of throwing out of appendToWorkingMemory.
+        if (size <= ANCHOR_COUNT) {
+            log.warn("SlidingWindowMemoryManager: SUMMARIZE policy reached with a {}-entry window "
+                    + "— too small to have a collapsible middle, degrading to DROP_MIDDLE", size);
+            return evictMiddle();
+        }
         int start = toolCallGroupBounds(ANCHOR_COUNT)[0];
         int end = size - ANCHOR_COUNT;
-        while (end > start && "tool".equals(working.get(end - 1).role())) {
-            end--;   // never end mid tool-call group
+        // The first KEPT entry is working.get(end): while it is a tool result, its header sits
+        // inside the about-to-be-evicted range and cutting here would orphan it. Walk the
+        // boundary down to that group's header so the group stays whole — either fully evicted
+        // or fully kept. Checking get(end - 1) instead would be backwards: it pulls trailing
+        // tools out of the eviction range while leaving their header in it.
+        while (end > start && "tool".equals(working.get(end).role())) {
+            end--;
         }
         if (end - start < 2) {
             return evictMiddle();   // not enough middle to collapse without risking an orphaned tool result

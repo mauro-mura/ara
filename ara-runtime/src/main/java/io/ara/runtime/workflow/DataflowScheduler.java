@@ -379,46 +379,6 @@ public final class DataflowScheduler {
         }
     }
 
-    private WorkflowResult trySubmitReady(Map<String, String> pendingSeed,
-                                        ExecutorCompletionService<Fired> completion,
-                                        Set<String> running,
-                                        ExecutorService pool) {
-        boolean submittedAnything = false;
-        for (WorkflowNode node : graph.nodes()) {
-            String id = node.id();
-            if (running.contains(id)) {
-                continue;
-            }
-            String input = pendingSeed.remove(id);
-            if (input == null) {
-                input = enablingInput(id);
-            }
-            if (input == null) {
-                continue;
-            }
-
-            int occ = occurrence.merge(id, 1, Integer::sum) - 1;
-            if (occ >= maxOccurrences) {
-                return new WorkflowResult(journal, false, "maxOccurrences exceeded on " + id, sharedState);
-            }
-            clocks.put(id + "#" + occ, consumeTokens(id) + 1);
-            journal.add(new JournalEntry.Started(id, occ, input));
-            running.add(id);
-            submittedAnything = true;
-            String firingInput = input;
-            Map<String, Object> readSnapshot = snapshotReads(node);
-            final String fInput = firingInput;
-            final Map<String, Object> fSnapshot = readSnapshot;
-            completion.submit(() -> fire(node, occ, fInput, fSnapshot, pool));
-        }
-        if (running.isEmpty()) {
-            return new WorkflowResult(journal, true, null, sharedState);
-        }
-        return null; // intermediate marker
-    }
-
-
-
     /**
      * P7/U20, 2026-09-23: {@link #deadline}-bounded replacement for a bare {@code
      * completion.take()}, which blocked forever if no node ever finished — a hung node

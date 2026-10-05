@@ -98,8 +98,16 @@ public final class ChunkUtil {
                 }
             }
             out.add(text.substring(start, end).strip());
-            // Move start forward, keeping an overlap so that context is not lost.
-            start = Math.max(start + 1, end - CHUNK_OVERLAP);
+            // The window has consumed the tail: everything is emitted, so stop. Without this,
+            // the final chunk is shorter than CHUNK_OVERLAP, (end - CHUNK_OVERLAP) falls at or
+            // below start, and the step below collapses to start + 1 — walking the tail one
+            // character at a time and emitting ~CHUNK_OVERLAP near-duplicate chunks.
+            if (end == text.length()) {
+                break;
+            }
+            // Move start forward, keeping an overlap so that context is not lost. The window is
+            // guaranteed to advance because end > start + CHUNK_SIZE / 2 > CHUNK_OVERLAP here.
+            start = end - CHUNK_OVERLAP;
         }
     }
 }

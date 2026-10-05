@@ -1,7 +1,9 @@
 package io.ara.runtime.config;
 
+import io.ara.runtime.factory.CircuitBreakerLlmClient;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +28,50 @@ class AraRuntimeConfigTest {
         assertEquals(AraRuntimeConfig.DEFAULT_PERSISTENCE_MODE, c.persistenceMode());
         assertEquals(AraRuntimeConfig.DEFAULT_H2_DB_PATH, c.h2DbPath());
         assertEquals("", c.description());
+        assertEquals(AraRuntimeConfig.DEFAULT_CIRCUIT_FAILURE_THRESHOLD, c.circuitFailureThreshold());
+        assertEquals(AraRuntimeConfig.DEFAULT_CIRCUIT_COOLDOWN_SEC, c.circuitCooldownSec());
+    }
+
+    /**
+     * The breaker defaults must stay equal to the constants {@code CircuitBreakerLlmClient}
+     * applied while they were hardcoded: this knob exists to be adjustable, not to change what a
+     * deployment that ignores it does.
+     */
+    @Test
+    void circuitBreakerDefaults_matchTheBreakersOwnConstants() {
+        AraRuntimeConfig c = AraRuntimeConfig.defaults();
+
+        assertEquals(CircuitBreakerLlmClient.DEFAULT_FAILURE_THRESHOLD, c.circuitFailureThreshold());
+        assertEquals(CircuitBreakerLlmClient.DEFAULT_COOLDOWN, c.circuitCooldown());
+    }
+
+    @Test
+    void circuitCooldown_exposesTheSecondsAsADuration() {
+        AraRuntimeConfig c = AraRuntimeConfig.builder().circuitCooldownSec(45).build();
+
+        assertEquals(Duration.ofSeconds(45), c.circuitCooldown());
+    }
+
+    @Test
+    void circuitBreakerKnobs_areRejectedWhenMeaningless() {
+        // 0 would mean "open before anything failed" — every candidate skipped forever.
+        assertThrows(IllegalArgumentException.class, () ->
+                AraRuntimeConfig.builder().circuitFailureThreshold(0).build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AraRuntimeConfig.builder().circuitCooldownSec(0).build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AraRuntimeConfig.builder().circuitCooldownSec(-1).build());
+    }
+
+    @Test
+    void fromMap_readsTheCircuitBreakerKeys() {
+        AraRuntimeConfig c = AraRuntimeConfig.fromMap(Map.of(
+                "ara.circuitBreaker.failureThreshold", "1",
+                "ara.circuitBreaker.cooldownSec", "90"));
+
+        assertEquals(1, c.circuitFailureThreshold());
+        assertEquals(90, c.circuitCooldownSec());
+        assertEquals(Duration.ofSeconds(90), c.circuitCooldown());
     }
 
     @Test
@@ -37,6 +83,8 @@ class AraRuntimeConfigTest {
                 .persistenceMode("h2")
                 .h2DbPath("./data/other")
                 .description("edge runtime")
+                .circuitFailureThreshold(2)
+                .circuitCooldownSec(60)
                 .build();
 
         assertEquals("edge", c.name());
@@ -45,6 +93,8 @@ class AraRuntimeConfigTest {
         assertEquals("h2", c.persistenceMode());
         assertEquals("./data/other", c.h2DbPath());
         assertEquals("edge runtime", c.description());
+        assertEquals(2, c.circuitFailureThreshold());
+        assertEquals(60, c.circuitCooldownSec());
     }
 
     @Test
