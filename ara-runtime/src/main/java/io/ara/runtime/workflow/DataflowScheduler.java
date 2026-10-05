@@ -381,7 +381,8 @@ public final class DataflowScheduler {
 
     private WorkflowResult trySubmitReady(Map<String, String> pendingSeed,
                                         ExecutorCompletionService<Fired> completion,
-                                        Set<String> running) {
+                                        Set<String> running,
+                                        ExecutorService pool) {
         boolean submittedAnything = false;
         for (WorkflowNode node : graph.nodes()) {
             String id = node.id();
