@@ -352,6 +352,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `failover/FailoverExample` | stub | Failover and circuit breaking across LLM and embedding endpoints |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, one provider-agnostic method |
 | `spec/AgentFromFileExample` | stub | An agent defined in a JSON file: load it, check the names it refers to, run it, write it back |
+| `spec/ImportAgentFromJsonExample` | stub | A fully described agent (fallback model, prices, spend cap, strategy, tools, memory) imported from a JSON file on the classpath, then run |
 | `scheduler/AgentSchedulerExample` | none | Interval and cron schedules, with pause / resume / trigger |
 | `web/StreamingChatWebExample` | stub / **live** | A chat page on a JDK `HttpServer`, streaming over SSE |
 

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "agent": {
+    "type": "market-analyst",
+    "name": "Market analyst",
+    "description": "Summarises a topic from what its one tool returns.",
+    "tags": ["demo", "analysis"],
+    "systemPrompt": "You are a careful analyst. Use the tool once, then answer in one sentence."
+  },
+  "llm": {
+    "primary": {
+      "model": "primary-model",
+      "temperature": 0.2,
+      "maxTokens": 512,
+      "costCurrency": "EUR",
+      "costInputPer1k": { "amount": "0.002", "currency": "EUR" },
+      "costOutputPer1k": { "amount": "0.006", "currency": "EUR" },
+      "budget": { "cap": { "amount": "0.50", "currency": "EUR" } }
+    },
+    "fallbacks": [ { "model": "backup-model" } ],
+    "selectionPolicy": "FAILOVER"
+  },
+  "execution": {
+    "strategy": { "type": "react" },
+    "tools": ["echo"],
+    "maxIterations": 6,
+    "timeout": "PT2M"
+  },
+  "memory": {
+    "workingMemoryTokenBudget": 4000,
+    "workingMemoryEviction": "drop_oldest",
+    "maxConversationTurns": 10
+  }
+}
