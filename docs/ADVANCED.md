@@ -2,12 +2,13 @@
 
 Topics here go beyond the main [README](../README.md): registering your own
 `ExecutionStrategy` on the runtime, and how to actually see what gets sent to
-the LLM when you're debugging one.
+the LLM when you're debugging one, and how to watch a run as it happens.
 
 ## Table of contents
 
 - [Registering a custom `ExecutionStrategy`](#registering-a-custom-executionstrategy)
 - [Tracing what actually reaches the LLM](#tracing-what-actually-reaches-the-llm)
+- [Watching a run: events](#watching-a-run-events)
 
 ---
 
@@ -162,3 +163,58 @@ If you only enabled the provider-level flag and see no ReAct suffix in the
 system message, that's consistent with a native-tools client, not a
 misconfiguration — see the section above. Enable `AgentConfig.logLlmIo(true)`
 as well if you want ARA's own view of the message list for comparison.
+
+---
+
+## Watching a run: events
+
+A task can carry a listener that is told what the agent is doing while it does it, which is
+what a chat page needs to show "thinking... calling a tool... got a result":
+
+```java
+agent.execute(AgentTask.of("Get me a line of text")
+        .withEventListener(event -> System.out.println(event)));   // Consumer<AgentEvent>
+```
+
+A run produces three kinds of event, all with the same envelope (`taskId`, `agentId`,
+`parentTaskId`, `correlationId`, `seq`, `at`):
+
+| Event | When |
+|---|---|
+| `RunStarted` | the run began |
+| `StepRecorded` | the agent recorded a step: a thought, a tool call, **a tool result**, a reflection, a spoken message, the final answer. It carries the same `ExecutionStep` that ends up in `AgentResponse.steps()` |
+| `RunFinished` | the run ended, with success, final state, iterations, tokens, cost and the failure reason if any |
+
+Every run with a listener gets exactly one `RunStarted` and one `RunFinished`, **even if it was
+refused** (agent terminated, session busy) **or failed**, so a page waiting for the end never
+hangs. Budget, timeout and cancellation are not events of their own: they arrive in `RunFinished`
+with `success == false` and the reason.
+
+**Sub-agents.** The listener is inherited by every agent the run delegates to. Their events
+arrive on the same listener, each with its own `taskId` and its own `seq` from 0, the same
+`correlationId` as the caller, and `parentTaskId` set to the task that delegated it, so the tree
+of runs can be rebuilt from a flat stream (see `events/RunEventsExample`).
+
+**The contract, in short.**
+- The listener is called **synchronously, on the thread that produced the event**. A slow
+  listener slows the agent: do not block in it; put your own queue behind it if you need one.
+- Events of one `taskId` arrive in order, from one thread. A delegated agent runs on its own
+  thread, so the listener **must be thread-safe**, and there is no order between different
+  tasks: use `at`.
+- A `RuntimeException` thrown by the listener does not stop the run. It is logged once per run,
+  and delivery continues.
+- The events are live, while `AgentResponse.steps()` is what the strategy returns at the end. They
+  are the same except where a strategy discards steps: `reflexion` retries and returns only its
+  last attempt's steps, while events show every attempt (`ExecutionStep.iteration` restarts at
+  each attempt).
+- Results of **parallel tool calls** are recorded together after all of them finish, so you see
+  every call first and the results afterwards, not each result as its tool completes.
+- A `workflow` agent's steps are derived from its journal after the run, so they arrive at the
+  end, not node by node.
+- A step carries what the response carries: full tool arguments and results. If you show events
+  to people who should not see them, filter in the listener.
+- `FunctionAgent` and `ParallelAgent` do not go through `AgentInstance` and emit no events yet.
+
+The older `tokenCallback`, `toolCallCallback` and `speakCallback` on `AgentTask` are unchanged
+and still the way to get streamed tokens; the `tool_call` callback and `StepRecorded(TOOL_CALL)`
+fire at the same point.

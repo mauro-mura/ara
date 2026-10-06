@@ -11,6 +11,7 @@ import io.ara.core.trace.TraceSpan;
 import io.ara.core.trace.TraceStore;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 import io.ara.runtime.trace.TraceEmittingAgent;
+import io.ara.runtime.trace.TraceProjection;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -54,7 +55,7 @@ class AraRuntimeTraceEmissionTest {
             assertFalse(spans.isEmpty(), "a trace was emitted for the run");
 
             TraceSpan root = spans.get(0);
-            assertEquals(a.agentId().value() + "#run", root.spanId());
+            assertEquals(TraceProjection.rootSpanIdOf(a.agentId().value(), response.taskId()), root.spanId());
             assertInstanceOf(SpanStatus.Completed.class, root.status());
             assertEquals("review this diff",
                     new String(blobs.get(root.promptRef()).orElseThrow(), StandardCharsets.UTF_8));

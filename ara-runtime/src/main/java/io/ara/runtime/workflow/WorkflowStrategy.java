@@ -2,6 +2,7 @@ package io.ara.runtime.workflow;
 
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentTask;
+import io.ara.runtime.strategy.RunEvents;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionStrategy;
@@ -106,7 +107,7 @@ final class WorkflowStrategy implements ExecutionStrategy {
                     && finished.outcome() instanceof NodeOutcome.Completed completed) {
                 iteration++;
                 output = completed.content();
-                steps.add(ExecutionStep.observation(
+                RunEvents.record(task, steps, ExecutionStep.observation(
                         finished.nodeId() + "#" + finished.occurrence() + ": " + completed.content(), iteration));
             }
         }

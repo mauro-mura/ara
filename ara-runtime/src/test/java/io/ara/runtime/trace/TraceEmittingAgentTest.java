@@ -87,7 +87,7 @@ class TraceEmittingAgentTest {
         assertEquals(1 + 4, spans.size());
 
         TraceSpan root = spans.get(0);
-        assertEquals("reviewer-1#run", root.spanId());
+        assertEquals(TraceProjection.rootSpanIdOf("reviewer-1", task.taskId()), root.spanId());
         assertNull(root.parentSpanId());
         assertInstanceOf(SpanStatus.Completed.class, root.status());
         assertEquals(120, root.tokensIn());
@@ -97,7 +97,7 @@ class TraceEmittingAgentTest {
         assertEquals("LGTM with one nit", blobText(root.outputRef()));
         assertNull(root.failureKind());
 
-        assertTrue(spans.stream().skip(1).allMatch(s -> "reviewer-1#run".equals(s.parentSpanId())));
+        assertTrue(spans.stream().skip(1).allMatch(s -> root.spanId().equals(s.parentSpanId())));
         TraceSpan toolStep = spans.get(2);
         assertTrue(blobText(toolStep.promptRef()).startsWith("read_file "));
     }

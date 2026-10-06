@@ -2,7 +2,9 @@ package io.ara.runtime.trace;
 
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.DelegatedBy;
 import io.ara.core.agent.ExecutionStep;
+import io.ara.core.agent.RunContext;
 import io.ara.core.agent.StepType;
 import io.ara.core.common.Money;
 import io.ara.core.trace.BlobStore;
@@ -24,12 +26,24 @@ import java.util.Objects;
  * from the content it puts into the {@link BlobStore}; the caller appends the spans to a
  * {@code TraceStore}.
  *
- * <p><b>Shape.</b> One <em>root</em> span for the whole execution (parent = {@code null},
- * {@code spanId = "<agentId>#run"}) carrying the token/cost totals, the content-addressed
+ * <p><b>Shape.</b> One <em>root</em> span for the whole execution ({@code spanId =
+ * "<agentId>/<taskId>#run"}) carrying the token/cost totals, the content-addressed
  * prompt/output refs and the outcome — plus one <em>child</em> span per
- * {@link ExecutionStep} ({@code spanId = "<agentId>#<iteration>-<ordinal>"}, parent = the
- * root) for the reasoning structure. {@code ExecutionStep} carries no per-step tokens or
+ * {@link ExecutionStep} ({@code spanId = "<agentId>/<taskId>#<iteration>-<ordinal>"}, parent =
+ * the root) for the reasoning structure. {@code ExecutionStep} carries no per-step tokens or
  * cost, so only the root span is billed; the children are structural.
+ *
+ * <p><b>Delegation lands in the same run.</b> A delegated task shares its caller's run id (the
+ * delegation tool hands it the caller's workflow id), so one run holds the whole tree. The
+ * root of a delegated execution is therefore <em>not</em> parentless: its parent is the root of
+ * the run that delegated ({@code RunContext.DELEGATED_BY_KEY}). Exactly one span per run has no
+ * parent, which is what readers that look for "the root" rely on.
+ *
+ * <p><b>Why the task id is in every span id.</b> Span ids must be unique within a run. With
+ * {@code "<agentId>#run"}, as this used to be, the same agent working twice in one run (two
+ * delegations to one worker, or two tasks in one session, which share the session's run id)
+ * wrote two spans with the same id, and whoever read the run back lost one. The agent id is
+ * kept in front so a span still reads as "whose" at a glance.
  *
  * <p>The root span's {@link TraceSpan#failureKind()} is set from
  * {@link FailureKind#classify} on a failure — this also wires the ADR-0074 D6 field that
@@ -78,7 +92,7 @@ public final class TraceProjection {
 
         String runId = runIdOf(task);
         String agentId = response.agentId().value();
-        String rootSpanId = agentId + "#run";
+        String rootSpanId = rootSpanIdOf(agentId, task.taskId());
 
         Instant endedAt = response.completedAt();
         Instant startedAt = endedAt.minus(response.elapsedTime());
@@ -94,6 +108,7 @@ public final class TraceProjection {
                 : new SpanStatus.Failed(Objects.requireNonNullElse(response.failureReason(), "agent execution failed"));
 
         TraceSpan.Builder root = TraceSpan.builder(runId, rootSpanId, agentId)
+                .parentSpanId(delegatingRootOf(task))
                 .promptRef(promptRef)
                 .outputRef(outputRef)
                 .tokensIn(Math.max(0, response.inputTokens()))
@@ -128,7 +143,7 @@ public final class TraceProjection {
             String stepPrompt = step.type() == StepType.TOOL_CALL
                     ? ref(blobs, step.toolId() + " " + Objects.requireNonNullElse(step.arguments(), ""))
                     : null;
-            spans.add(TraceSpan.builder(runId, agentId + "#" + step.iteration() + "-" + i, agentId)
+            spans.add(TraceSpan.builder(runId, agentId + "/" + task.taskId() + "#" + step.iteration() + "-" + i, agentId)
                     .parentSpanId(rootSpanId)
                     .promptRef(stepPrompt)
                     .outputRef(ref(blobs, step.content()))
@@ -144,7 +159,8 @@ public final class TraceProjection {
     /** A minimal Failed root span for an execution that threw before producing an {@link AgentResponse}. */
     public static TraceSpan failedByException(AgentTask task, String agentId, Throwable error, BlobStore blobs) {
         Instant now = Instant.now();
-        return TraceSpan.builder(runIdOf(task), agentId + "#run", agentId)
+        return TraceSpan.builder(runIdOf(task), rootSpanIdOf(agentId, task.taskId()), agentId)
+                .parentSpanId(delegatingRootOf(task))
                 .promptRef(ref(blobs, task.input()))
                 .status(new SpanStatus.Failed("Unexpected error: "
                         + Objects.requireNonNullElse(error.getMessage(), error.getClass().getSimpleName())))
@@ -152,6 +168,17 @@ public final class TraceProjection {
                 .startedAt(now)
                 .endedAt(now)
                 .build();
+    }
+
+    /** The id of the root span of {@code agentId}'s execution of {@code taskId}. */
+    public static String rootSpanIdOf(String agentId, String taskId) {
+        return agentId + "/" + taskId + "#run";
+    }
+
+    /** The root span of the run that delegated {@code task}, or {@code null} if nobody did. */
+    private static String delegatingRootOf(AgentTask task) {
+        DelegatedBy by = task.runContext().opaque(RunContext.DELEGATED_BY_KEY, DelegatedBy.class);
+        return by == null ? null : rootSpanIdOf(by.agentId(), by.taskId());
     }
 
     private static String ref(BlobStore blobs, String content) {

@@ -33,6 +33,7 @@ import io.ara.runtime.interceptor.InterceptingLlmClient;
 import io.ara.runtime.interceptor.InterceptingToolRegistry;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.runtime.strategy.MeteringStrategy;
+import io.ara.runtime.strategy.RunEvents;
 import io.ara.runtime.wiring.AgentWiring;
 import io.ara.runtime.wiring.Versioned;
 import io.ara.runtime.wiring.WiringFactory;
@@ -240,6 +241,27 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     public AgentResponse execute(AgentTask task) {
         Objects.requireNonNull(task, "task must not be null");
 
+        // A task with an event listener gets exactly one RunStarted and one RunFinished, however
+        // the run ends: the refusals below ("Agent terminated", a busy session) and an exception
+        // are runs too, and a page waiting for RunFinished must not hang on them. Doing it here,
+        // around the whole body, covers every strategy, pipeline and workflow without touching them.
+        RunEvents events = RunEvents.forRun(task, agentId().value());
+        if (events == null) {
+            return executeRun(task);
+        }
+        events.started();
+        AgentResponse response;
+        try {
+            response = executeRun(events.attachTo(task));
+        } catch (RuntimeException | Error e) {
+            events.failed(e);
+            throw e;
+        }
+        events.finished(response);
+        return response;
+    }
+
+    private AgentResponse executeRun(AgentTask task) {
         if (closed.get()) {
             return AgentResponse.failure(task.taskId(), agentId(),
                     "Agent terminated", Duration.ZERO);

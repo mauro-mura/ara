@@ -301,6 +301,31 @@ public record AgentTask(
         return Optional.ofNullable(runContext.opaque(RunContext.EXECUTION_CONTEXT_KEY, ExecutionContext.class));
     }
 
+    /**
+     * Returns a copy of this task whose run reports {@link AgentEvent}s to {@code listener}
+     * (a {@code null} listener removes it). One listener sees the whole run, including the runs of
+     * agents it delegates to, each with its own {@code taskId} and {@code seq}.
+     *
+     * <p><b>Delivery contract.</b> The listener is called synchronously, on the thread that
+     * produced the event, so a slow listener slows the agent down: do not block in it, or put your
+     * own queue behind it. Events of one {@code taskId} are delivered in {@code seq} order from a
+     * single thread; but a delegated agent runs on its own thread, so the listener <b>must be
+     * thread-safe</b>. A {@code RuntimeException} thrown by the listener does not stop the run: it
+     * is logged once per run and delivery goes on.
+     *
+     * <p>Stored in the {@link RunContext}'s opaque channel, not in a record component: adding a
+     * component to this public record would break every caller that constructs it directly.
+     */
+    public AgentTask withEventListener(Consumer<AgentEvent> listener) {
+        return withAttachment(RunContext.EVENT_LISTENER_KEY, listener);
+    }
+
+    /** The listener set with {@link #withEventListener}, or {@code null} if none. */
+    @SuppressWarnings("unchecked")
+    public Consumer<AgentEvent> eventListener() {
+        return runContext.opaque(RunContext.EVENT_LISTENER_KEY, Consumer.class);
+    }
+
     /** Notifies the tool-call callback, if set. No-op when null. */
     public void notifyToolCall(String toolId, String argumentJson) {
         if (toolCallCallback != null) toolCallCallback.accept(new ToolCallEvent(toolId, argumentJson));

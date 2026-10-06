@@ -110,6 +110,18 @@ public record AgentMessage(
     }
 
     /**
+     * Returns a copy of this message under {@code correlationId}. A delegation uses it to keep
+     * the caller's workflow id instead of the fresh one {@link #of} generates, so every task of
+     * a delegation chain carries the same id and lands in the same trace run. Pairing a request
+     * with its reply does not depend on this value being unique: {@link #messageId} is.
+     */
+    public AgentMessage withCorrelationId(String correlationId) {
+        return new AgentMessage(messageId, senderId, recipientId, content,
+                Objects.requireNonNull(correlationId, "correlationId must not be null"), sentAt,
+                runContext, sessionId, senderScopes, executionContext);
+    }
+
+    /**
      * Returns a copy of this message carrying {@code ctx} (ADR-033 Fase 5) — the richer,
      * subject-aware replacement for {@link #withSenderScopes}. When both are set,
      * {@code LocalMessageBus} prefers this one.

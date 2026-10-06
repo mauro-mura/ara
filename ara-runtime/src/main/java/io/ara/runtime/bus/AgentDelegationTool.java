@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AgentView;
+import io.ara.core.agent.DelegatedBy;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.RunContext;
 import io.ara.core.agent.RunState;
@@ -16,6 +17,7 @@ import io.ara.core.bus.MessageBus;
 import io.ara.core.common.AgentId;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolResult;
+import io.ara.runtime.trace.TraceProjection;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -182,7 +184,7 @@ public final class AgentDelegationTool implements AraTool {
 
     @Override
     public ToolResult execute(String argumentJson) {
-        return delegate(argumentJson, RunContext.empty(), null);
+        return delegate(argumentJson, Caller.NONE);
     }
 
     /**
@@ -198,9 +200,30 @@ public final class AgentDelegationTool implements AraTool {
      */
     @Override
     public ToolResult execute(String argumentJson, AgentTask task) {
-        RunContext callerContext   = task != null ? task.runContext() : RunContext.empty();
-        SessionId  callerSessionId = task != null ? task.sessionId() : null;
-        return delegate(argumentJson, callerContext, callerSessionId);
+        return delegate(argumentJson, task != null ? Caller.of(task) : Caller.NONE);
+    }
+
+    /**
+     * What a delegation needs to know about the run that is delegating.
+     *
+     * <p>{@code workflowId} becomes the delegate's correlation id, so the whole chain shares one
+     * id and lands in one trace run. It is the caller's <em>run id</em> as the trace defines it
+     * ({@link TraceProjection#runIdOf}: correlation id, else session id, else task id), not the
+     * caller's raw correlation id: a caller with no correlation id still has a run, and its
+     * delegates must join that run rather than start one of their own. An earlier version let
+     * every hop take the fresh random id {@code AgentMessage.of} generates; each sub-agent then
+     * became a run of its own, and a trace of a run never contained the work it delegated.
+     *
+     * @param taskId the caller's task, which the delegate is told about as its direct parent
+     */
+    private record Caller(RunContext context, SessionId sessionId, String workflowId, String taskId) {
+
+        /** A delegation made without a calling task: no context, no session, no run to join. */
+        static final Caller NONE = new Caller(RunContext.empty(), null, null, null);
+
+        static Caller of(AgentTask task) {
+            return new Caller(task.runContext(), task.sessionId(), TraceProjection.runIdOf(task), task.taskId());
+        }
     }
 
     /**
@@ -267,7 +290,7 @@ public final class AgentDelegationTool implements AraTool {
         }
     }
 
-    private ToolResult delegate(String argumentJson, RunContext callerContext, SessionId callerSessionId) {
+    private ToolResult delegate(String argumentJson, Caller caller) {
         DelegationRequest request;
         try {
             request = parseDelegation(argumentJson);
@@ -292,9 +315,10 @@ public final class AgentDelegationTool implements AraTool {
             return ToolResult.failure(TOOL_ID, "Agent not found: " + recipientId);
         }
 
-        SessionId delegateSessionId = delegateSessionId(callerSessionId, recipientId);
+        SessionId delegateSessionId = delegateSessionId(caller.sessionId(), recipientId);
 
-        return dispatch(request, delegateSessionId, attenuateForHops(callerContext, delegateSessionId));
+        return dispatch(request, delegateSessionId,
+                attenuateForHops(caller.context(), delegateSessionId, caller.taskId()), caller.workflowId());
     }
 
     /**
@@ -320,7 +344,7 @@ public final class AgentDelegationTool implements AraTool {
      * across the middle of a longer {@code execute}-shaped one. Kept separate from
      * {@link #delegate} for exactly that reason, not to make the line count look better.
      */
-    private PreparedHop attenuateForHops(RunContext callerContext, SessionId delegateSessionId) {
+    private PreparedHop attenuateForHops(RunContext callerContext, SessionId delegateSessionId, String callerTaskId) {
         RunContext outgoing = applyStateAccess(callerContext, delegateSessionId);
 
         // ADR-0077 D2/D3: non-escalation of permissions across the delegation hop.
@@ -347,6 +371,13 @@ public final class AgentDelegationTool implements AraTool {
                 : null;
         if (outgoingContext != null) {
             outgoing = outgoing.withOpaque(RunContext.EXECUTION_CONTEXT_KEY, outgoingContext);
+        }
+
+        // Unlike the two keys above, which narrow what the caller had, this one is overwritten:
+        // the delegate must know its *direct* parent, and the value it would inherit names the
+        // caller's own parent instead. Without a calling task there is no parent to name.
+        if (callerTaskId != null) {
+            outgoing = outgoing.withOpaque(RunContext.DELEGATED_BY_KEY, new DelegatedBy(selfId, callerTaskId));
         }
 
         return new PreparedHop(outgoing, effectiveForThisHop, outgoingContext);
@@ -382,7 +413,8 @@ public final class AgentDelegationTool implements AraTool {
      * failure as a {@link ToolResult} rather than propagating, because the ReAct loop is
      * built to read a failed tool call as an observation and keep reasoning.
      */
-    private ToolResult dispatch(DelegationRequest request, SessionId delegateSessionId, PreparedHop hop) {
+    private ToolResult dispatch(DelegationRequest request, SessionId delegateSessionId, PreparedHop hop,
+                                String workflowId) {
         String recipientId = request.recipientAgentId();
         try {
             // ADR-033: the same effectiveForThisHop that ADR-0077 threads onward for
@@ -397,6 +429,11 @@ public final class AgentDelegationTool implements AraTool {
                     .withSenderScopes(hop.effectiveScopes());
             if (hop.executionContext() != null) {
                 message = message.withExecutionContext(hop.executionContext());
+            }
+            // The chain keeps the caller's workflow id (see Caller). Without a calling task the
+            // message keeps the fresh id it was born with, exactly as before.
+            if (workflowId != null) {
+                message = message.withCorrelationId(workflowId);
             }
             AgentMessage reply = bus.request(message, timeout);
             return ToolResult.success(TOOL_ID,

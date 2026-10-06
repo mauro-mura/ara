@@ -110,7 +110,7 @@ public final class ReactStrategy implements ExecutionStrategy {
                 switch (decision) {
                     case ReactExecutionSupport.ForcedFinalDecision.FinalAnswer(String answer) -> {
                         log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.finalAnswer(answer, iteration));
                         return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ReactExecutionSupport.ForcedFinalDecision.Continue ignored ->
@@ -122,7 +122,7 @@ public final class ReactStrategy implements ExecutionStrategy {
                 switch (decision) {
                     case ReactExecutionSupport.StepDecision.FinalAnswer(String answer) -> {
                         log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.finalAnswer(answer, iteration));
                         return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ReactExecutionSupport.StepDecision.DispatchTools(List<ToolCallParser.ToolCallRequest> calls) ->

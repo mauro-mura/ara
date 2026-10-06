@@ -774,7 +774,7 @@ final class ReactExecutionSupport {
         } else {
             ctx.memory().appendToWorkingMemory("user", "Observation: " + observation);
         }
-        ctx.steps().add(ExecutionStep.observation(observation, ctx.iteration()));
+        RunEvents.record(ctx.task(), ctx.steps(), ExecutionStep.observation(observation, ctx.iteration()));
         return !result.success();
     }
 
@@ -819,7 +819,7 @@ final class ReactExecutionSupport {
                 log.info("TOOL CALL [{}] args={}", tcr.toolId(), truncate(tcr.argumentJson(), ctx.logIoMaxChars()));
             }
             ctx.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
-            ctx.steps().add(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), ctx.iteration()));
+            RunEvents.record(ctx.task(), ctx.steps(), ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), ctx.iteration()));
             // A derived, per-call task carrying only this call's toolCallId (for
             // TelemetryToolRegistry's tool.call_id attribute) — created here, on the
             // dispatching thread, and handed to the virtual thread below. AgentTask is
@@ -948,7 +948,8 @@ final class ReactExecutionSupport {
      */
     static void recordAssistantOutput(
             MemoryManager memory, List<ExecutionStep> steps, LlmCompletion completion,
-            String output, int iterations, String taskId) {
+            String output, int iterations, AgentTask task) {
+        String taskId = task.taskId();
 
         if (!completion.toolCalls().isEmpty()) {
             try {
@@ -973,7 +974,7 @@ final class ReactExecutionSupport {
         } else {
             memory.appendToWorkingMemory("assistant", output);
         }
-        steps.add(ExecutionStep.thought(output, iterations));
+        RunEvents.record(task, steps, ExecutionStep.thought(output, iterations));
     }
 
     /**

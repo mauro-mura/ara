@@ -175,12 +175,12 @@ public final class ReSpActStrategy implements ExecutionStrategy {
                 switch (decision) {
                     case ForcedFinalDecision.FinalAnswer(String answer) -> {
                         log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.finalAnswer(answer, iteration));
                         return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case ForcedFinalDecision.Speak(String message) -> {
                         log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.speak(message, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.speak(message, iteration));
                         task.notifySpeak(message);
                         return ExecutionResult.success(message, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
@@ -192,12 +192,12 @@ public final class ReSpActStrategy implements ExecutionStrategy {
                 switch (decision) {
                     case StepDecision.FinalAnswer(String answer) -> {
                         log.debug("Task [{}] reached FINAL_ANSWER in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.finalAnswer(answer, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.finalAnswer(answer, iteration));
                         return ExecutionResult.success(answer, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }
                     case StepDecision.Speak(String message) -> {
                         log.debug("Task [{}] spoke to the user in {} iteration(s)", task.taskId(), iteration);
-                        steps.add(ExecutionStep.speak(message, iteration));
+                        RunEvents.record(task, steps, ExecutionStep.speak(message, iteration));
                         task.notifySpeak(message);
                         return ExecutionResult.success(message, iteration, totalPromptTokens, totalOutputTokens, steps);
                     }

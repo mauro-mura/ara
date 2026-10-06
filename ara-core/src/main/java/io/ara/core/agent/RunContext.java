@@ -89,6 +89,25 @@ public record RunContext(
      */
     public static final String EXECUTION_CONTEXT_KEY = "io.ara.auth.executionContext";
 
+    /**
+     * {@link #opaque()} key under which a delegated task finds the run that delegated it (a
+     * {@link DelegatedBy}): the delegating agent and its task. {@code AgentDelegationTool}
+     * sets it on every hop, <em>overwriting</em> what the caller inherited, so it always names
+     * the direct parent and never the root of the chain. Absent on a task nobody delegated.
+     * The run tree a trace or an event stream needs is rebuilt from this value: the
+     * correlation id is shared by the whole chain and cannot tell a parent from a child.
+     */
+    public static final String DELEGATED_BY_KEY = "io.ara.run.delegatedBy";
+
+    /**
+     * {@link #opaque()} key under which a caller's event listener (a {@code
+     * Consumer<AgentEvent>}, set with {@link AgentTask#withEventListener}) travels. It is
+     * <em>inherited</em> by delegated tasks, so one listener sees a whole delegation tree; this is
+     * the opposite of the run's own emitter, which every run replaces (see {@code RunEvents} in
+     * the runtime). A Java object in memory: it does not cross a process boundary.
+     */
+    public static final String EVENT_LISTENER_KEY = "io.ara.run.eventListener";
+
     public RunContext {
         promptVars = Map.copyOf(Objects.requireNonNullElse(promptVars, Map.of()));
         opaque     = Map.copyOf(Objects.requireNonNullElse(opaque, Map.of()));

@@ -134,6 +134,17 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         int promptTokens;
         int outputTokens;
         final List<ExecutionStep> steps = new ArrayList<>();
+        private final AgentTask task;
+
+        Tally(AgentTask task) {
+            this.task = task;
+        }
+
+        /** The one place a step is recorded: adds it to {@link #steps} and announces it to the run's listener. */
+        void record(ExecutionStep step) {
+            RunEvents.record(task, steps, step);
+        }
+
         // replan() returns a step list, not an ExecutionResult, so a budget breach detected
         // there is parked here for the caller to return — keeps the failure reason honest
         // ("budget exceeded") instead of masquerading as "produced no result".
@@ -191,7 +202,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                 Instant.now().plus(config.executionTimeout()),
                 config.maxIterations(), pe.maxStepRoundsPerStep(),
                 nativeTools);
-        Tally tally = new Tally();
+        Tally tally = new Tally(task);
 
         // ── Phase 1: Planning ──────────────────────────────────────────────────
         if (cancelled()) {
@@ -231,7 +242,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                     plan.size(), maxPlanSteps, maxPlanSteps);
             plan = new ArrayList<>(plan.subList(0, maxPlanSteps));
         }
-        tally.steps.add(ExecutionStep.thought(
+        tally.record(ExecutionStep.thought(
                 planCompletion.text() != null ? planCompletion.text() : "", tally.iterations));
         log.debug("Plan ({} steps) for task [{}]: {}", plan.size(), task.taskId(), plan);
 
@@ -333,7 +344,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             log.warn("Synthesis returned empty response, falling back to step results");
             finalAnswer = buildFallbackAnswer(plan, stepResults);
         }
-        tally.steps.add(ExecutionStep.finalAnswer(finalAnswer, tally.iterations));
+        tally.record(ExecutionStep.finalAnswer(finalAnswer, tally.iterations));
         return ExecutionResult.success(finalAnswer, tally.iterations,
                 tally.promptTokens, tally.outputTokens, tally.steps);
     }
@@ -431,7 +442,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             // No tool call — capture the text as a result candidate
             if (!text.isBlank()) {
                 lastResult = text;
-                tally.steps.add(ExecutionStep.thought(text, tally.iterations));
+                tally.record(ExecutionStep.thought(text, tally.iterations));
             }
 
             if (text.contains("STEP_DONE")
@@ -469,7 +480,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             List<LlmMessage> stepLocalHistory, Run run, Tally tally) throws InterruptedException {
 
         run.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
-        tally.steps.add(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), tally.iterations));
+        tally.record(ExecutionStep.toolCall(tcr.toolId(), tcr.argumentJson(), tally.iterations));
 
         String callId = tcr.toolCallId();
         AgentTask dispatchTask = (callId != null && !callId.isBlank())
@@ -483,7 +494,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         String observation = result.success()
                 ? result.output()
                 : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
-        tally.steps.add(ExecutionStep.observation(observation, tally.iterations));
+        tally.record(ExecutionStep.observation(observation, tally.iterations));
 
         if (callId != null && !callId.isBlank()) {
             // Native reconstruction — mirrors ReactStrategy's dispatch: pairs with
