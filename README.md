@@ -53,7 +53,7 @@ Your code ──▶ AraRuntime ──▶ Agent (strategy + contract + session)
 <dependency>
     <groupId>io.github.xmor</groupId>
     <artifactId>ara-runtime</artifactId>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
 </dependency>
 ```
 
