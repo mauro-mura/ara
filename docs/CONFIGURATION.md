@@ -279,6 +279,16 @@ repair attempts) and `fewShotRefs`. The field names follow the tables above: `ex
 is `enabledTools`, `execution.timeout` is `executionTimeout`, and so on. `AgentSpecDocument`'s
 javadoc lists them all.
 
+**Editor support.** The format is described by a JSON Schema, packaged in the runtime jar as
+`/io/ara/runtime/spec/agent-document.schema.json` (source:
+`ara-runtime/src/main/resources/io/ara/runtime/spec/`). Point a file at a copy of it, or at a
+URL where you host it, with a top-level `"$schema"` field and an editor will complete field names,
+offer the allowed values and flag mistakes as you type; the decoder accepts and ignores that
+field. The schema is the first line of defence, not the only one: rules that depend on two
+fields (a retriever needs a `rag+` strategy; an output schema excludes `nativeJsonSchema`) and
+names that do not exist on your runtime are still caught at import and by `AgentSpecCheck`. A
+test keeps the schema and the decoder in step.
+
 **Defaults and strictness.**
 - A field you leave out takes the `AgentConfig` default, so a hand-written file can be short.
   An export writes every field, so it does not change meaning if a default changes later.

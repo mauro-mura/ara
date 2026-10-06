@@ -33,6 +33,12 @@ import static io.ara.runtime.spec.DocumentFields.stringArray;
  *   "fewShotRefs": [ ... ] }
  * }</pre>
  *
+ * <p><b>An editor can check the file as it is written</b>: the format is described by the JSON Schema
+ * packaged as the classpath resource {@code /io/ara/runtime/spec/agent-document.schema.json}
+ * (also in the source tree under {@code ara-runtime/src/main/resources}); a document may point to
+ * it with a top-level {@code "$schema"} field, which is accepted and ignored here. The schema is
+ * checked against this class by a test, so the two cannot drift apart unnoticed.
+ *
  * <p><b>This is also the extension point for foreign sources.</b> Someone whose agents live
  * in a database with its own schema writes the column-to-field mapping, builds this tree and
  * calls {@link #decode(JsonNode)}; they get type checking, unknown-field detection, version
@@ -85,6 +91,8 @@ public final class AgentSpecDocument {
     public static AgentSpec decode(JsonNode document) {
         Objects.requireNonNull(document, "document must not be null");
         DocumentFields root = new DocumentFields(document, "");
+        // "$schema" is the pointer an editor needs to validate the file; it carries no agent data.
+        root.string("$schema");
         checkVersion(root);
 
         AgentConfig.Builder builder = AgentConfig.defaults();

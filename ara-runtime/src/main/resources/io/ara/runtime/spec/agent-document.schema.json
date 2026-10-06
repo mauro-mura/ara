@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ARA agent document (schemaVersion 1)",
+  "description": "An agent defined in a file. Models, tools and strategies are referred to by name; the file never holds an endpoint or an API key. Fields left out take the library default.",
+  "type": "object",
+  "required": ["schemaVersion", "agent"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string", "description": "Optional pointer to this schema, for editors. Ignored when the document is read." },
+    "schemaVersion": { "const": 1, "description": "Version of this document format." },
+    "agent": {
+      "type": "object",
+      "description": "Who the agent is.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "description": "Agent instance id. Leave out to get a new one at each import; the same id cannot be registered twice in one runtime." },
+        "type": { "type": "string", "pattern": "\\S", "not": { "const": "generic" }, "description": "The capability this agent provides. Required; not blank and not \"generic\"." },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "version": { "type": "string", "description": "Version label of this agent definition (not the document's schemaVersion)." },
+        "tags": { "$ref": "#/$defs/stringList" },
+        "systemPrompt": { "type": "string" },
+        "promptCatalogId": { "type": "string", "description": "Resolve the system prompt from a prompt catalog instead of inlining it." }
+      }
+    },
+    "llm": {
+      "type": "object",
+      "description": "Which model(s) the agent calls.",
+      "additionalProperties": false,
+      "properties": {
+        "primary": { "$ref": "#/$defs/llmProfile" },
+        "fallbacks": { "type": "array", "items": { "$ref": "#/$defs/llmProfile" } },
+        "selectionPolicy": { "enum": ["PRIMARY_ONLY", "FAILOVER", "ROUND_ROBIN"] },
+        "logIo": { "type": "boolean" },
+        "logIoMaxChars": { "type": "integer" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "description": "How a task runs.",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "description": "A strategy name (\"react\", \"rag+react\", ...) or a typed strategy object.",
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "$ref": "#/$defs/strategy" }
+          ]
+        },
+        "tools": { "$ref": "#/$defs/stringList" },
+        "mcpServers": { "$ref": "#/$defs/stringList" },
+        "maxIterations": { "type": "integer", "minimum": 1 },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "maxTokensPerStep": { "type": "integer", "minimum": 1 },
+        "humanApprovalRequired": { "type": "boolean" },
+        "knowledgeBaseId": { "type": "string" },
+        "retrieverId": { "type": "string", "description": "Only valid with a \"rag+...\" strategy." },
+        "sessionBusyPolicy": { "enum": ["REJECT", "ENQUEUE"] },
+        "delegateStateAccess": { "enum": ["SHARED", "OVERLAY"] },
+        "sessionTtl": { "$ref": "#/$defs/duration" },
+        "grantedScopes": { "$ref": "#/$defs/stringList" },
+        "visibleToScopes": { "$ref": "#/$defs/stringList" },
+        "requiredScopes": { "$ref": "#/$defs/stringList" },
+        "requiresApproval": { "type": "boolean" }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "description": "Working memory and conversation.",
+      "additionalProperties": false,
+      "properties": {
+        "workingMemoryTokenBudget": { "type": "integer", "minimum": 0 },
+        "workingMemoryEviction": { "enum": ["drop_oldest", "drop_middle", "summarize"] },
+        "maxConversationTurns": { "type": "integer", "minimum": 0 },
+        "maxReflections": { "type": "integer" },
+        "reflectionPrompt": { "type": "string" },
+        "contextSummarizerAgentId": { "type": "string" }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "description": "Schemas the agent's input and answer must satisfy, by catalog reference.",
+      "additionalProperties": false,
+      "properties": {
+        "inputSchemaRef": { "type": "string" },
+        "outputSchemaRef": { "type": "string", "description": "Cannot be combined with llm.primary.nativeJsonSchema = true." },
+        "outputRepairAttempts": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fewShotRefs": { "$ref": "#/$defs/stringList" }
+  },
+  "$defs": {
+    "stringList": { "type": "array", "items": { "type": "string" } },
+    "duration": {
+      "type": "string",
+      "pattern": "^P(?=\\d|T\\d)(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+(\\.\\d+)?S)?)?$",
+      "description": "ISO-8601 duration such as PT30S, PT5M or P1D."
+    },
+    "money": {
+      "type": "object",
+      "required": ["amount", "currency"],
+      "additionalProperties": false,
+      "properties": {
+        "amount": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$", "description": "A decimal as a string: a JSON number would lose the scale." },
+        "currency": { "type": "string", "minLength": 1 }
+      }
+    },
+    "llmProfile": {
+      "type": "object",
+      "description": "One model: its registered client id, sampling, and prices.",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "description": "Id of a client registered on the runtime. Never an endpoint." },
+        "transportVersion": { "type": "integer" },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "topP": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maxTokens": { "type": "integer" },
+        "streaming": { "type": "boolean" },
+        "nativeJsonSchema": { "type": "boolean" },
+        "costCurrency": { "type": "string", "minLength": 1 },
+        "costInputPer1k": { "$ref": "#/$defs/money" },
+        "costOutputPer1k": { "$ref": "#/$defs/money" },
+        "budget": {
+          "description": "\"unlimited\" or a spend cap.",
+          "oneOf": [
+            { "const": "unlimited" },
+            {
+              "type": "object",
+              "required": ["cap"],
+              "additionalProperties": false,
+              "properties": { "cap": { "$ref": "#/$defs/money" } }
+            }
+          ]
+        }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": { "type": { "const": "react" } }
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "plan_execute" },
+            "replanPolicy": { "enum": ["never", "on_failure"] },
+            "maxPlanSteps": { "type": "integer", "minimum": 1 },
+            "maxStepRoundsPerStep": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "reflexion" },
+            "maxReflections": { "type": "integer", "minimum": 0 },
+            "reflectionPrompt": { "type": "string" },
+            "reflectionProvider": { "type": "string" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "reflact" },
+            "maxReflections": { "type": "integer", "minimum": 0 },
+            "unproductiveStreak": { "type": "integer", "minimum": 1 },
+            "reflectOnToolFailure": { "type": "boolean" },
+            "reflectionProvider": { "type": "string" }
+          }
+        },
+        {
+          "description": "A custom strategy: any other name, with free-form params.",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "type": "string", "minLength": 1, "not": { "enum": ["react", "plan_execute", "reflexion", "reflact"] } },
+            "params": { "type": "object" }
+          }
+        }
+      ]
+    }
+  }
+}
