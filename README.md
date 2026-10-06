@@ -351,6 +351,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `rag/RagAgentExample` | stub | `rag+react` over an `InMemoryDocumentStore`, plus delegation |
 | `failover/FailoverExample` | stub | Failover and circuit breaking across LLM and embedding endpoints |
 | `multimodal/MultimodalInputExample` | **live** | A PDF to Mistral and an image to Ollama, one provider-agnostic method |
+| `spec/AgentFromFileExample` | stub | An agent defined in a JSON file: load it, check the names it refers to, run it, write it back |
 | `scheduler/AgentSchedulerExample` | none | Interval and cron schedules, with pause / resume / trigger |
 | `web/StreamingChatWebExample` | stub / **live** | A chat page on a JDK `HttpServer`, streaming over SSE |
 
@@ -366,7 +367,7 @@ case is covered.
 | 1 | [Quick start](#quick-start--60-seconds-no-api-key) + [Runnable examples](#runnable-examples) | Run your first agent offline, then read the example closest to your goal |
 | 2 | [Tool calling](docs/TOOLS.md) | Give an agent a tool, with parallel dispatch on virtual threads |
 | 3 | [Contracts & processors](docs/CONTRACTS.md) | Validate, sanitise and transform I/O without spending tokens; `PromptShaper`, multimodal input |
-| 4 | [Configuration reference](docs/CONFIGURATION.md) | Every `AgentConfig` and `LlmProfile` field: sessions, concurrency, cancellation, instance context, scheduling |
+| 4 | [Configuration reference](docs/CONFIGURATION.md) | Every `AgentConfig` and `LlmProfile` field: sessions, concurrency, cancellation, instance context, scheduling, and defining an agent in a file |
 | 5 | [RAG & human-in-the-loop](docs/HITL-AND-RAG.md) | Knowledge bases (in-memory or Qdrant), retrieval as a strategy vs. a tool, approval gates and notifiers |
 | 6 | [Providers & resilience](docs/PROVIDERS.md) | Real endpoints (OpenAI / Anthropic / Ollama / Mistral / compatible), failover, circuit breaker, I/O logging, OpenTelemetry |
 | 7 | [Advanced usage](docs/ADVANCED.md) | Custom strategies and extension points |

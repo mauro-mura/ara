@@ -9,6 +9,7 @@
 - [Sessions & concurrency](#sessions--concurrency)
 - [Agent Instance Context](#agent-instance-context--private-per-agent-data)
 - [Agent scheduling](#agent-scheduling)
+- [Agents as documents](#agents-as-documents--define-an-agent-in-a-file)
 
 ---
 
@@ -240,3 +241,84 @@ want several runs of the same agent in flight at once. A dropped tick is not sil
 `skipped: previous run of this schedule is still in flight`, so it can be told apart from a
 genuine agent failure. `triggerNow` is an explicit request rather than a tick and always
 dispatches, since the caller is holding the returned future.
+
+---
+
+## Agents as documents — define an agent in a file
+
+An agent can be defined in a file instead of Java. The file is an *agent document*: a tree
+that maps one-to-one onto `AgentConfig` (plus the few-shot and schema references of an
+`AgentSpec`), read and written through `io.ara.runtime.spec`.
+
+```java
+AgentSpecFormats formats = AgentSpecFormats.defaults();      // JSON built in
+AgentSpec spec = formats.read(Path.of("triage.json"));        // format chosen by extension
+
+List<String> problems = AgentSpecCheck.problems(spec, runtime); // optional, see below
+AraAgent agent = runtime.createAgent(spec.config());
+
+formats.write(spec, Path.of("triage-export.json"));           // and back out
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "agent": { "type": "support-triage", "name": "Triage", "systemPrompt": "Classify the request." },
+  "llm": { "primary": { "model": "main", "temperature": 0.0 } },
+  "execution": { "strategy": { "type": "plan_execute", "maxPlanSteps": 6 },
+                 "tools": ["search_documents"], "maxIterations": 6, "timeout": "PT5M" },
+  "contract": { "outputSchemaRef": "triage-v1", "outputRepairAttempts": 2 }
+}
+```
+
+A runnable version is `spec/AgentFromFileExample`.
+
+**Sections.** `agent` (identity; `type` is the only required field and may not be blank or
+`"generic"`), `llm`, `execution`, `memory`, `contract` (input/output schema references and
+repair attempts) and `fewShotRefs`. The field names follow the tables above: `execution.tools`
+is `enabledTools`, `execution.timeout` is `executionTimeout`, and so on. `AgentSpecDocument`'s
+javadoc lists them all.
+
+**Defaults and strictness.**
+- A field you leave out takes the `AgentConfig` default, so a hand-written file can be short.
+  An export writes every field, so it does not change meaning if a default changes later.
+- Types are strict, with no coercion: `"5"` is not an integer, `1` is not `true`.
+- An unknown field is an error, with its path (`execution.maxIteration`): a typo never becomes
+  a silent default.
+- `schemaVersion` is required. A reader rejects a version newer than it knows.
+- Durations are ISO-8601 (`"PT5M"`), money is an object with the amount **as a string**
+  (`{"amount": "0.002", "currency": "EUR"}`, because a JSON number would lose the scale), a
+  budget is `"unlimited"` or `{"cap": {...}}`, enums are their names.
+- `strategy` is a name (`"rag+react"`) or an object (`{"type": "plan_execute", ...}`). An
+  object whose `type` is none of the built-in names is a custom strategy with free-form `params`.
+
+**Models and tools are names.** `llm.primary.model` is the id of a client registered on the
+runtime, never an endpoint, so an API key cannot be written in a file. A profile that carries
+an inline transport (`baseUrl`/`modelName`/`apiKey`) cannot be exported, and trying fails
+with a message saying so.
+
+**Check the names.** `createAgent` is lenient about two kinds of typo: an unknown tool id is
+skipped silently (the agent runs without the tool), and an unknown model id falls back to the
+runtime's default client (the agent runs on *another model*). `AgentSpecCheck.problems`
+reports both. It is opt-in, because making `createAgent` strict would change behaviour for
+every caller that builds configs in Java.
+
+**What a document is not.**
+- It is a *definition*: an import always yields a fresh root spec, and an export drops the
+  lineage (derivation and status). Anything that must keep a lineage uses the meta-agent's
+  own codec.
+- It can carry authority: `grantedScopes`, `requiredScopes`, `humanApprovalRequired`,
+  `requiresApproval`. Decoding does not decide who may import it, exactly as for a config
+  built in Java; treat a document with the trust of a configuration file an operator wrote.
+- `agent.id` is exported. Importing the same file twice into one runtime fails (ids are
+  unique); remove `id` from the file to get a new instance each time.
+
+**More formats.** A format is an `AgentSpecFormat`: it turns bytes into the document tree and
+back, and nothing else (it can be binary). Register it with
+`AgentSpecFormats.defaults().with(new MyFormat())`; the agent mapping is not repeated per format.
+
+**Agents that live in another system** (a database with its own schema, say) are imported by
+mapping their columns onto a document tree and calling `AgentSpecDocument.decode(JsonNode)`:
+you get the type checking, unknown-field detection and error paths without touching
+`AgentConfig`'s constructors. Because that makes the field names a contract, any incompatible
+change to the document increments `AgentSpecDocument.SCHEMA_VERSION`.
