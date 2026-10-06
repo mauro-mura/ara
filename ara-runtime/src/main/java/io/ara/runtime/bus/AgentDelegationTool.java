@@ -230,12 +230,33 @@ public final class AgentDelegationTool implements AraTool {
      * to interceptors ({@code onDelegate}/{@code onDelegateReturn}) with the recipient
      * and sub-task already extracted, instead of re-implementing this parsing itself.
      *
-     * @throws RuntimeException if {@code argumentJson} is not a valid {@code
-     *         {"agent_id":...,"task":...}} payload
+     * @throws IllegalArgumentException if {@code argumentJson} is not a valid {@code
+     *         {"agent_id":...,"task":...}} payload — the message names the missing or
+     *         malformed field explicitly, so the caller (typically the ReAct loop feeding
+     *         the failure back to the LLM as an observation) can self-correct on the next
+     *         iteration without a raw NPE like {@code Cannot invoke "...JsonNode.asText()"}
+     *         (which is what a bare {@code get(...).asText()} chain produced when the
+     *         model omitted {@code task}, e.g. after an output-token truncation).
      */
     public static DelegationRequest parseDelegation(String argumentJson) {
         JsonNode args = uncheckedReadTree(argumentJson);
-        return new DelegationRequest(args.get("agent_id").asText(), args.get("task").asText());
+        if (args == null || !args.isObject()) {
+            throw new IllegalArgumentException(
+                    "arguments must be a JSON object with 'agent_id' and 'task' fields");
+        }
+        return new DelegationRequest(
+                requiredTextField(args, "agent_id"),
+                requiredTextField(args, "task"));
+    }
+
+    /** Reads a required, non-blank textual field, naming it in the error when absent. */
+    private static String requiredTextField(JsonNode args, String field) {
+        JsonNode value = args.get(field);
+        if (value == null || !value.isTextual() || value.asText().isBlank()) {
+            throw new IllegalArgumentException(
+                    "missing required text field '" + field + "' in delegate_task arguments");
+        }
+        return value.asText();
     }
 
     private static JsonNode uncheckedReadTree(String argumentJson) {
