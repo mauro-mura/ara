@@ -1104,8 +1104,17 @@ final class ReactExecutionSupport {
         CountDownLatch         latch = new CountDownLatch(1);
         AtomicReference<Throwable> err = new AtomicReference<>();
         AtomicReference<Flow.Subscription> subscription = new AtomicReference<>();
+        // Filled by the adapter's terminal callback when the client supports the
+        // completion sink (LlmCallContext.withCompletionSink): lets a stream that
+        // produced only tool calls (no text tokens) be reused below instead of
+        // re-issuing the whole call in blocking mode. Attached via a context copy so
+        // the caller's context object stays untouched.
+        AtomicReference<LlmCompletion> streamedCompletion = new AtomicReference<>();
+        LlmCallContext streamCtx = ctx.hasCompletionSink()
+                ? ctx
+                : ctx.withCompletionSink(streamedCompletion::set);
 
-        llm.stream(messages, ctx).subscribe(new Flow.Subscriber<>() {
+        llm.stream(messages, streamCtx).subscribe(new Flow.Subscriber<>() {
             @Override
             public void onSubscribe(Flow.Subscription s) {
                 subscription.set(s);
@@ -1150,17 +1159,26 @@ final class ReactExecutionSupport {
 
         String text = buf.toString();
 
-        // When the stream emits blank text the underlying client used the blocking
-        // complete() fallback (LlmClient.super.stream) but only forwarded .text(),
-        // silently dropping a native tool-call response. Fall back to complete() so
-        // the caller receives the full LlmCompletion with tool-call metadata intact.
+        // When the stream emits blank text there are two possibilities: an adapter without
+        // sink support used the blocking complete() fallback (LlmClient.super.stream) and
+        // only forwarded .text() — dropping a native tool-call response — or an adapter WITH
+        // sink support streamed a response that carried only tool calls (GLM-style native
+        // tool-call deltas, no text), whose terminal completion is now in the sink.
+        // In the second case the result is already in hand: reuse it instead of re-issuing
+        // the whole call in blocking mode (a full duplicate generation in tokens and
+        // latency, observed with glm-5.3-flash). Only when the sink stayed empty does the
+        // blocking retry of completeWithRetry run, exactly as before.
         //
-        // P0/U4, 2026-09-22: routed through completeWithRetry — bounded by the same
-        // `deadline` the stream itself was bounded by (whatever is left of it, not a fresh
-        // window) and with the same interrupt-watchdog and retryable-failure handling every
-        // other blocking LLM call in this class gets — instead of a raw llm.complete(...)
-        // with neither.
+        // P0/U4, 2026-09-22: the retry is routed through completeWithRetry — bounded by the
+        // same `deadline` the stream itself was bounded by (whatever is left of it, not a
+        // fresh window) and with the same interrupt-watchdog and retryable-failure handling
+        // every other blocking LLM call in this class gets.
         if (text.isBlank()) {
+            LlmCompletion streamed = streamedCompletion.get();
+            if (streamed != null && streamed.hasToolCall()) {
+                log.debug("Stream carried no text but a tool-call completion was captured — reusing it, no blocking retry");
+                return streamed;
+            }
             log.debug("Stream returned blank text — retrying with blocking complete() to recover tool-call metadata");
             return completeWithRetry(llm, messages, ctx, deadline, config, task.taskId());
         }

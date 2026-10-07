@@ -56,6 +56,13 @@ class TokenStreamPublisherTest {
                 .subscribe(subscriber);
     }
 
+    private static dev.langchain4j.model.chat.response.ChatResponse response(String modelName) {
+        return dev.langchain4j.model.chat.response.ChatResponse.builder()
+                .aiMessage(dev.langchain4j.data.message.AiMessage.from("done"))
+                .modelName(modelName)
+                .build();
+    }
+
     private static LlmException asLlmException(Throwable t) {
         return LlmException.networkError("test-provider", t.getMessage(), t);
     }
@@ -148,5 +155,84 @@ class TokenStreamPublisherTest {
         // runtime's streamAndCollect does) would otherwise wait for one that never comes.
         assertInstanceOf(LlmException.class, failing.error);
         assertTrue(failing.error.getMessage().contains("could not build the request"));
+    }
+
+    // ── Completion sink ───────────────────────────────────────────────────────
+
+    @Test
+    void publishesTheTerminalResponseIntoTheSinkBeforeCompleting() {
+        AtomicReference<dev.langchain4j.model.chat.response.ChatResponse> sink = new AtomicReference<>();
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException, sink::set)
+                .subscribe(sub);
+
+        provider().onPartialResponse("text");
+        assertNull(sink.get(), "nothing may reach the sink before the terminal response");
+        provider().onCompleteResponse(response("final-response"));
+
+        assertEquals("final-response", sink.get().metadata().modelName(), "the terminal response must be in the sink when onComplete fires");
+        assertTrue(sub.completed);
+    }
+
+    @Test
+    void sinklessOverloadKeepsWorkingWithNoSink() {
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException).subscribe(sub);
+
+        provider().onCompleteResponse(response(null));
+
+        assertTrue(sub.completed);
+    }
+
+    @Test
+    void doesNotPublishIntoTheSinkAfterCancel() {
+        AtomicReference<dev.langchain4j.model.chat.response.ChatResponse> sink = new AtomicReference<>();
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException, sink::set)
+                .subscribe(sub);
+
+        sub.subscription.cancel();
+        provider().onCompleteResponse(response("late"));
+
+        assertNull(sink.get());
+        assertFalse(sub.completed);
+    }
+
+    @Test
+    void doesNotPublishIntoTheSinkOnError() {
+        AtomicReference<dev.langchain4j.model.chat.response.ChatResponse> sink = new AtomicReference<>();
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException, sink::set)
+                .subscribe(sub);
+
+        provider().onError(new RuntimeException("boom"));
+
+        assertNull(sink.get());
+        assertNotNull(sub.error);
+    }
+
+    @Test
+    void aThrowingSinkDoesNotPreventCompletion() {
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException,
+                r -> { throw new IllegalStateException("sink bug"); }).subscribe(sub);
+
+        provider().onCompleteResponse(response("final-response"));
+
+        assertTrue(sub.completed, "a sink failure is caller-side bookkeeping, not a stream failure");
+    }
+
+    @Test
+    void nullTerminalResponseIsNotPublishedIntoTheSink() {
+        AtomicReference<dev.langchain4j.model.chat.response.ChatResponse> sink = new AtomicReference<>();
+        sink.set(response("sentinel"));
+        RecordingSubscriber sub = new RecordingSubscriber();
+        TokenStreamPublisher.of(handler::set, TokenStreamPublisherTest::asLlmException, sink::set)
+                .subscribe(sub);
+
+        provider().onCompleteResponse(null);
+
+        assertEquals("sentinel", sink.get().metadata().modelName());
+        assertTrue(sub.completed);
     }
 }

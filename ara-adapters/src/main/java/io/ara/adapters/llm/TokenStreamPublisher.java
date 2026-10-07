@@ -55,6 +55,28 @@ public final class TokenStreamPublisher {
     public static Flow.Publisher<String> of(
             Consumer<StreamingChatResponseHandler> startStreaming,
             Function<Throwable, LlmException> errorMapper) {
+        return of(startStreaming, errorMapper, null);
+    }
+
+    /**
+     * As {@link #of(Consumer, Function)}, publishing the terminal {@link ChatResponse}
+     * through {@code completionSink} too when non-null.
+     *
+     * <p>The publisher's element type is a text token, so a streaming response that carries
+     * tool calls (native tool-call deltas) but no text reaches the subscriber as an empty
+     * token sequence and the metadata would be lost. The sink lets the caller recover the
+     * terminal response — tool calls and token usage included — instead of having to re-issue
+     * the whole call in blocking mode. Called at most once, before {@code onComplete};
+     * never called on error or cancellation. The sink runs on the provider's callback
+     * thread, before the terminal signal, so a consumer waiting on the completion signal
+     * sees it filled.
+     *
+     * @param completionSink receives the terminal {@link ChatResponse}; may be {@code null}
+     */
+    public static Flow.Publisher<String> of(
+            Consumer<StreamingChatResponseHandler> startStreaming,
+            Function<Throwable, LlmException> errorMapper,
+            Consumer<ChatResponse> completionSink) {
 
         return subscriber -> {
             // One flag for "cancelled" and "already terminated": both mean nothing more may be
@@ -74,7 +96,23 @@ public final class TokenStreamPublisher {
                 }
                 @Override
                 public void onCompleteResponse(ChatResponse response) {
-                    if (stopped.compareAndSet(false, true)) subscriber.onComplete();
+                    if (stopped.compareAndSet(false, true)) {
+                        if (completionSink != null && response != null) {
+                            try {
+                                completionSink.accept(response);
+                            } catch (RuntimeException e) {
+                                // A throwing sink must not mask the completion itself: the
+                                // subscriber still gets its terminal signal either way.
+                                // Logged rather than propagated — the stream is done, and a
+                                // sink failure is a caller-side bookkeeping bug, not a
+                                // provider failure.
+                                // (See ReactExecutionSupport.streamAndCollect, the only
+                                // production consumer: it reads the sink only to decide
+                                // whether to skip a redundant blocking retry.)
+                            }
+                        }
+                        subscriber.onComplete();
+                    }
                 }
                 @Override
                 public void onError(Throwable error) {

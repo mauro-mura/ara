@@ -116,6 +116,19 @@ public final class LlmCallContext {
     private final String sessionId;   // nullable
 
     /**
+     * Optional sink the streaming path can use to hand the caller the terminal {@link
+     * LlmCompletion} alongside the token stream. A {@code Publisher<String>} can carry
+     * only text tokens, so a streaming response that contains tool calls (native tool-call
+     * deltas) but no text reaches the subscriber as an empty token sequence and the
+     * metadata is lost — the caller then has no way to know the stream actually produced
+     * one. When this sink is non-null an adapter that supports it fills it from its
+     * terminal response; the caller reads it instead of re-issuing the whole call in
+     * blocking mode. {@code null} (the default) means "not interested": adapters skip it
+     * and behaviour is exactly as before.
+     */
+    private final java.util.function.Consumer<LlmCompletion> completionSink;   // nullable
+
+    /**
      * Cheap replay of {@code source}'s fields that replaces only the media resolver.
      *
      * <p>Unlike {@link #toBuilder()}{@code +build()} — which rebuilds and re-{@code
@@ -143,6 +156,7 @@ public final class LlmCallContext {
         this.resolvedTools       = source.resolvedTools;
         this.mediaResolver       = mediaResolver;
         this.sessionId           = source.sessionId;
+        this.completionSink      = source.completionSink;
     }
 
     private LlmCallContext(Builder b) {
@@ -164,6 +178,7 @@ public final class LlmCallContext {
         this.resolvedTools       = b.resolvedTools != null ? List.copyOf(b.resolvedTools) : null;
         this.mediaResolver       = b.mediaResolver != null ? b.mediaResolver : MediaResolver.none();
         this.sessionId           = b.sessionId;
+        this.completionSink      = b.completionSink;
     }
 
     /**
@@ -262,6 +277,10 @@ public final class LlmCallContext {
     public String  sessionId()                { return sessionId; }
     public boolean hasSessionId()             { return sessionId != null; }
 
+    /** The streaming completion sink, or {@code null} when the caller did not ask for one. */
+    public java.util.function.Consumer<LlmCompletion> completionSink() { return completionSink; }
+    public boolean hasCompletionSink()        { return completionSink != null; }
+
     // ── with*() methods ───────────────────────────────────────────────────────
 
     public LlmCallContext withOutputSchema(String schema, String name, boolean strict) {
@@ -292,6 +311,15 @@ public final class LlmCallContext {
         return new LlmCallContext(this, resolver != null ? resolver : MediaResolver.none());
     }
 
+    /**
+     * Attaches (or removes, with {@code null}) the streaming completion sink — see the
+     * field javadoc. Adapters that support it publish their terminal completion into it;
+     * adapters that do not simply never call it.
+     */
+    public LlmCallContext withCompletionSink(java.util.function.Consumer<LlmCompletion> sink) {
+        return toBuilder().completionSink(sink).build();
+    }
+
     private Builder toBuilder() {
         Builder b = new Builder();
         b.agentId             = this.agentId;
@@ -312,6 +340,7 @@ public final class LlmCallContext {
         b.resolvedTools       = this.resolvedTools != null ? new ArrayList<>(this.resolvedTools) : null;
         b.mediaResolver       = this.mediaResolver;
         b.sessionId           = this.sessionId;
+        b.completionSink      = this.completionSink;
         return b;
     }
 
@@ -334,6 +363,7 @@ public final class LlmCallContext {
         private List<AraTool> resolvedTools;
         private MediaResolver mediaResolver;
         private String       sessionId;
+        private java.util.function.Consumer<LlmCompletion> completionSink;
 
         public Builder agentId(String v)             { this.agentId = v;             return this; }
         public Builder agentType(String v)           { this.agentType = v;           return this; }
@@ -353,6 +383,7 @@ public final class LlmCallContext {
         public Builder resolvedTools(List<AraTool> v) { this.resolvedTools = v;       return this; }
         public Builder mediaResolver(MediaResolver v) { this.mediaResolver = v;       return this; }
         public Builder sessionId(String v)            { this.sessionId = v;           return this; }
+        public Builder completionSink(java.util.function.Consumer<LlmCompletion> v) { this.completionSink = v; return this; }
 
         public LlmCallContext build() { return new LlmCallContext(this); }
     }

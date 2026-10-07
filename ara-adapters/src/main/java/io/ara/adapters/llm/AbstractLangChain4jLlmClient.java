@@ -98,9 +98,17 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
 
     @Override
     public Flow.Publisher<String> stream(List<LlmMessage> messages, LlmCallContext context) {
+        // Hand the terminal ChatResponse to a caller-provided sink when the context asks
+        // for one (see LlmCallContext.withCompletionSink): a streaming response that is
+        // all tool calls carries no text tokens, so the sink is the only way the caller
+        // can see what the stream actually produced without re-issuing the call in
+        // blocking mode. Adapters not backed by this base class ignore the sink.
         return TokenStreamPublisher.of(
                 handler -> streamChat(newChatRequest(messages, context).build(), handler),
-                this::mapException);
+                this::mapException,
+                context != null && context.hasCompletionSink()
+                        ? response -> context.completionSink().accept(toLlmCompletion(response))
+                        : null);
     }
 
     /**
