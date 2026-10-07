@@ -17,7 +17,6 @@ ARA — Agent Runtime Architecture: a Java 21 framework for autonomous agents an
 
 - `ara-core` is interface-first (e.g. `AraAgent`, `LlmClient`, `ToolRegistry`, `AgentContract`) and depends only on jackson-databind. The whole build is deliberately free of reflection, annotation magic, Kotlin and Spring — keep new code that way. New `ara-core` types should be plain interfaces/records with no behavior.
 - `AraRuntime` (`ara-runtime/AraRuntime.java`) is the runtime entry point: it wires strategies, tool registry, memory, scheduler, telemetry, HITL gate. Everything is registered by name via `AraRuntime.Builder`.
-- `ara-gateway` (the Javalin HTTP layer) is NOT part of this repo or build — nothing here may depend on it.
 - Execution strategies are plugins (`Builder.extraStrategies(...)`). A `plannerStrategy` name typo now fails *loud* at first task execution with `IllegalStateException` listing the registered names (no more silent `"react"` fallback). `StrategyConfig` is sealed in `ara-core` (no new variants outside it); `ReactExecutionSupport` is package-private.
 - The commented-out "Agent graph" section in `README.md` describes a module that does not exist yet — don't build against it.
 
