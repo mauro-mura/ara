@@ -107,6 +107,8 @@ final class WorkflowStrategy implements ExecutionStrategy {
                     && finished.outcome() instanceof NodeOutcome.Completed completed) {
                 iteration++;
                 output = completed.content();
+                // A workflow node's completion is not a tool result — no toolId, no success
+                // flag: the text-only factory keeps those fields null.
                 RunEvents.record(task, steps, ExecutionStep.observation(
                         finished.nodeId() + "#" + finished.occurrence() + ": " + completed.content(), iteration));
             }

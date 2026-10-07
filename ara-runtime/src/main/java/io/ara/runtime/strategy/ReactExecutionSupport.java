@@ -774,7 +774,7 @@ final class ReactExecutionSupport {
         } else {
             ctx.memory().appendToWorkingMemory("user", "Observation: " + observation);
         }
-        RunEvents.record(ctx.task(), ctx.steps(), ExecutionStep.observation(observation, ctx.iteration()));
+        RunEvents.record(ctx.task(), ctx.steps(), ExecutionStep.observation(result, ctx.iteration()));
         return !result.success();
     }
 

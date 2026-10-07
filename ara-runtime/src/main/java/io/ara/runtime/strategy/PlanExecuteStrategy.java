@@ -494,7 +494,7 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         String observation = result.success()
                 ? result.output()
                 : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
-        tally.record(ExecutionStep.observation(observation, tally.iterations));
+        tally.record(ExecutionStep.observation(result, tally.iterations));
 
         if (callId != null && !callId.isBlank()) {
             // Native reconstruction — mirrors ReactStrategy's dispatch: pairs with
