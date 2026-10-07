@@ -111,6 +111,9 @@ class AgentSpecSchemaTest {
             Map.entry("string for an integer", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"maxIterations\":\"5\"}}"),
             Map.entry("zero iterations", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"maxIterations\":0}}"),
             Map.entry("a future schema version", "{\"schemaVersion\":2,\"agent\":{\"type\":\"a\"}}"),
+            Map.entry("a bad reasoning effort", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"llm\":{\"primary\":{\"reasoning\":{\"effort\":\"EXTREME\"}}}}"),
+            Map.entry("a zero thinking budget", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"llm\":{\"primary\":{\"reasoning\":{\"thinkingBudgetTokens\":0}}}}"),
+            Map.entry("an unknown reasoning field", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"llm\":{\"primary\":{\"reasoning\":{\"depth\":3}}}}"),
             Map.entry("no schema version", "{\"agent\":{\"type\":\"a\"}}"),
             Map.entry("no agent", "{\"schemaVersion\":1}"),
             Map.entry("no agent type", "{\"schemaVersion\":1,\"agent\":{}}"),
@@ -208,6 +211,7 @@ class AgentSpecSchemaTest {
                 .temperature(0.5).topP(0.7).maxTokens(256).costCurrency("USD")
                 .costBudget(Budget.limited(Money.of("1", "USD")))
                 .costInputPer1kTokens(Money.of("0.001", "USD")).costOutputPer1kTokens(Money.of("0.002", "USD"))
+                .reasoningEffort(io.ara.core.llm.ReasoningEffort.LOW).thinkingBudgetTokens(256).returnReasoning(false)
                 .build();
         corpus.add(AgentSpec.root(AgentConfig.defaults().agentType("a").fallbackLlms(List.of(richFallback)).build()));
         return corpus;

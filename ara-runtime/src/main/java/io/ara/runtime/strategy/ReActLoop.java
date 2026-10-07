@@ -165,7 +165,7 @@ abstract class ReActLoop {
                 return runBudgetExceeded;
             }
 
-            ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task);
+            ReactExecutionSupport.recordAssistantOutput(memory, steps, completion, output, iterations, task, config);
             if (logIterations()) {
                 ReactExecutionSupport.logIterationResult(completion, iterations, config.maxIterations(), task.taskId());
             }

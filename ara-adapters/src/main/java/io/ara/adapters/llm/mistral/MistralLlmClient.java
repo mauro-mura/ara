@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.util.Set;
 
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.mistralai.MistralAiChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.mistralai.MistralAiChatModel;
@@ -134,6 +136,18 @@ public class MistralLlmClient extends AbstractLangChain4jLlmClient {
                 .logResponses(s.logResponses())
                 .maxRetries(0)
                 .build();
+    }
+
+    /** Mistral can only return the reasoning; it has neither an effort level nor a budget to set. */
+    @Override
+    protected ChatRequestParameters reasoningParameters(LlmCallContext context) {
+        if (context.reasoningEffort() != null) {
+            throw unsupportedReasoningOption("reasoningEffort", "Mistral has no effort level for reasoning");
+        }
+        if (context.thinkingBudgetTokens() != null) {
+            throw unsupportedReasoningOption("thinkingBudgetTokens", "Mistral has no thinking budget");
+        }
+        return MistralAiChatRequestParameters.builder().returnThinking(true).build();
     }
 
     @Override

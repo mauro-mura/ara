@@ -35,7 +35,7 @@ import java.time.Duration;
  * ceremony that keeps a client constructor one expression away from the values.
  *
  * <h2>Defaults</h2>
- * <p>Field defaults are the OpenAI/Mistral profile ({@code temperature 0.7}, {@code 2000}
+ * <p>Field defaults are the OpenAI/Mistral profile ({@code temperature 0.0}, {@code 2000}
  * max tokens, {@code 60s} timeout). Adapters that disagree reset the field in their own
  * constructor (Anthropic: {@code 4096} max tokens) rather than duplicating the whole
  * setter block — a one-line override reads more honestly than a shared knobs object holding
@@ -54,8 +54,8 @@ public abstract class AbstractLlmClientBuilder<B extends AbstractLlmClientBuilde
     protected String baseUrl;
     /** Model identifier. Null until set, or given a catalogue default by a subclass constructor. */
     protected String modelName;
-    /** Sampling temperature. Defaults to {@code 0.7}. */
-    protected Double temperature = 0.7;
+    /** Sampling temperature. Defaults to {@code 0.0}. */
+    protected Double temperature = 0.0;
     /** Maximum output tokens. Defaults to {@code 2000}. */
     protected Integer maxTokens = 2000;
     /** HTTP request timeout. Defaults to {@code 60s}. */
@@ -112,8 +112,17 @@ public abstract class AbstractLlmClientBuilder<B extends AbstractLlmClientBuilde
     /** Sets the model by string ID (for non-catalogued or preview models). */
     public B modelName(String modelName) { this.modelName = modelName; return self(); }
 
-    /** Sampling temperature. Defaults to {@code 0.7}. */
+    /** Sampling temperature. Defaults to {@code 0.0}. */
     public B temperature(double t)       { this.temperature = t;   return self(); }
+
+    /**
+     * Builds the client with no temperature at all, so none is sent and the provider applies its
+     * own. This is not the same as {@code temperature(0.0)}: a model that reasons may accept only
+     * an unset temperature (Anthropic with thinking enabled accepts unset or 1.0), and a
+     * client-level value cannot be removed per call, so a client meant for such a model must be
+     * built this way.
+     */
+    public B withoutTemperature()        { this.temperature = null; return self(); }
 
     /** Maximum output tokens. Defaults to {@code 2000}. */
     public B maxTokens(int maxTokens)    { this.maxTokens = maxTokens; return self(); }

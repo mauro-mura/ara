@@ -59,6 +59,9 @@ the shorthand) carries the per-model settings:
 | `nativeJsonSchema` | `false` | Use the provider's native structured-output / JSON-schema mode |
 | `costInputPer1kTokens` / `costOutputPer1kTokens` (`Money`) | `Money.zero("EUR")` | Unit prices used for cost accounting |
 | `costBudget` (`Budget`) | `Budget.unlimited()` | Spending cap for the agent, denominated in `costCurrency` (defaults to `"EUR"`) |
+| `reasoningEffort` | `null` | `LOW` / `MEDIUM` / `HIGH`, sent as `reasoning_effort` (OpenAI adapter only; other adapters reject it). **Limit:** a compatible server may accept it and ignore it, and nothing in the response says so — LM Studio with gpt-oss-20b did. For gpt-oss the model's own dial is a line `Reasoning: low\|medium\|high` in the system prompt, which this option does not set |
+| `thinkingBudgetTokens` | `null` | Cap on tokens spent thinking (Anthropic adapter only; other adapters reject it) |
+| `returnReasoning` | `null` | Record the model's reasoning as `REASONING` steps where the provider returns it. Off unless `true`; the gateway sends it only with `?reasoning=true` |
 
 ## Execution — how tasks run
 

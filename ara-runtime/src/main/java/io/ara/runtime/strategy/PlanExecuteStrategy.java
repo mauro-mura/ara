@@ -242,6 +242,9 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                     plan.size(), maxPlanSteps, maxPlanSteps);
             plan = new ArrayList<>(plan.subList(0, maxPlanSteps));
         }
+        if (ReactExecutionSupport.shouldRecordReasoning(config, planCompletion)) {
+            tally.record(ExecutionStep.reasoning(planCompletion.reasoning(), tally.iterations));
+        }
         tally.record(ExecutionStep.thought(
                 planCompletion.text() != null ? planCompletion.text() : "", tally.iterations));
         log.debug("Plan ({} steps) for task [{}]: {}", plan.size(), task.taskId(), plan);
@@ -440,6 +443,9 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
             }
 
             // No tool call — capture the text as a result candidate
+            if (ReactExecutionSupport.shouldRecordReasoning(run.config(), completion)) {
+                tally.record(ExecutionStep.reasoning(completion.reasoning(), tally.iterations));
+            }
             if (!text.isBlank()) {
                 lastResult = text;
                 tally.record(ExecutionStep.thought(text, tally.iterations));

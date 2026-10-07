@@ -51,7 +51,10 @@ public record LlmProfile(
         boolean      nativeJsonSchema,
         Money        costInputPer1kTokens,
         Money        costOutputPer1kTokens,
-        Long         pinnedTransportVersion
+        Long         pinnedTransportVersion,
+        ReasoningEffort reasoningEffort,
+        Integer      thinkingBudgetTokens,
+        Boolean      returnReasoning
 ) {
     public LlmProfile {
         Objects.requireNonNull(transportId, "transportId must not be null");
@@ -59,6 +62,8 @@ public record LlmProfile(
             throw new IllegalArgumentException("temperature must be in [0.0, 2.0]");
         if (topP != null && (topP < 0.0 || topP > 1.0))
             throw new IllegalArgumentException("topP must be in [0.0, 1.0]");
+        if (thinkingBudgetTokens != null && thinkingBudgetTokens < 1)
+            throw new IllegalArgumentException("thinkingBudgetTokens must be >= 1, got: " + thinkingBudgetTokens);
         Objects.requireNonNull(costInputPer1kTokens, "costInputPer1kTokens must not be null");
         Objects.requireNonNull(costOutputPer1kTokens, "costOutputPer1kTokens must not be null");
         Objects.requireNonNull(costBudget, "costBudget must not be null");
@@ -81,6 +86,49 @@ public record LlmProfile(
      * @deprecated kept only as the pre-ADR-039 name for {@link #transportId()}; both
      *             accessors return the same value.
      */
+    /**
+     * The shape before the reasoning options, kept so every existing direct {@code new LlmProfile(...)}
+     * keeps compiling, with the three options unset ({@code null}: "do not mention reasoning to the
+     * provider").
+     */
+    public LlmProfile(String transportId, LlmTransport inlineTransport, Double temperature, Double topP,
+                      Integer maxTokens, Budget costBudget, String costCurrency, boolean streamingEnabled,
+                      boolean nativeJsonSchema, Money costInputPer1kTokens, Money costOutputPer1kTokens,
+                      Long pinnedTransportVersion) {
+        this(transportId, inlineTransport, temperature, topP, maxTokens, costBudget, costCurrency,
+                streamingEnabled, nativeJsonSchema, costInputPer1kTokens, costOutputPer1kTokens,
+                pinnedTransportVersion, null, null, null);
+    }
+
+    /**
+     * A builder pre-filled with every field of this profile, so a copy that changes one thing keeps the
+     * rest. Copying a profile field by field with the constructor silently drops any field added later
+     * (that is how a new option would have been lost on every mutation of the evolution cycle).
+     */
+    public Builder toBuilder() {
+        Builder b = new Builder();
+        b.transportId = transportId;
+        b.temperature = temperature;
+        b.topP = topP;
+        b.maxTokens = maxTokens;
+        b.costBudget = costBudget;
+        b.costCurrency = costCurrency;
+        if (inlineTransport != null) {
+            b.baseUrl = inlineTransport.baseUrl();
+            b.apiKey = inlineTransport.apiKey();
+            b.modelName = inlineTransport.modelName();
+        }
+        b.streamingEnabled = streamingEnabled;
+        b.nativeJsonSchema = nativeJsonSchema;
+        b.costInputPer1kTokens = costInputPer1kTokens;
+        b.costOutputPer1kTokens = costOutputPer1kTokens;
+        b.pinnedTransportVersion = pinnedTransportVersion;
+        b.reasoningEffort = reasoningEffort;
+        b.thinkingBudgetTokens = thinkingBudgetTokens;
+        b.returnReasoning = returnReasoning;
+        return b;
+    }
+
     @Deprecated(forRemoval = false)
     public String modelId() { return transportId; }
 
@@ -105,6 +153,9 @@ public record LlmProfile(
         private Money        costInputPer1kTokens    = Money.zero("EUR");
         private Money        costOutputPer1kTokens   = Money.zero("EUR");
         private Long         pinnedTransportVersion  = null;
+        private ReasoningEffort reasoningEffort     = null;
+        private Integer      thinkingBudgetTokens    = null;
+        private Boolean      returnReasoning         = null;
 
         private Builder() {}
 
@@ -150,6 +201,26 @@ public record LlmProfile(
          */
         public Builder pinnedTransportVersion(Long v)     { this.pinnedTransportVersion = v;   return this; }
 
+        /**
+         * How hard the model is asked to reason; {@code null} (the default) says nothing to the
+         * provider. Applied only by providers that have such a dial (OpenAI); the others reject it.
+         */
+        public Builder reasoningEffort(ReasoningEffort v) { this.reasoningEffort = v;          return this; }
+
+        /**
+         * A cap on the tokens the model may spend thinking; {@code null} says nothing to the
+         * provider. Applied only by providers that take a budget (Anthropic); the others reject it.
+         */
+        public Builder thinkingBudgetTokens(Integer v)    { this.thinkingBudgetTokens = v;     return this; }
+
+        /**
+         * Whether the model's reasoning, where the provider returns it, is recorded as
+         * {@code REASONING} steps. {@code null} and {@code false} both leave it out; it is
+         * {@code Boolean}, not {@code boolean}, so that an agent that never mentions it keeps the
+         * content hash it had before this option existed.
+         */
+        public Builder returnReasoning(Boolean v)         { this.returnReasoning = v;          return this; }
+
         public LlmProfile build() {
             LlmTransport inline = (baseUrl != null && !baseUrl.isBlank() && modelName != null && !modelName.isBlank())
                     ? new LlmTransport(baseUrl, apiKey, modelName)
@@ -157,7 +228,8 @@ public record LlmProfile(
             return new LlmProfile(transportId, inline, temperature, topP,
                     maxTokens, costBudget, costCurrency,
                     streamingEnabled, nativeJsonSchema,
-                    costInputPer1kTokens, costOutputPer1kTokens, pinnedTransportVersion);
+                    costInputPer1kTokens, costOutputPer1kTokens, pinnedTransportVersion,
+                    reasoningEffort, thinkingBudgetTokens, returnReasoning);
         }
     }
 }

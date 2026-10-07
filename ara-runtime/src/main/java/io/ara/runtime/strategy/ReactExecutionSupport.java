@@ -946,9 +946,19 @@ final class ReactExecutionSupport {
      * carrying all of them), a single native tool call (kept as structured metadata for
      * reconstruction), or plain text.
      */
+    /**
+     * Whether {@code completion}'s reasoning should become a {@code REASONING} step: only when the
+     * provider returned some <em>and</em> the agent's profile asked for it. The second condition is a
+     * privacy gate that lives here and not in the clients: a client returns whatever the provider gave,
+     * and what a run records and shows is the agent's decision.
+     */
+    static boolean shouldRecordReasoning(AgentConfig config, LlmCompletion completion) {
+        return Boolean.TRUE.equals(config.returnReasoning()) && completion.hasReasoning();
+    }
+
     static void recordAssistantOutput(
             MemoryManager memory, List<ExecutionStep> steps, LlmCompletion completion,
-            String output, int iterations, AgentTask task) {
+            String output, int iterations, AgentTask task, AgentConfig config) {
         String taskId = task.taskId();
 
         if (!completion.toolCalls().isEmpty()) {
@@ -974,7 +984,18 @@ final class ReactExecutionSupport {
         } else {
             memory.appendToWorkingMemory("assistant", output);
         }
-        RunEvents.record(task, steps, ExecutionStep.thought(output, iterations));
+        // The model's own reasoning, when the provider returned it and the agent asked for it, comes
+        // first: it precedes the text it led to. It is a step of its own kind, not a thought.
+        if (shouldRecordReasoning(config, completion)) {
+            RunEvents.record(task, steps, ExecutionStep.reasoning(completion.reasoning(), iterations));
+        }
+        // A thought is what the model wrote as this step. A native tool call with no accompanying text
+        // wrote nothing, and recording an empty thought for it put a blank step in the response, the
+        // trace and the event stream on every such call (the call itself is still recorded, as its own
+        // TOOL_CALL step). The memory entry above is unaffected.
+        if (output != null && !output.isBlank()) {
+            RunEvents.record(task, steps, ExecutionStep.thought(output, iterations));
+        }
     }
 
     /**
@@ -1196,7 +1217,11 @@ final class ReactExecutionSupport {
         }
         int estPromptTokens = estimateTokensFromChars(promptChars);
         int estOutputTokens = estimateTokensFromChars(text.length());
-        return new LlmCompletion(text, estPromptTokens, estOutputTokens, "stop", null, null, List.of(), true);
+        // The tokens above are text only; whatever reasoning the provider returned alongside them
+        // travels in the sink's terminal completion, which this path used to ignore.
+        LlmCompletion streamed = streamedCompletion.get();
+        String reasoning = streamed != null ? streamed.reasoning() : null;
+        return new LlmCompletion(text, estPromptTokens, estOutputTokens, "stop", null, null, List.of(), true, reasoning);
     }
 
     /**

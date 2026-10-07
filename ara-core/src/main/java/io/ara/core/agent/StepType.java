@@ -34,7 +34,18 @@ public enum StepType {
      * whole-episode-restart critique, which is not a step within the trace at all (the
      * episode it critiques has already ended). Produced by {@code ReflActStrategy}.
      */
-    REFLECTION("reflection");
+    REFLECTION("reflection"),
+
+    /**
+     * The model's own reasoning for a step, as the provider returned it separately from the text
+     * (a dedicated field, or a block a normaliser separated from the answer). Distinct from
+     * {@link #THOUGHT}, which is the text the model wrote as the step: the two differ in meaning
+     * (one is the visible step, the other the internal reasoning) and in sensitivity (a provider may
+     * give only a summary, or forbid showing it), so a consumer should not have to tell them apart
+     * from the content. Recorded only when the agent's profile asks for it
+     * ({@code returnReasoning}).
+     */
+    REASONING("reasoning");
 
     private final String wireValue;
 

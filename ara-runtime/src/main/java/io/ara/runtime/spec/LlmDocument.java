@@ -10,6 +10,7 @@ import io.ara.core.common.Money;
 import io.ara.core.llm.LlmConfig;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.llm.LlmSelectionPolicy;
+import io.ara.core.llm.ReasoningEffort;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -78,8 +79,20 @@ final class LlmDocument {
         set(profile::costInputPer1kTokens, price(fields, "costInputPer1k", currency));
         set(profile::costOutputPer1kTokens, price(fields, "costOutputPer1k", currency));
         set(profile::costBudget, decodeBudget(fields));
+        decodeReasoning(fields.optionalObject("reasoning"), profile);
         fields.finish();
         return guard(fields.path(), profile::build);
+    }
+
+    /** The optional {@code reasoning} object of a profile; absent means every option stays unset. */
+    private static void decodeReasoning(DocumentFields reasoning, LlmProfile.Builder profile) {
+        if (reasoning == null) {
+            return;
+        }
+        set(profile::reasoningEffort, reasoning.enumValue("effort", ReasoningEffort.class));
+        set(profile::thinkingBudgetTokens, reasoning.integer("thinkingBudgetTokens"));
+        set(profile::returnReasoning, reasoning.bool("returnReasoning"));
+        reasoning.finish();
     }
 
     private static Money price(DocumentFields fields, String field, String currency) {
@@ -156,7 +169,23 @@ final class LlmDocument {
         out.set("costInputPer1k", encodeMoney(profile.costInputPer1kTokens()));
         out.set("costOutputPer1k", encodeMoney(profile.costOutputPer1kTokens()));
         out.set("budget", encodeBudget(profile.costBudget()));
+        encodeReasoning(profile, out);
         return out;
+    }
+
+    /**
+     * Written only when the profile sets one of the options, so the export of an agent that never
+     * mentioned reasoning is what it was before the options existed (the version number does not change).
+     */
+    private static void encodeReasoning(LlmProfile profile, ObjectNode out) {
+        if (profile.reasoningEffort() == null && profile.thinkingBudgetTokens() == null
+                && profile.returnReasoning() == null) {
+            return;
+        }
+        ObjectNode reasoning = out.putObject("reasoning");
+        if (profile.reasoningEffort() != null) reasoning.put("effort", profile.reasoningEffort().name());
+        if (profile.thinkingBudgetTokens() != null) reasoning.put("thinkingBudgetTokens", profile.thinkingBudgetTokens());
+        if (profile.returnReasoning() != null) reasoning.put("returnReasoning", profile.returnReasoning());
     }
 
     private static JsonNode encodeBudget(Budget budget) {

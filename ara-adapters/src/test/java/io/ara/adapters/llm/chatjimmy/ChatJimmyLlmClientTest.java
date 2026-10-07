@@ -92,6 +92,7 @@ class ChatJimmyLlmClientTest {
                     new LlmCallContext.Builder().agentType("test").build());
 
             assertEquals("The answer is 42.", completion.text());
+            assertEquals("reasoning about the answer", completion.reasoning());
             assertEquals(12, completion.promptTokens());
             assertEquals(30, completion.outputTokens());
             assertEquals("stop", completion.finishReason());
@@ -325,6 +326,22 @@ class ChatJimmyLlmClientTest {
 
             assertTrue(ex.isRateLimit());
             assertTrue(ex.isRetryable());
+        }
+    }
+
+    @Test
+    void complete_joinsSeveralThinkSpans_andHasNoReasoningWithoutAny() throws Exception {
+        try (StubLlmProvider provider = StubLlmProvider.answering(
+                "<|think|>first<|/think|>a<|think|>  <|/think|><|think|>second<|/think|>b")) {
+            LlmCompletion completion = clientPointedAt(provider).complete(
+                    List.of(LlmMessage.user("q")), new LlmCallContext.Builder().agentType("test").build());
+
+            assertEquals("ab", completion.text());
+            assertEquals("first\nsecond", completion.reasoning(), "an empty span adds nothing");
+        }
+        try (StubLlmProvider provider = StubLlmProvider.answering("plain")) {
+            assertNull(clientPointedAt(provider).complete(
+                    List.of(LlmMessage.user("q")), new LlmCallContext.Builder().agentType("test").build()).reasoning());
         }
     }
 

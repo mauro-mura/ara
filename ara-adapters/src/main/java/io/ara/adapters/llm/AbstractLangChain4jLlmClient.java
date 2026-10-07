@@ -6,6 +6,7 @@ import java.util.concurrent.Flow;
 
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.FinishReason;
@@ -124,7 +125,49 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
                 .messages(toLC4jMessages(messages, context));
         CallParameterUtils.applyTo(reqBuilder, context);
         applyTools(reqBuilder, context);
-        return reqBuilder;
+        return context != null && context.hasReasoningOptions()
+                ? withReasoningParameters(reqBuilder, context)
+                : reqBuilder;
+    }
+
+    /**
+     * Adds the provider-specific parameters that carry the agent's reasoning options.
+     *
+     * <p>They travel with the call because a client is shared by every agent that uses a transport
+     * while the options belong to one agent. The provider's own parameter type goes <em>under</em> the
+     * generic request (temperature, tools, stop sequences), so everything {@link #newChatRequest}
+     * already set survives. Not reached at all when the agent set no option, which is what keeps a
+     * request byte-for-byte what it was before these options existed.
+     */
+    private ChatRequest.Builder withReasoningParameters(ChatRequest.Builder generic, LlmCallContext context) {
+        ChatRequestParameters providerParameters = reasoningParameters(context);
+        ChatRequest built = generic.build();
+        return ChatRequest.builder()
+                .messages(built.messages())
+                .parameters(providerParameters.overrideWith(built.parameters()));
+    }
+
+    /**
+     * The provider's own request parameters for the reasoning options in {@code context}, or an
+     * {@link LlmException#invalidRequest invalid-request} error naming the option this provider cannot
+     * apply. Called only when at least one option is set. The default applies none: a provider that
+     * has a reasoning feature overrides it.
+     *
+     * <p>An option the provider cannot honour is rejected rather than ignored. An ignored option gives
+     * an agent that runs with a different behaviour from the one it declared and no error to say so;
+     * and options do not translate between providers (there is no "high = N tokens"), so the nearest
+     * thing would be a guess.
+     */
+    protected ChatRequestParameters reasoningParameters(LlmCallContext context) {
+        throw unsupportedReasoningOption(context.reasoningEffort() != null ? "reasoningEffort"
+                : context.thinkingBudgetTokens() != null ? "thinkingBudgetTokens" : "returnReasoning",
+                "this provider has no reasoning feature");
+    }
+
+    /** An invalid-request error for a reasoning option this provider cannot apply. Non-retryable. */
+    protected final LlmException unsupportedReasoningOption(String option, String reason) {
+        return LlmException.invalidRequest(providerId(),
+                "Reasoning option '" + option + "' cannot be applied by " + providerId() + ": " + reason);
     }
 
     /**
@@ -216,8 +259,11 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
                             + emptyCompletionCause(outputTokens));
         }
 
+        // The reasoning the provider returned in its own field, when it was asked to and did. Read
+        // whenever it is present: whether a run records it is the agent's decision, not the client's.
+        String reasoning = ai != null ? ai.thinking() : null;
         return new LlmCompletion(text, inputTokens, outputTokens, finishReason,
-                toolCallJson, toolCallId, toolCalls);
+                toolCallJson, toolCallId, toolCalls, false, reasoning);
     }
 
     /**

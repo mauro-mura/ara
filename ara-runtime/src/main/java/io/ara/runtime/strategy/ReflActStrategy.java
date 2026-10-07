@@ -256,11 +256,13 @@ public final class ReflActStrategy implements ExecutionStrategy {
                     reflectionRouter, llm, ctx, rc.reflectionProvider(), task.taskId(), "ReflAct");
 
             String critique;
+            LlmCompletion reflectionCompletion = null;   // kept to record the reflection call's own reasoning
             int promptTokens = 0;
             int outputTokens = 0;
             try {
                 LlmCompletion completion = ReactExecutionSupport.completeWithRetry(
                         reflectionLlm, messages, ctx, deadline, config, task.taskId());
+                reflectionCompletion = completion;
                 promptTokens = completion.promptTokens();
                 outputTokens = completion.outputTokens();
                 String text = completion.text();
@@ -278,6 +280,9 @@ public final class ReflActStrategy implements ExecutionStrategy {
 
             log.debug("ReflAct [iteration={}, task={}]: {}", iteration, task.taskId(), critique);
             memory.appendToWorkingMemory("user", "SELF-REFLECTION: " + critique);
+            if (reflectionCompletion != null && ReactExecutionSupport.shouldRecordReasoning(config, reflectionCompletion)) {
+                RunEvents.record(task, steps, ExecutionStep.reasoning(reflectionCompletion.reasoning(), iteration));
+            }
             RunEvents.record(task, steps, ExecutionStep.reflection(critique, iteration));
             return new ReflectionUsage(promptTokens, outputTokens);
         }

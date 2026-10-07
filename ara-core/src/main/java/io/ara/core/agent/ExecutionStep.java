@@ -75,6 +75,11 @@ public record ExecutionStep(
         return new ExecutionStep(StepType.SPEAK, null, null, content, null, iteration);
     }
 
+    /** Factory for the model's own reasoning — see {@link StepType#REASONING}. */
+    public static ExecutionStep reasoning(String content, int iteration) {
+        return new ExecutionStep(StepType.REASONING, null, null, content, null, iteration);
+    }
+
     /** Factory for an in-loop self-correction step (ReflAct) — see {@link StepType#REFLECTION}. */
     public static ExecutionStep reflection(String content, int iteration) {
         return new ExecutionStep(StepType.REFLECTION, null, null, content, null, iteration);

@@ -3,3 +3,4 @@
 /.classpath
 /target/
 /src/test/java/io/ara/adapters/ui/game/UiSettingsTest.java
+/src/test/java/io/ara/adapters/ui/game/

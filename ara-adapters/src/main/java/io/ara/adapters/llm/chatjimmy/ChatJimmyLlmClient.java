@@ -668,13 +668,16 @@ public class ChatJimmyLlmClient implements LlmClient {
 
     // ── Response parsing (chatjimmy text stream → LlmCompletion) ───────────────
 
-    private record ParsedResponse(String content, JsonNode stats) {}
+    private record ParsedResponse(String content, JsonNode stats, String reasoning) {}
 
-    /** Mirrors the reference project's {@code parseJimmyResponse}: strips {@code <|think|>}
-     *  spans, then extracts the trailing {@code <|stats|>} JSON block (or its legacy
+    /** Mirrors the reference project's {@code parseJimmyResponse}: removes {@code <|think|>}
+     *  spans from the text (keeping their content as the reasoning, which the reference project
+     *  discards), then extracts the trailing {@code <|stats|>} JSON block (or its legacy
      *  {@code <stats>} form). */
     private ParsedResponse parseUpstreamText(String raw) {
-        String text = THINK_RE.matcher(raw != null ? raw : "").replaceAll("");
+        String all = raw != null ? raw : "";
+        String reasoning = thinkSpans(all);
+        String text = THINK_RE.matcher(all).replaceAll("");
 
         int statsStart = text.lastIndexOf(STATS_START);
         int statsEnd = text.lastIndexOf(STATS_END);
@@ -683,14 +686,28 @@ public class ChatJimmyLlmClient implements LlmClient {
             if (legacy.find()) {
                 JsonNode stats = tryParseJson(legacy.group(1));
                 String content = text.substring(0, legacy.start()) + text.substring(legacy.end());
-                return new ParsedResponse(content, stats);
+                return new ParsedResponse(content, stats, reasoning);
             }
-            return new ParsedResponse(text, null);
+            return new ParsedResponse(text, null, reasoning);
         }
 
         JsonNode stats = tryParseJson(text.substring(statsStart + STATS_START.length(), statsEnd));
         String content = text.substring(0, statsStart) + text.substring(statsEnd + STATS_END.length());
-        return new ParsedResponse(content, stats);
+        return new ParsedResponse(content, stats, reasoning);
+    }
+
+    /** The content of every {@code <|think|>} span, in order; {@code null} when there is none. */
+    private static String thinkSpans(String raw) {
+        StringBuilder out = new StringBuilder();
+        Matcher m = THINK_RE.matcher(raw);
+        while (m.find()) {
+            String span = m.group().substring(THINK_START.length(), m.group().length() - THINK_END.length()).strip();
+            if (!span.isEmpty()) {
+                if (out.length() > 0) out.append('\n');
+                out.append(span);
+            }
+        }
+        return out.length() == 0 ? null : out.toString();
     }
 
     private JsonNode tryParseJson(String s) {
@@ -720,7 +737,7 @@ public class ChatJimmyLlmClient implements LlmClient {
         }
 
         return new LlmCompletion(text, promptTokens, outputTokens, finishReason,
-                toolCallJson, toolCallId, toolCalls);
+                toolCallJson, toolCallId, toolCalls, false, parsed.reasoning());
     }
 
     private List<ToolCallEntry> parseToolCalls(String content) {

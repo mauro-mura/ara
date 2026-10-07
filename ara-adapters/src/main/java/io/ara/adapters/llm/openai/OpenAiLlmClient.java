@@ -9,9 +9,11 @@ import dev.langchain4j.http.client.HttpClientBuilder;
 import dev.langchain4j.http.client.jdk.JdkHttpClient;
 import dev.langchain4j.http.client.jdk.JdkHttpClientBuilder;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiChatRequestParameters;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import io.ara.adapters.llm.AbstractLangChain4jLlmClient;
 import io.ara.adapters.llm.AbstractLlmClientBuilder;
@@ -194,6 +196,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .temperature(s.temperature())
                 .topP(builder.topP)
                 .maxTokens(s.maxTokens())
+                .returnThinking(true)   // parse-only: reads the reasoning a server returns; asks for nothing
                 .timeout(s.timeout())
                 .customHeaders(customHeaders)
                 .logRequests(s.logRequests())
@@ -313,6 +316,24 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         }
     }
 
+    /**
+     * OpenAI takes an effort level per request ({@code reasoning_effort}); it has no token budget.
+     * Returning the reasoning needs nothing per call: the models above are built to read it whenever the
+     * server sends it, and the agent's {@code returnReasoning} decides whether a run records it.
+     */
+    @Override
+    protected ChatRequestParameters reasoningParameters(LlmCallContext context) {
+        if (context.thinkingBudgetTokens() != null) {
+            throw unsupportedReasoningOption("thinkingBudgetTokens",
+                    "OpenAI sets how hard a model reasons with reasoningEffort, not with a token budget");
+        }
+        OpenAiChatRequestParameters.Builder parameters = OpenAiChatRequestParameters.builder();
+        if (context.reasoningEffort() != null) {
+            parameters.reasoningEffort(context.reasoningEffort().wireValue());
+        }
+        return parameters.build();
+    }
+
     @Override
     public String providerId() {
         return PROVIDER + "-" + modelName;
@@ -378,6 +399,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .temperature(defaultTemperature)
                                     .topP(defaultTopP)
                                     .maxTokens(defaultMaxTokens)
+                                    .returnThinking(true)
                                     .timeout(timeout)
                                     .customHeaders(customHeaders)
                                     .logRequests(logRequests)

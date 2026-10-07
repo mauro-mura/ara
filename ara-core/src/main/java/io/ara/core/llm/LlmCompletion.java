@@ -25,6 +25,10 @@ import java.util.Optional;
  *                        approximation (currently: {@code ReactStrategy}'s streaming fallback,
  *                        which has no real usage data and estimates ~4 chars/token) rather than
  *                        provider-reported exact counts. {@code false} for every other path.
+ * @param reasoning     the model's reasoning for this completion, when the provider returned it
+ *                      separately from {@code text} (its own field, not text a local server left
+ *                      mixed in); {@code null} otherwise. Whether it is recorded in a run is up to
+ *                      {@link LlmProfile#returnReasoning()}, not to the client.
  */
 public record LlmCompletion(
         String       text,
@@ -34,7 +38,8 @@ public record LlmCompletion(
         String       toolCallJson,
         String       toolCallId,
         List<io.ara.core.llm.ToolCallEntry> toolCalls,
-        boolean      tokensEstimated
+        boolean      tokensEstimated,
+        String       reasoning
 ) {
 
     public LlmCompletion {
@@ -44,6 +49,17 @@ public record LlmCompletion(
     }
 
     /** Backward-compatible 7-arg constructor — {@code tokensEstimated} defaults to {@code false} (exact counts). */
+    /**
+     * The shape before {@code reasoning}, kept so every existing direct {@code new LlmCompletion(...)}
+     * keeps compiling, with no reasoning.
+     */
+    public LlmCompletion(String text, int promptTokens, int outputTokens,
+                         String finishReason, String toolCallJson, String toolCallId,
+                         List<io.ara.core.llm.ToolCallEntry> toolCalls, boolean tokensEstimated) {
+        this(text, promptTokens, outputTokens, finishReason, toolCallJson, toolCallId, toolCalls,
+                tokensEstimated, null);
+    }
+
     public LlmCompletion(String text, int promptTokens, int outputTokens,
                          String finishReason, String toolCallJson, String toolCallId,
                          List<io.ara.core.llm.ToolCallEntry> toolCalls) {
@@ -63,6 +79,11 @@ public record LlmCompletion(
     }
 
     /** Total tokens consumed by this completion (prompt + output). */
+    /** Whether the provider returned the model's reasoning for this completion. */
+    public boolean hasReasoning() {
+        return reasoning != null && !reasoning.isBlank();
+    }
+
     public int totalTokens() {
         return promptTokens + outputTokens;
     }

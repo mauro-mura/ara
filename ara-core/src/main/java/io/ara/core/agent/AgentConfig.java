@@ -67,6 +67,9 @@ public record AgentConfig(
     public Double  topP()            { return llm.primary().topP(); }
     public boolean streamingEnabled(){ return llm.primary().streamingEnabled(); }
     public boolean nativeJsonSchema(){ return llm.primary().nativeJsonSchema(); }
+    public io.ara.core.llm.ReasoningEffort reasoningEffort()  { return llm.primary().reasoningEffort(); }
+    public Integer thinkingBudgetTokens()                      { return llm.primary().thinkingBudgetTokens(); }
+    public Boolean returnReasoning()                           { return llm.primary().returnReasoning(); }
     public boolean logLlmIo()        { return llm.logIo(); }
     public int     logLlmIoMaxChars(){ return llm.logIoMaxChars(); }
     public Money   costInputPer1kTokens()  { return llm.primary().costInputPer1kTokens(); }

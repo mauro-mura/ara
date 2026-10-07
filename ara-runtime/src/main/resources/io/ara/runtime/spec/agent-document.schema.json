@@ -121,6 +121,16 @@
         "costCurrency": { "type": "string", "minLength": 1 },
         "costInputPer1k": { "$ref": "#/$defs/money" },
         "costOutputPer1k": { "$ref": "#/$defs/money" },
+        "reasoning": {
+          "type": "object",
+          "description": "Reasoning options for models that reason. Each is optional and each provider accepts only some of them; one the provider cannot apply makes the call fail rather than being ignored (OpenAI: effort; Anthropic: thinkingBudgetTokens, with returnReasoning; Ollama and Mistral: returnReasoning only).",
+          "additionalProperties": false,
+          "properties": {
+            "effort": { "enum": ["LOW", "MEDIUM", "HIGH"], "description": "How hard the model reasons. OpenAI only." },
+            "thinkingBudgetTokens": { "type": "integer", "minimum": 1, "description": "Cap on tokens spent thinking. Anthropic only." },
+            "returnReasoning": { "type": "boolean", "description": "Record the model's reasoning as steps, where the provider returns it. Off unless true." }
+          }
+        },
         "budget": {
           "description": "\"unlimited\" or a spend cap.",
           "oneOf": [

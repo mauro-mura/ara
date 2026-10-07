@@ -5,6 +5,8 @@ import io.ara.core.llm.*;
 import io.ara.core.media.MediaTypes;
 import io.ara.core.media.MediaTypes.MediaKind;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.ollama.OllamaChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.ollama.OllamaChatModel;
@@ -128,6 +130,7 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
                 .baseUrl(builder.baseUrl)
                 .modelName(builder.modelName)
                 .temperature(builder.temperature)
+                .returnThinking(true)   // parse-only: reads the reasoning when a request turned thinking on
                 .timeout(builder.timeout)
                 .logRequests(builder.logRequests)
                 .logResponses(builder.logResponses)
@@ -137,11 +140,30 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
                 .baseUrl(builder.baseUrl)
                 .modelName(builder.modelName)
                 .temperature(builder.temperature)
+                .returnThinking(true)
                 .timeout(builder.timeout)
                 .build();
     }
 
     // ── LlmClient ─────────────────────────────────────────────────────────────
+
+    /**
+     * Ollama can only turn thinking on or off ({@code think}); it has neither an effort level nor a
+     * budget. Asking for the reasoning back is what turns it on. An effort or a budget is rejected rather
+     * than quietly turned into "on", which would claim a level that is not applied.
+     */
+    @Override
+    protected ChatRequestParameters reasoningParameters(LlmCallContext context) {
+        if (context.reasoningEffort() != null) {
+            throw unsupportedReasoningOption("reasoningEffort",
+                    "Ollama can only turn thinking on or off; use returnReasoning");
+        }
+        if (context.thinkingBudgetTokens() != null) {
+            throw unsupportedReasoningOption("thinkingBudgetTokens",
+                    "Ollama has no thinking budget; use returnReasoning");
+        }
+        return OllamaChatRequestParameters.builder().think(true).build();
+    }
 
     @Override
     public String providerId() {

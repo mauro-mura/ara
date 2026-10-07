@@ -44,6 +44,8 @@ class AgentSpecDocumentTest {
                 .costInputPer1kTokens(Money.of("0.0015", "USD"))
                 .costOutputPer1kTokens(Money.of("0.002", "USD"))
                 .costBudget(Budget.limited(Money.of("5", "USD")))
+                .reasoningEffort(io.ara.core.llm.ReasoningEffort.MEDIUM).thinkingBudgetTokens(4096)
+                .returnReasoning(true)
                 .build();
         AgentConfig config = AgentConfig.defaults()
                 .agentId(AgentId.of("triage-1")).agentType("support-triage").name("Triage")
@@ -168,6 +170,42 @@ class AgentSpecDocumentTest {
         // 3 stays an Integer and 3.0 a Double: they differ in the hash.
         assertEquals(spec.config(), back.config());
         assertEquals(spec.specHash(), back.specHash());
+    }
+
+    // ── reasoning options ────────────────────────────────────────────────────────────────
+
+    @Test
+    void aDocumentWithoutAReasoningObject_hasNoReasoningOptions() throws Exception {
+        AgentSpec spec = AgentSpecDocument.decode(json("""
+                {"schemaVersion":1,"agent":{"type":"a"},"llm":{"primary":{"model":"m"}}}"""));
+
+        assertNull(spec.config().reasoningEffort());
+        assertNull(spec.config().thinkingBudgetTokens());
+        assertNull(spec.config().returnReasoning());
+    }
+
+    @Test
+    void theExport_writesAReasoningObjectOnlyWhenOptionsAreSet() {
+        JsonNode plain = AgentSpecDocument.encode(AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .primaryLlm(LlmProfile.of("m")).build()));
+        JsonNode withOptions = AgentSpecDocument.encode(AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .primaryLlm(LlmProfile.builder().transportId("m").reasoningEffort(
+                        io.ara.core.llm.ReasoningEffort.HIGH).build()).build()));
+
+        assertEquals(1, plain.path("schemaVersion").asInt());
+        assertTrue(plain.path("llm").path("primary").path("reasoning").isMissingNode(),
+                "an agent that never mentioned reasoning exports exactly what it did before");
+        assertEquals("HIGH", withOptions.path("llm").path("primary").path("reasoning").path("effort").asText());
+    }
+
+    @Test
+    void decode_aBadReasoningValue_isReportedWithItsPath() throws Exception {
+        assertEquals("llm.primary.reasoning.effort", rejected(json("""
+                {"schemaVersion":1,"agent":{"type":"a"},"llm":{"primary":{"reasoning":{"effort":"EXTREME"}}}}""")).path());
+        assertEquals("llm.primary.reasoning.thinkingBudgetTokens", rejected(json("""
+                {"schemaVersion":1,"agent":{"type":"a"},"llm":{"primary":{"reasoning":{"thinkingBudgetTokens":"lots"}}}}""")).path());
+        assertEquals("llm.primary.reasoning.depth", rejected(json("""
+                {"schemaVersion":1,"agent":{"type":"a"},"llm":{"primary":{"reasoning":{"depth":3}}}}""")).path());
     }
 
     // ── defaults ───────────────────────────────────────────────────────────────────────

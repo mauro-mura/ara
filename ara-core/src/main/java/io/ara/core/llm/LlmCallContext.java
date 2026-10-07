@@ -129,6 +129,16 @@ public final class LlmCallContext {
     private final java.util.function.Consumer<LlmCompletion> completionSink;   // nullable
 
     /**
+     * The reasoning options of the calling agent's profile, carried per call because clients are
+     * shared by every agent that uses a transport while these options belong to one agent. All three
+     * are {@code null} unless the profile set them, and a {@code null} means "say nothing to the
+     * provider"; an adapter that cannot apply one that is set rejects the call.
+     */
+    private final ReasoningEffort reasoningEffort;        // nullable
+    private final Integer         thinkingBudgetTokens;   // nullable
+    private final Boolean         returnReasoning;        // nullable
+
+    /**
      * Cheap replay of {@code source}'s fields that replaces only the media resolver.
      *
      * <p>Unlike {@link #toBuilder()}{@code +build()} — which rebuilds and re-{@code
@@ -157,6 +167,9 @@ public final class LlmCallContext {
         this.mediaResolver       = mediaResolver;
         this.sessionId           = source.sessionId;
         this.completionSink      = source.completionSink;
+        this.reasoningEffort     = source.reasoningEffort;
+        this.thinkingBudgetTokens = source.thinkingBudgetTokens;
+        this.returnReasoning     = source.returnReasoning;
     }
 
     private LlmCallContext(Builder b) {
@@ -179,6 +192,9 @@ public final class LlmCallContext {
         this.mediaResolver       = b.mediaResolver != null ? b.mediaResolver : MediaResolver.none();
         this.sessionId           = b.sessionId;
         this.completionSink      = b.completionSink;
+        this.reasoningEffort     = b.reasoningEffort;
+        this.thinkingBudgetTokens = b.thinkingBudgetTokens;
+        this.returnReasoning     = b.returnReasoning;
     }
 
     /**
@@ -195,6 +211,9 @@ public final class LlmCallContext {
                 .logLlmIo(config.logLlmIo())
                 .logLlmIoMaxChars(config.logLlmIoMaxChars())
                 .nativeJsonSchema(config.nativeJsonSchema())
+                .reasoningEffort(config.reasoningEffort())
+                .thinkingBudgetTokens(config.thinkingBudgetTokens())
+                .returnReasoning(config.returnReasoning())
                 .build();
     }
 
@@ -281,6 +300,15 @@ public final class LlmCallContext {
     public java.util.function.Consumer<LlmCompletion> completionSink() { return completionSink; }
     public boolean hasCompletionSink()        { return completionSink != null; }
 
+    public ReasoningEffort reasoningEffort()      { return reasoningEffort; }
+    public Integer         thinkingBudgetTokens() { return thinkingBudgetTokens; }
+    public Boolean         returnReasoning()      { return returnReasoning; }
+
+    /** Whether the profile set any reasoning option, i.e. whether the call must be built differently. */
+    public boolean hasReasoningOptions() {
+        return reasoningEffort != null || thinkingBudgetTokens != null || Boolean.TRUE.equals(returnReasoning);
+    }
+
     // ── with*() methods ───────────────────────────────────────────────────────
 
     public LlmCallContext withOutputSchema(String schema, String name, boolean strict) {
@@ -341,6 +369,9 @@ public final class LlmCallContext {
         b.mediaResolver       = this.mediaResolver;
         b.sessionId           = this.sessionId;
         b.completionSink      = this.completionSink;
+        b.reasoningEffort     = this.reasoningEffort;
+        b.thinkingBudgetTokens = this.thinkingBudgetTokens;
+        b.returnReasoning     = this.returnReasoning;
         return b;
     }
 
@@ -364,6 +395,9 @@ public final class LlmCallContext {
         private MediaResolver mediaResolver;
         private String       sessionId;
         private java.util.function.Consumer<LlmCompletion> completionSink;
+        private ReasoningEffort reasoningEffort;
+        private Integer         thinkingBudgetTokens;
+        private Boolean         returnReasoning;
 
         public Builder agentId(String v)             { this.agentId = v;             return this; }
         public Builder agentType(String v)           { this.agentType = v;           return this; }
@@ -384,6 +418,9 @@ public final class LlmCallContext {
         public Builder mediaResolver(MediaResolver v) { this.mediaResolver = v;       return this; }
         public Builder sessionId(String v)            { this.sessionId = v;           return this; }
         public Builder completionSink(java.util.function.Consumer<LlmCompletion> v) { this.completionSink = v; return this; }
+        public Builder reasoningEffort(ReasoningEffort v)    { this.reasoningEffort = v;     return this; }
+        public Builder thinkingBudgetTokens(Integer v)       { this.thinkingBudgetTokens = v; return this; }
+        public Builder returnReasoning(Boolean v)            { this.returnReasoning = v;     return this; }
 
         public LlmCallContext build() { return new LlmCallContext(this); }
     }

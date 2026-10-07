@@ -10,6 +10,8 @@ import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
 import dev.langchain4j.model.anthropic.AnthropicStreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.anthropic.AnthropicChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 
@@ -125,6 +127,32 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
     }
 
     // ── LlmClient ─────────────────────────────────────────────────────────────
+
+    /**
+     * Anthropic thinks only when it is given a budget ({@code thinking.budget_tokens}); it has no effort
+     * level. Asking for the reasoning back without a budget would return nothing, because the model is not
+     * thinking, so that combination is rejected instead of silently producing an empty result.
+     */
+    @Override
+    protected ChatRequestParameters reasoningParameters(LlmCallContext context) {
+        if (context.reasoningEffort() != null) {
+            throw unsupportedReasoningOption("reasoningEffort",
+                    "Anthropic sets how much a model thinks with thinkingBudgetTokens, not with an effort level");
+        }
+        boolean wantsReasoning = Boolean.TRUE.equals(context.returnReasoning());
+        if (wantsReasoning && context.thinkingBudgetTokens() == null) {
+            throw unsupportedReasoningOption("returnReasoning",
+                    "Anthropic only thinks when thinkingBudgetTokens is set, so there would be nothing to return");
+        }
+        AnthropicChatRequestParameters.Builder parameters = AnthropicChatRequestParameters.builder();
+        if (context.thinkingBudgetTokens() != null) {
+            parameters.thinkingType("enabled").thinkingBudgetTokens(context.thinkingBudgetTokens());
+        }
+        if (wantsReasoning) {
+            parameters.returnThinking(true);
+        }
+        return parameters.build();
+    }
 
     @Override
     public String providerId() {
