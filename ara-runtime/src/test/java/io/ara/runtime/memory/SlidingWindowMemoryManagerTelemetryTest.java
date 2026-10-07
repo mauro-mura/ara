@@ -85,6 +85,30 @@ class SlidingWindowMemoryManagerTelemetryTest {
     }
 
     @Test
+    void theSpansNameTheAgent_andAnUnnamedManagerReportsAnEmptyId() {
+        RecordingTelemetry named = new RecordingTelemetry();
+        fill(new SlidingWindowMemoryManager(60, EvictionPolicy.DROP_OLDEST, null, null, null, "agent-7", named), 12);
+        RecordingTelemetry unnamed = new RecordingTelemetry();
+        fill(new SlidingWindowMemoryManager(60, EvictionPolicy.DROP_OLDEST, null, null, null, null, unnamed), 12);
+
+        assertTrue(named.spansNamed("memory.evict").stream()
+                .allMatch(s -> "agent-7".equals(s.attributes().get("agent_id"))));
+        assertTrue(unnamed.spansNamed("memory.evict").stream()
+                .allMatch(s -> "".equals(s.attributes().get("agent_id"))));
+    }
+
+    @Test
+    void aRecallSpanNamesTheAgent() {
+        RecordingTelemetry telemetry = new RecordingTelemetry();
+        SlidingWindowMemoryManager m = new SlidingWindowMemoryManager(
+                60, EvictionPolicy.DROP_OLDEST, null, new RecordingStore(), EMBED, "agent-9", telemetry);
+
+        m.recallRelevant("anything", 3);
+
+        assertEquals("agent-9", telemetry.spansNamed("memory.recall").get(0).attributes().get("agent_id"));
+    }
+
+    @Test
     void offloadConfiguredMarksTheSpanOffloadedTrue() {
         RecordingTelemetry telemetry = new RecordingTelemetry();
         RecordingStore store = new RecordingStore();

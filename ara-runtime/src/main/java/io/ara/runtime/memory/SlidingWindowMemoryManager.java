@@ -65,10 +65,13 @@ import java.util.stream.Collectors;
  * and an {@code agentId} are all supplied.
  *
  * <h2>Telemetry (ADR-0078 D5)</h2>
- * Emits {@code memory.evict} (once per eviction pass — {@code policy}, {@code
- * entries_evicted}, {@code offloaded}, {@code summarized}) and {@code memory.recall} (once
- * per {@link #recallRelevant} call that actually reaches the store — {@code
- * recalled_count}). No preexisting span on either operation to extend, unlike most of this
+ * Emits {@code memory.evict} (once per eviction pass — {@code agent_id}, {@code policy},
+ * {@code entries_evicted}, {@code offloaded}, {@code summarized}) and {@code memory.recall}
+ * (once per {@link #recallRelevant} call that actually reaches the store — {@code agent_id},
+ * {@code recalled_count}). {@code agent_id} is what lets a consumer attribute the span to an
+ * agent: the span itself is not tied to a run or an agent otherwise. It is empty for a manager
+ * built without an agent id (the short constructors), never absent, so a consumer can bucket it
+ * as "unknown" instead of handling a missing key. No preexisting span on either operation to extend, unlike most of this
  * backlog's other D5/D6 decisions — both are new.
  */
 public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
@@ -277,6 +280,7 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
                 case SUMMARIZE   -> evictSummarize();
             };
             telemetry.spanBuilder("memory.evict")
+                    .setAttribute("agent_id", agentId != null ? agentId : "")
                     .setAttribute("policy", policy.name())
                     .setAttribute("entries_evicted", (long) event.entriesEvicted())
                     .setAttribute("offloaded", offloadEnabled())
@@ -288,7 +292,20 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
     }
 
     private EvictionEvent evictOldest() {
-        return evictRange(0);
+        return evictRange(firstEvictableIndex());
+    }
+
+    /**
+     * The opening system prompt is never an eviction candidate: the strategies hang the tool
+     * catalog and the response format on it (see {@link #recallInsertIndex()}), so evicting it
+     * leaves the agent without instructions rather than merely with less history. That holds for
+     * {@code DROP_OLDEST} and for the small-window fallback of {@code DROP_MIDDLE} alike — the
+     * latter promises to preserve its anchors and used to break that promise below five entries.
+     * {@link #evictIfNeeded()} stops at one entry, so a lone system prompt is left in place and
+     * the window may stay over budget rather than lose it.
+     */
+    private int firstEvictableIndex() {
+        return "system".equals(working.get(0).role()) ? 1 : 0;
     }
 
     private EvictionEvent evictMiddle() {
@@ -450,7 +467,9 @@ public final class SlidingWindowMemoryManager extends AbstractMemoryManager {
         if (!offloadEnabled() || queryText == null || queryText.isBlank() || maxResults <= 0) {
             return;
         }
-        Span span = telemetry.spanBuilder("memory.recall").startSpan();
+        Span span = telemetry.spanBuilder("memory.recall")
+                .setAttribute("agent_id", agentId)
+                .startSpan();
         try (var scope = span.makeCurrent()) {
             List<MemoryEntry> hits;
             try {

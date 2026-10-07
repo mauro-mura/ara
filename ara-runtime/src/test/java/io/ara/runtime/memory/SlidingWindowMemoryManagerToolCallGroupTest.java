@@ -74,13 +74,43 @@ class SlidingWindowMemoryManagerToolCallGroupTest {
     void plainMessages_stillEvictOneAtATime_unaffectedByGrouping() {
         SlidingWindowMemoryManager mem = new SlidingWindowMemoryManager(20, EvictionPolicy.DROP_OLDEST);
 
-        mem.appendToWorkingMemory("system", "S".repeat(40));
         mem.appendToWorkingMemory("user", "U".repeat(40));
         mem.appendToWorkingMemory("assistant", "A".repeat(40));
+        mem.appendToWorkingMemory("user", "V".repeat(40));
 
         // No tool-call roles involved — single-entry eviction, exactly as before this fix.
         List<MemoryEntry> remaining = mem.workingMemory();
         assertEquals(1, remaining.size());
-        assertEquals("A".repeat(40), remaining.get(0).content());
+        assertEquals("V".repeat(40), remaining.get(0).content());
+    }
+
+    @Test
+    void dropOldest_neverEvictsTheOpeningSystemPrompt_evenWhenTheBudgetCannotBeMet() {
+        SlidingWindowMemoryManager mem = new SlidingWindowMemoryManager(20, EvictionPolicy.DROP_OLDEST);
+
+        mem.appendToWorkingMemory("system", "S".repeat(40));
+        mem.appendToWorkingMemory("user", "U".repeat(40));
+        mem.appendToWorkingMemory("assistant", "A".repeat(40));
+
+        // The system prompt alone already exceeds the budget; it is kept, the history goes.
+        List<MemoryEntry> remaining = mem.workingMemory();
+        assertEquals(1, remaining.size());
+        assertEquals("system", remaining.get(0).role());
+    }
+
+    @Test
+    void dropMiddle_inASmallWindow_keepsTheSystemPromptAndDropsHistoryFirst() {
+        // Four entries or fewer: the "preserve the anchors" path degrades to drop-oldest.
+        SlidingWindowMemoryManager mem = new SlidingWindowMemoryManager(30, EvictionPolicy.DROP_MIDDLE);
+
+        mem.appendToWorkingMemory("system", "sys");
+        mem.appendToWorkingMemory("user", "U".repeat(80));
+        mem.appendToWorkingMemory("assistant", "A".repeat(80));   // crosses the 30-token budget
+
+        List<MemoryEntry> remaining = mem.workingMemory();
+        assertEquals(2, remaining.size());
+        assertEquals("system", remaining.get(0).role());
+        assertEquals("sys", remaining.get(0).content());
+        assertEquals("A".repeat(80), remaining.get(1).content());
     }
 }

@@ -357,5 +357,7 @@ class AraRuntimeTelemetryTest {
                 "a bounded working-memory budget must evict over 10 turns, and every eviction must "
                 + "now reach the runtime's real AraTelemetry instead of the noop() default");
         assertEquals("DROP_OLDEST", evictSpans.get(0).attributes().get("policy"));
+        assertEquals(agent.agentId().value(), evictSpans.get(0).attributes().get("agent_id"),
+                "the runtime builds the manager with the agent's own id, so the span can be attributed");
     }
 }
