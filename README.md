@@ -8,10 +8,10 @@
 LLM integration, tool calling, deterministic I/O contracts, RAG and human-in-the-loop —
 no annotations, no reflection, no Spring, no Kotlin.
 
-[![Maven Central](https://img.shields.io/maven-central/v/io.github.xmor/ara-runtime.svg?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
+[![Maven Central](https://img.shields.io/badge/Maven%20Central-v1.0.3-blue.svg)](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
 [![Java](https://img.shields.io/badge/Java-21%2B-orange.svg)](https://openjdk.org/projects/jdk/21/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Last update](https://img.shields.io/maven-central/last-update/io.github.xmor/ara-runtime.svg?label=Last%20update)](https://central.sonatype.com/artifact/io.github.xmor/ara-runtime)
+[![Last commit](https://img.shields.io/github/last-commit/xmor/ara?label=Last%20commit)](https://github.com/xmor/ara/commits/main)
 [![Stars](https://img.shields.io/github/stars/xmor/ara?style=flat&label=Stars)](https://github.com/xmor/ara/stargazers)
 
 [**Quick start**](#quick-start--60-seconds-no-api-key) ·
