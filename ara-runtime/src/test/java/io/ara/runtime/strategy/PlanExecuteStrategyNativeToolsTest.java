@@ -87,6 +87,8 @@ class PlanExecuteStrategyNativeToolsTest {
                 "inline JSON tool-call instruction should be present for a non-native client");
         assertFalse(step.context().hasResolvedTools(),
                 "resolvedTools should not be attached to the context for a non-native client");
+        assertFalse(step.context().requireToolCall(),
+                "a text tool call cannot be required of the provider: the text protocol is all there is");
     }
 
     @Test
@@ -123,6 +125,21 @@ class PlanExecuteStrategyNativeToolsTest {
                 "planning never invokes tools — resolvedTools should not be attached there");
         assertFalse(synth.context().hasResolvedTools(),
                 "synthesis never invokes tools — resolvedTools should not be attached there");
+    }
+
+    @Test
+    void nativeClient_aStepRequiresAToolCall_thePlanAndTheSynthesisDoNot() {
+        PhaseAwareLlmClient llm = new PhaseAwareLlmClient(true);
+
+        new PlanExecuteStrategy().execute(
+                AgentTask.of("do the thing"), llm, seeded("You are helpful.", "do the thing"),
+                namedRegistry(noopTool()),
+                AgentConfig.defaults().primaryLlm(LlmProfile.of("stub")).plannerStrategy("plan_execute").build());
+
+        assertTrue(llm.callWhereSystemContains("You are executing one step of a plan").context().requireToolCall(),
+                "a step acts through tools and ends with close_step, so every reply of it is a tool call");
+        assertFalse(llm.callWhereSystemContains("Produce a short numbered execution plan").context().requireToolCall());
+        assertFalse(llm.callWhereSystemContains("Produce the complete final answer").context().requireToolCall());
     }
 
     // ── Stub ───────────────────────────────────────────────────────────────────

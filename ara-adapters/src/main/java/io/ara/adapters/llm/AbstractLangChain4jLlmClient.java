@@ -7,6 +7,7 @@ import java.util.concurrent.Flow;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ChatRequestParameters;
+import dev.langchain4j.model.chat.request.ToolChoice;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
@@ -257,7 +258,24 @@ public abstract class AbstractLangChain4jLlmClient implements LlmClient {
         if (context != null && context.hasResolvedTools() && supportsNativeTools()) {
             reqBuilder.toolSpecifications(
                     ToolConversionUtils.toolSpecificationsFor(context));
+            if (context.requireToolCall() && !context.resolvedTools().isEmpty()
+                    && honoursRequiredToolChoice(context)) {
+                reqBuilder.toolChoice(ToolChoice.REQUIRED);
+            }
         }
+    }
+
+    /**
+     * Whether this provider accepts {@code tool_choice: required} on {@code context}'s call. When it
+     * does not, {@link LlmCallContext#requireToolCall()} is left off the request instead of failing
+     * it: the caller still handles a text reply, and a request that fails costs more than a reply
+     * that is not the expected shape.
+     *
+     * <p>The default is yes; OpenAI-compatible servers and Mistral take it. A provider that rejects
+     * it, always or for some calls, overrides this.
+     */
+    protected boolean honoursRequiredToolChoice(LlmCallContext context) {
+        return true;
     }
 
     /** The blocking model call (provider-specific ChatModel instance). */

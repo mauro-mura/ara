@@ -6,6 +6,7 @@ import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.StrategyConfig;
 import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmProfile;
+import io.ara.core.media.MediaRef;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
@@ -94,6 +95,38 @@ class PlanExecuteStrategyPlanTest {
         assertEquals(2, steps.size());
         assertTrue(lastUserMessage(steps.get(0)).contains("Execute step 1/2: Create Person"));
         assertTrue(lastUserMessage(steps.get(1)).contains("Execute step 2/2: Create Address"));
+    }
+
+    @Test
+    void aStepPrompt_isOneUserMessage_withTheTaskThePlanAndTheStepInOrder() {
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies(TWO_STEP_JSON);
+
+        run(llm, config("never", false));
+
+        // The second step has a finished step behind it, so every part of the prompt is present.
+        List<LlmMessage> messages = llm.callsIn(Phase.STEP).get(1).messages();
+        long userMessages = messages.stream().filter(m -> m.role().equals("user")).count();
+        assertEquals(1, userMessages, "task, plan, results and step are one message, not one each");
+        String prompt = lastUserMessage(llm.callsIn(Phase.STEP).get(1));
+        int task = prompt.indexOf("Task: build the model");
+        int plan = prompt.indexOf("Execution plan:");
+        int results = prompt.indexOf("Completed step results:");
+        int step = prompt.indexOf("Execute step 2/2: Create Address");
+        assertTrue(0 == task && task < plan && plan < results && results < step, prompt);
+    }
+
+    @Test
+    void aStepPrompt_keepsTheTasksAttachments() {
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies(TWO_STEP_JSON);
+        MediaRef picture = new MediaRef("m1", "image/png", "plan.png", 3, null);
+
+        new PlanExecuteStrategy().execute(AgentTask.of("build the model", List.of(picture)), llm,
+                seededMemory(), NO_TOOLS, config("never", false));
+
+        for (PlanPhaseLlmClient.Call step : llm.callsIn(Phase.STEP)) {
+            List<LlmMessage> messages = step.messages();
+            assertEquals(List.of(picture), messages.get(messages.size() - 1).media());
+        }
     }
 
     @Test

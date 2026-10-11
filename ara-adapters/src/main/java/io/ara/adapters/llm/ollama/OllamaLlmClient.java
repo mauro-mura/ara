@@ -165,6 +165,12 @@ public class OllamaLlmClient extends AbstractLangChain4jLlmClient {
         return OllamaChatRequestParameters.builder().think(true).build();
     }
 
+    /** Never: langchain4j's Ollama model refuses any tool choice other than {@code AUTO}. */
+    @Override
+    protected boolean honoursRequiredToolChoice(LlmCallContext context) {
+        return false;
+    }
+
     @Override
     public String providerId() {
         return "ollama-" + modelName;

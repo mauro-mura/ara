@@ -126,4 +126,17 @@ class LlmCallContextTest {
 
         assertFalse(withNull.hasMediaResolver(), "a null resolver must land on MediaResolver.none()");
     }
+
+    @Test
+    void requireToolCall_isOffUnlessAsked_andSurvivesTheOtherWithers() {
+        LlmCallContext plain = new LlmCallContext.Builder().temperature(0.3).build();
+        LlmCallContext required = plain.withToolCallRequired();
+
+        assertFalse(plain.requireToolCall());
+        assertTrue(required.requireToolCall());
+        assertEquals(0.3, required.temperature(), "the rest of the context is kept");
+        assertTrue(required.withResolvedTools(List.of()).requireToolCall());
+        assertTrue(required.withMediaResolver(null).requireToolCall(), "kept by the cheap replay too");
+        assertTrue(required.withTemperature(0.9).requireToolCall());
+    }
 }

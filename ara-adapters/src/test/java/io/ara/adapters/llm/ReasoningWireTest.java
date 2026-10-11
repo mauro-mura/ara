@@ -132,6 +132,43 @@ class ReasoningWireTest {
         assertFalse(error.shouldFailover(), "a configuration error is not a reason to try another endpoint");
     }
 
+    /** A conversation that goes on after a tool call made with {@code reasoning} behind it. */
+    private static List<LlmMessage> afterAToolCall(String reasoning) {
+        return List.of(LlmMessage.user("hi"),
+                LlmMessage.assistantToolCall("c1", "echo", "{}", reasoning),
+                LlmMessage.tool("c1", "echo", "ok"));
+    }
+
+    @Test
+    void openAi_sendsTheReasoningBack_withTheToolCallItLedTo() throws Exception {
+        OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
+
+        client.complete(afterAToolCall("Need the echo."), context().build());
+
+        assertTrue(wire().contains("\"reasoning_content\":\"Needtheecho.\""), body.get());
+        assertTrue(wire().contains("\"tool_calls\""), "still the native tool call: " + body.get());
+    }
+
+    @Test
+    void openAi_aToolCallWithoutReasoning_sendsNoReasoningField() throws Exception {
+        OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
+
+        client.complete(afterAToolCall(null), context().build());
+
+        // Not even a null: llama.cpp's gpt-oss template fails the whole request on one.
+        assertFalse(body.get().contains("reasoning_content"), body.get());
+    }
+
+    @Test
+    void openAi_withSendReasoningOff_keepsTheReasoningToItself() throws Exception {
+        OpenAiLlmClient client = OpenAiLlmClient.builder().apiKey("k").baseUrl(serve(OPENAI_REPLY) + "/v1")
+                .modelName("m").timeout(Duration.ofSeconds(10)).forceHttp1(true).sendReasoning(false).build();
+
+        client.complete(afterAToolCall("Need the echo."), context().build());
+
+        assertFalse(body.get().contains("reasoning_content"), body.get());
+    }
+
     // ── Anthropic ──────────────────────────────────────────────────────────────────────
 
     private static final String ANTHROPIC_REPLY = """

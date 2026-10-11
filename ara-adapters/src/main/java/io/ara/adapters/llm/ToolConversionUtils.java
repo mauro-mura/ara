@@ -187,12 +187,16 @@ public final class ToolConversionUtils {
         return switch (m.role()) {
             case "system" -> SystemMessage.from(m.content());
             case "assistant" -> AiMessage.from(m.content());
-            case "assistant_tool_call" -> AiMessage.from(List.of(
-                    ToolExecutionRequest.builder()
+            // The reasoning rides on the AiMessage as its thinking; whether it reaches the wire
+            // is the adapter's decision (OpenAiLlmClient sends it back, see sendReasoning).
+            case "assistant_tool_call" -> AiMessage.builder()
+                    .toolExecutionRequests(List.of(ToolExecutionRequest.builder()
                             .id(m.toolCallId())
                             .name(m.toolName())
                             .arguments(m.content())
-                            .build()));
+                            .build()))
+                    .thinking(m.reasoning())
+                    .build();
             case "assistant_tool_calls" -> AiMessage.from(parseParallelToolCallsJson(m.content()));
             case "tool" -> ToolExecutionResultMessage.from(m.toolCallId(), m.toolName(), m.content());
             // The text-only path stays byte-for-byte what it was before media existed: a

@@ -139,6 +139,19 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
      */
     private final Duration connectTimeout;
     /**
+     * Whether the reasoning a server returned with a tool call is sent back with that call when
+     * the conversation goes on, as the {@code reasoning_content} field of the assistant message.
+     *
+     * <p>On by default because a reasoning model that calls tools needs it: it reasons, calls,
+     * reads the result and reasons again within one turn, and without its earlier reasoning in
+     * front of each earlier call it goes off its format. gpt-oss on llama.cpp does so visibly,
+     * with replies the server cannot parse and fails with a 500. Nothing is sent when there is no
+     * reasoning, so a server that returns none (hosted OpenAI's chat completions) sees the request
+     * it always saw. The switch exists for a server that rejects the field in a request; some
+     * versions of DeepSeek's API did.
+     */
+    private final boolean sendReasoning;
+    /**
      * Precomputed once: the media capability is a pure function of {@link #documentSupport},
      * which never changes after construction, so rebuilding the set on every request only
      * allocates and streams the vocabulary needlessly.
@@ -220,6 +233,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         this.strictJsonSchema = builder.strictJsonSchema;
         this.forceHttp1 = builder.forceHttp1;
         this.connectTimeout = builder.connectTimeout;
+        this.sendReasoning = builder.sendReasoning;
         this.supportedMediaTypes = documentSupport
                 ? MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.DOCUMENT, MediaKind.TEXT)
                 : MediaTypes.ofKinds(MediaKind.IMAGE, MediaKind.TEXT);
@@ -232,6 +246,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 .topP(builder.topP)
                 .maxTokens(s.maxTokens())
                 .returnThinking(true)   // parse-only: reads the reasoning a server returns; asks for nothing
+                .sendThinking(builder.sendReasoning)   // sends it back with its tool call; see sendReasoning
                 .strictJsonSchema(builder.strictJsonSchema)   // null ⇒ langchain4j's default (strict: false)
                 .timeout(s.timeout())
                 .customHeaders(customHeaders)
@@ -467,6 +482,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                                     .topP(defaultTopP)
                                     .maxTokens(defaultMaxTokens)
                                     .returnThinking(true)
+                                    .sendThinking(sendReasoning)
                                     .strictJsonSchema(strictJsonSchema)
                                     .timeout(timeout)
                                     .customHeaders(customHeaders)
@@ -532,6 +548,7 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
         private Boolean strictJsonSchema;
         private boolean forceHttp1 = false;
         private Duration connectTimeout;
+        private boolean sendReasoning = true;
         private Map<String, String> customHeaders = Map.of();
 
         /** Sets the model from the {@link Models} catalogue (preferred for hosted OpenAI). */
@@ -643,6 +660,14 @@ public class OpenAiLlmClient extends AbstractLangChain4jLlmClient {
                 throw new IllegalArgumentException("connectTimeout must be positive when set");
             this.connectTimeout = v; return this;
         }
+
+        /**
+         * Whether the reasoning a server returned with a tool call goes back to it with that call,
+         * as {@code reasoning_content}. On by default: a reasoning model that calls tools needs its
+         * earlier reasoning to keep to its format (see the {@code sendReasoning} field javadoc).
+         * Turn it off only for a server that rejects the field in a request.
+         */
+        public Builder sendReasoning(boolean v) { this.sendReasoning = v; return this; }
 
         /**
          * Builds the {@link OpenAiLlmClient}.

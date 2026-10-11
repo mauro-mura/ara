@@ -35,14 +35,30 @@ import java.util.Objects;
  * @param media       images and documents accompanying this message, in presentation order;
  *                    never {@code null}, and only meaningful for the {@code "user"} role —
  *                    no provider accepts attachments on a system or tool-result message
+ * @param reasoning   what the model reasoned before making this tool call, as its provider
+ *                    returned it; {@code null} when there was none, and only meaningful for the
+ *                    {@code "assistant_tool_call"} role. See {@link #assistantToolCall(String,
+ *                    String, String, String)} for why it travels back
  */
 public record LlmMessage(String role, String content, String toolCallId, String toolName,
-                         List<MediaRef> media) {
+                         List<MediaRef> media, String reasoning) {
 
     public LlmMessage {
         Objects.requireNonNull(role,    "role must not be null");
         Objects.requireNonNull(content, "content must not be null");
         media = media != null ? List.copyOf(media) : List.of();
+        // Blank is no reasoning: an empty field sent back is noise at best, and a null one is
+        // worse — llama.cpp's gpt-oss template fails the whole request on it.
+        reasoning = reasoning != null && !reasoning.isBlank() ? reasoning : null;
+    }
+
+    /**
+     * The 5-arg shape before {@code reasoning}, kept so every existing call site compiles and
+     * behaves identically: no reasoning.
+     */
+    public LlmMessage(String role, String content, String toolCallId, String toolName,
+                      List<MediaRef> media) {
+        this(role, content, toolCallId, toolName, media, null);
     }
 
     /**
@@ -91,9 +107,28 @@ public record LlmMessage(String role, String content, String toolCallId, String 
      * are needed to pair this message with the corresponding {@link #tool} result.
      */
     public static LlmMessage assistantToolCall(String toolCallId, String toolName, String argsJson) {
+        return assistantToolCall(toolCallId, toolName, argsJson, null);
+    }
+
+    /**
+     * Creates an assistant tool-call message that also carries the reasoning the model did
+     * before the call.
+     *
+     * <p>A reasoning model that calls tools reasons, calls, reads the result and reasons again,
+     * all in one turn, and expects to find its own earlier reasoning in front of each earlier
+     * call when it is asked for the next one. gpt-oss is the clear case: served by llama.cpp
+     * without it, it starts its reply with a malformed tool-call header often enough that the
+     * server fails the call with a 500 ("does not match the expected peg-native format"). On the
+     * requests that failed in a plan_execute run, 18 calls in 20 failed without the reasoning and
+     * none with it. Anthropic states the same rule for its thinking blocks during tool use.
+     *
+     * @param reasoning the completion's reasoning, or {@code null} when the provider returned none
+     */
+    public static LlmMessage assistantToolCall(String toolCallId, String toolName, String argsJson,
+                                               String reasoning) {
         return new LlmMessage("assistant_tool_call",
                 argsJson != null ? argsJson : "{}",
-                toolCallId, toolName);
+                toolCallId, toolName, List.of(), reasoning);
     }
 
     /**

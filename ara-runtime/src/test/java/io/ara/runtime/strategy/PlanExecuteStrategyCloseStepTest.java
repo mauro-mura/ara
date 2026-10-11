@@ -150,7 +150,7 @@ class PlanExecuteStrategyCloseStepTest {
 
         Call third = llm.callsIn(Phase.STEP).get(2);
         String block = third.messages().stream().map(LlmMessage::content)
-                .filter(content -> content.startsWith("Notes from earlier steps")).findFirst().orElseThrow();
+                .filter(content -> content.contains("Notes from earlier steps")).findFirst().orElseThrow();
         assertTrue(block.indexOf("first fact") < block.indexOf("second fact"));
     }
 
@@ -432,5 +432,65 @@ class PlanExecuteStrategyCloseStepTest {
         assertFalse(result.isSuccess());
         assertTrue(result.failureReasonOpt().orElse("").contains("reserves the tool name 'close_step'"));
         assertTrue(llm.calls().isEmpty(), "nothing must be sent to the model");
+    }
+
+    // ── the reasoning behind a call goes back with it ───────────────────────
+
+    private static final String THOUGHT = "I need the echo before I can close.";
+
+    private static LlmCompletion reasoned(String reasoning, ToolCallEntry... entries) {
+        LlmCompletion turn = nativeTurn(entries);
+        return new LlmCompletion(turn.text(), 5, 5, "tool_calls", turn.toolCallJson(), turn.toolCallId(),
+                turn.toolCalls(), false, reasoning);
+    }
+
+    /** The tool-call messages of {@code call}'s history, by call id. */
+    private static java.util.Map<String, LlmMessage> toolCallsIn(Call call) {
+        java.util.Map<String, LlmMessage> byId = new java.util.LinkedHashMap<>();
+        call.messages().stream().filter(m -> m.role().equals("assistant_tool_call"))
+                .forEach(m -> byId.put(m.toolCallId(), m));
+        return byId;
+    }
+
+    @Test
+    void aToolCall_goesBackToTheModel_withTheReasoningBehindIt() {
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies("1. Only")
+                .stepCompletions(reasoned(THOUGHT, new ToolCallEntry("c1", "echo", "{}")), closing(done()));
+
+        run(llm, "never", registryOf(new CountingTool()));
+
+        LlmMessage call = toolCallsIn(llm.callsIn(Phase.STEP).get(1)).get("c1");
+        assertEquals(THOUGHT, call.reasoning());
+    }
+
+    @Test
+    void callsInOneTurn_shareOneReasoning_whichGoesWithTheFirst() {
+        // The closing is refused (a status that does not exist), so the step stays open and the
+        // next round shows how the whole turn was written back.
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies("1. Only")
+                .stepCompletions(reasoned(THOUGHT,
+                        new ToolCallEntry("c1", "echo", "{}"),
+                        new ToolCallEntry("c2", "echo", "{}"),
+                        new ToolCallEntry("c3", "close_step", "{\"status\":\"nonsense\"}")),
+                        closing(done()));
+
+        run(llm, "never", registryOf(new CountingTool()));
+
+        java.util.Map<String, LlmMessage> calls = toolCallsIn(llm.callsIn(Phase.STEP).get(1));
+        assertEquals(THOUGHT, calls.get("c1").reasoning());
+        assertEquals(null, calls.get("c2").reasoning(), "said once, not repeated on every call of the turn");
+        assertEquals(null, calls.get("c3").reasoning());
+    }
+
+    @Test
+    void aClosingAlone_carriesTheReasoningOfItsTurn() {
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies("1. Only")
+                .stepCompletions(reasoned(THOUGHT,
+                        new ToolCallEntry("c1", "close_step", "{\"status\":\"nonsense\"}")),
+                        closing(done()));
+
+        run(llm, "never");
+
+        assertEquals(THOUGHT, toolCallsIn(llm.callsIn(Phase.STEP).get(1)).get("c1").reasoning());
     }
 }

@@ -97,8 +97,16 @@ final class PlanStepExecutor {
         // Native clients get resolvedTools attached only for step-execution calls — not
         // for planning/synthesis/replan, which never invoke tools by design. Built once
         // per step rather than per round since resolvedTools is stable for the step.
+        //
+        // A step acts through tools and ends with close_step, so every reply of a step is a tool
+        // call, and the request says so: a provider that can enforce it then does. gpt-oss on
+        // llama.cpp needs it. Asked to close a step it often started a final answer and the
+        // close_step call in one reply, which the server failed with a 500 ("does not match the
+        // expected peg-native format"); with the tool call required, none of 89 calls failed in
+        // four runs of the planner example, where 8 of 91 had without it. A text reply is still
+        // handled below, for the providers that ignore the request.
         LlmCallContext stepCtx = run.nativeTools()
-                ? run.ctx().withResolvedTools(run.stepTools()) : run.ctx();
+                ? run.ctx().withResolvedTools(run.stepTools()).withToolCallRequired() : run.ctx();
 
         // The step's instruction prefix — system prompt, task, plan overview, completed-step
         // summaries, current step instruction — is invariant for every round of this step
@@ -165,7 +173,7 @@ final class PlanStepExecutor {
             if (calls.stream().anyMatch(CloseStep::isCall)) {
                 StepOutcome closed;
                 try {
-                    closed = closeStep(calls, text, lastResult, stepLocalHistory, run, tally);
+                    closed = closeStep(calls, text, completion.reasoning(), lastResult, stepLocalHistory, run, tally);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     log.debug("Cancelled while closing step {}/{}", stepIdx + 1, plan.size());
@@ -183,7 +191,7 @@ final class PlanStepExecutor {
 
             if (toolCall.isPresent()) {
                 try {
-                    dispatchTool(toolCall.get(), text, stepLocalHistory, run, tally);
+                    dispatchTool(toolCall.get(), text, completion.reasoning(), stepLocalHistory, run, tally);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     log.debug("Cancelled during tool dispatch on step {}/{}", stepIdx + 1, plan.size());
@@ -222,13 +230,15 @@ final class PlanStepExecutor {
      *         and the step stays open for another round
      */
     private static StepOutcome closeStep(
-            List<ToolCallParser.ToolCallRequest> calls, String text, String lastResult,
+            List<ToolCallParser.ToolCallRequest> calls, String text, String reasoning, String lastResult,
             List<LlmMessage> stepLocalHistory, PlanRun run, PlanTally tally) throws InterruptedException {
 
         ToolCallParser.ToolCallRequest closing = null;
+        String turnReasoning = reasoning;   // one per turn: it goes with the first call written back
         for (ToolCallParser.ToolCallRequest call : calls) {
             if (!CloseStep.isCall(call)) {
-                dispatchTool(call, text, stepLocalHistory, run, tally);
+                dispatchTool(call, text, turnReasoning, stepLocalHistory, run, tally);
+                turnReasoning = null;
             } else if (closing == null) {
                 closing = call;
             }
@@ -245,7 +255,7 @@ final class PlanStepExecutor {
             case CloseStep.Parsed.Accepted accepted -> "Step closed (" + accepted.closing().status() + ").";
         };
         tally.record(ExecutionStep.observation(observation, tally.iterations));
-        appendExchange(stepLocalHistory, closing, text, observation);
+        appendExchange(stepLocalHistory, closing, text, turnReasoning, observation);
 
         return switch (parsed) {
             case CloseStep.Parsed.Refused refused -> null;
@@ -290,7 +300,7 @@ final class PlanStepExecutor {
      * @throws ExecutionTimeoutException if {@code run.deadline()} passes before the tool call returns
      */
     private static void dispatchTool(
-            ToolCallParser.ToolCallRequest tcr, String completionText,
+            ToolCallParser.ToolCallRequest tcr, String completionText, String reasoning,
             List<LlmMessage> stepLocalHistory, PlanRun run, PlanTally tally) throws InterruptedException {
 
         run.task().notifyToolCall(tcr.toolId(), tcr.argumentJson());
@@ -309,16 +319,22 @@ final class PlanStepExecutor {
                 ? result.output()
                 : "Tool [%s] failed — %s".formatted(tcr.toolId(), result.error());
         tally.record(ExecutionStep.observation(result, tally.iterations));
-        appendExchange(stepLocalHistory, tcr, completionText, observation);
+        appendExchange(stepLocalHistory, tcr, completionText, reasoning, observation);
     }
 
     /**
      * Appends one call and its observation to a step's local history, as the native
      * function-calling pair when the call has an id and as plain text turns otherwise.
+     *
+     * <p>The native call carries the reasoning the model did before it. A reasoning model expects
+     * to find it there on the step's next round, and gpt-oss without it often answered with a
+     * tool-call header the server could not parse (see {@link LlmMessage#assistantToolCall(String,
+     * String, String, String)}). Several calls in one turn share one reasoning, so only the first
+     * carries it: repeating it would show the model a thought it had once as if it had it each time.
      */
     private static void appendExchange(
             List<LlmMessage> stepLocalHistory, ToolCallParser.ToolCallRequest tcr,
-            String completionText, String observation) {
+            String completionText, String reasoning, String observation) {
         String callId = tcr.toolCallId();
         if (callId != null && !callId.isBlank()) {
             // Native reconstruction — mirrors ReactStrategy's dispatch: pairs with
@@ -326,7 +342,7 @@ final class PlanStepExecutor {
             // round's request carries a proper AiMessage(toolExecutionRequests) +
             // ToolExecutionResultMessage instead of collapsing the exchange into plain
             // text turns that a native provider never asked for.
-            stepLocalHistory.add(LlmMessage.assistantToolCall(callId, tcr.toolId(), tcr.argumentJson()));
+            stepLocalHistory.add(LlmMessage.assistantToolCall(callId, tcr.toolId(), tcr.argumentJson(), reasoning));
             stepLocalHistory.add(LlmMessage.tool(callId, tcr.toolId(), observation));
         } else {
             stepLocalHistory.add(new LlmMessage("assistant", completionText));
@@ -354,11 +370,17 @@ final class PlanStepExecutor {
         String toolCatalog = run.stepCatalog();
         String execSuffix  = run.nativeTools() ? EXEC_SUFFIX_NATIVE : EXEC_SUFFIX;
         messages.add(new LlmMessage("system", run.systemPrompt() + toolCatalog + execSuffix));
-        // Unlike the ReAct family, this strategy does not rebuild the conversation from
-        // working memory — it re-serialises the task into a fresh per-step prompt. So the
-        // task's attachments have to be re-attached here, or a plan-execute agent would be
-        // the one strategy that silently loses them.
-        messages.add(LlmMessage.user("Task: " + run.task().input(), run.task().media()));
+        // Everything the step needs to know goes into ONE user message, its parts separated by a
+        // blank line. They used to be five consecutive user messages (task, plan, results, notes,
+        // the step), and that shape is not what chat templates are written for: with gpt-oss on
+        // llama-server the model often began its reply to such a prompt with a malformed tool-call
+        // header, and the server answered 500 "does not match the expected peg-native format".
+        // Merging helped on some of the requests that failed (19 failures in 20 calls became 1 in 20)
+        // and on others it changed nothing: a live run still loses about one call in seven to that
+        // error, so this is cleaner for any template but it is not the cure. A provider that merges
+        // adjacent same-role messages itself (Anthropic) sees no difference.
+        List<String> parts = new ArrayList<>();
+        parts.add("Task: " + run.task().input());
 
         // Compact plan overview with execution status markers
         StringBuilder planCtx = new StringBuilder("Execution plan:\n");
@@ -366,7 +388,7 @@ final class PlanStepExecutor {
             String marker = i < currentStepIdx ? "✓" : (i == currentStepIdx ? "→" : " ");
             planCtx.append("  %d. [%s] %s%n".formatted(i + 1, marker, plan.get(i)));
         }
-        messages.add(new LlmMessage("user", planCtx.toString().stripTrailing()));
+        parts.add(planCtx.toString().stripTrailing());
 
         // Compact summaries of completed steps — not full verbatim output
         if (!stepResults.isEmpty()) {
@@ -377,20 +399,25 @@ final class PlanStepExecutor {
                         : result;
                 prev.append("  Step %d: %s%n".formatted(idx + 1, truncated));
             });
-            messages.add(new LlmMessage("user", prev.toString().stripTrailing()));
+            parts.add(prev.toString().stripTrailing());
         }
 
         // Notes are exact facts (a path, a name), so — unlike the results above — they are
         // handed over whole, never shortened.
         String notesBlock = CloseStep.formatNotes(notes);
         if (notesBlock != null) {
-            messages.add(new LlmMessage("user", notesBlock));
+            parts.add(notesBlock);
         }
 
-        // Current step instruction
-        messages.add(new LlmMessage("user",
-                "Execute step %d/%d: %s".formatted(
-                        currentStepIdx + 1, plan.size(), plan.get(currentStepIdx))));
+        // Current step instruction, always last
+        parts.add("Execute step %d/%d: %s".formatted(
+                currentStepIdx + 1, plan.size(), plan.get(currentStepIdx)));
+
+        // Unlike the ReAct family, this strategy does not rebuild the conversation from
+        // working memory — it re-serialises the task into a fresh per-step prompt. So the
+        // task's attachments have to be re-attached here, or a plan-execute agent would be
+        // the one strategy that silently loses them.
+        messages.add(LlmMessage.user(String.join("\n\n", parts), run.task().media()));
         return messages;
     }
 

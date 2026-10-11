@@ -139,6 +139,22 @@ public final class LlmCallContext {
     private final Boolean         returnReasoning;        // nullable
 
     /**
+     * Whether the reply to this call has to be a call to one of {@link #resolvedTools()}, never
+     * text. The caller sets it when its own protocol has no place for a text reply: a step of
+     * {@code plan_execute} acts through tools and ends with {@code close_step}.
+     *
+     * <p>Saying so lets the provider enforce it: OpenAI and vLLM through {@code tool_choice:
+     * "required"}, llama.cpp with a grammar that only admits a tool call. That last one is why it
+     * exists: gpt-oss on llama.cpp, asked to close a step, often began a final answer and a tool
+     * call in the same reply, and the server failed it with a 500 it could not parse.
+     *
+     * <p>Unlike the reasoning options above, an adapter that cannot apply it ignores it rather than
+     * rejecting the call. It does not change what the agent does, only how sure the caller can be
+     * of the shape of the reply, and a caller that sets it must still handle a text reply.
+     */
+    private final boolean requireToolCall;
+
+    /**
      * Cheap replay of {@code source}'s fields that replaces only the media resolver.
      *
      * <p>Unlike {@link #toBuilder()}{@code +build()} — which rebuilds and re-{@code
@@ -170,6 +186,7 @@ public final class LlmCallContext {
         this.reasoningEffort     = source.reasoningEffort;
         this.thinkingBudgetTokens = source.thinkingBudgetTokens;
         this.returnReasoning     = source.returnReasoning;
+        this.requireToolCall     = source.requireToolCall;
     }
 
     private LlmCallContext(Builder b) {
@@ -195,6 +212,7 @@ public final class LlmCallContext {
         this.reasoningEffort     = b.reasoningEffort;
         this.thinkingBudgetTokens = b.thinkingBudgetTokens;
         this.returnReasoning     = b.returnReasoning;
+        this.requireToolCall     = b.requireToolCall;
     }
 
     /**
@@ -304,6 +322,9 @@ public final class LlmCallContext {
     public Integer         thinkingBudgetTokens() { return thinkingBudgetTokens; }
     public Boolean         returnReasoning()      { return returnReasoning; }
 
+    /** Whether the reply must be a tool call — see the field javadoc. */
+    public boolean         requireToolCall()      { return requireToolCall; }
+
     /** Whether the profile set any reasoning option, i.e. whether the call must be built differently. */
     public boolean hasReasoningOptions() {
         return reasoningEffort != null || thinkingBudgetTokens != null || Boolean.TRUE.equals(returnReasoning);
@@ -333,6 +354,11 @@ public final class LlmCallContext {
 
     public LlmCallContext withResolvedTools(List<AraTool> tools) {
         return toBuilder().resolvedTools(tools).build();
+    }
+
+    /** This context, asking for the reply to be a tool call — see {@link #requireToolCall()}. */
+    public LlmCallContext withToolCallRequired() {
+        return toBuilder().requireToolCall(true).build();
     }
 
     public LlmCallContext withMediaResolver(MediaResolver resolver) {
@@ -372,6 +398,7 @@ public final class LlmCallContext {
         b.reasoningEffort     = this.reasoningEffort;
         b.thinkingBudgetTokens = this.thinkingBudgetTokens;
         b.returnReasoning     = this.returnReasoning;
+        b.requireToolCall     = this.requireToolCall;
         return b;
     }
 
@@ -398,6 +425,7 @@ public final class LlmCallContext {
         private ReasoningEffort reasoningEffort;
         private Integer         thinkingBudgetTokens;
         private Boolean         returnReasoning;
+        private boolean         requireToolCall;
 
         public Builder agentId(String v)             { this.agentId = v;             return this; }
         public Builder agentType(String v)           { this.agentType = v;           return this; }
@@ -421,6 +449,7 @@ public final class LlmCallContext {
         public Builder reasoningEffort(ReasoningEffort v)    { this.reasoningEffort = v;     return this; }
         public Builder thinkingBudgetTokens(Integer v)       { this.thinkingBudgetTokens = v; return this; }
         public Builder returnReasoning(Boolean v)            { this.returnReasoning = v;     return this; }
+        public Builder requireToolCall(boolean v)            { this.requireToolCall = v;     return this; }
 
         public LlmCallContext build() { return new LlmCallContext(this); }
     }

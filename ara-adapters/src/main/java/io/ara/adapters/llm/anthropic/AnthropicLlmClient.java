@@ -154,6 +154,15 @@ public class AnthropicLlmClient extends AbstractLangChain4jLlmClient {
         return parameters.build();
     }
 
+    /**
+     * Not while thinking: Anthropic's {@code tool_choice: any}, which is what a required tool call
+     * becomes, is refused when extended thinking is on. Without thinking it is accepted.
+     */
+    @Override
+    protected boolean honoursRequiredToolChoice(LlmCallContext context) {
+        return context.thinkingBudgetTokens() == null;
+    }
+
     @Override
     public String providerId() {
         return "anthropic-" + modelName;
