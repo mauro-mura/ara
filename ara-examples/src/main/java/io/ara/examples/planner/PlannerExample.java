@@ -55,9 +55,16 @@ import java.time.Duration;
  *
  * <p>A live run is what a model makes of the strategy, and local models are uneven at it. They may do
  * the work of several steps in one, or lose a tool call whose argument is a whole file: the server cannot
- * parse it, drops it, and ARA sees an empty reply and asks again. The client samples at its default
- * temperature of 0.7 because at 0 the retry would send the very same request and fail the same way. The
- * checks at the end read the workspace, so they say whether the task was really done.
+ * parse it, drops it, and ARA sees an empty reply and asks again. The checks at the end read the
+ * workspace, so they say whether the task was really done.
+ *
+ * <p>gpt-oss on llama.cpp (which Unsloth runs) used to fail about one call in seven with a 500, "does
+ * not match the expected peg-native format": the model wrote a tool-call header the server could not
+ * parse. Two things in ARA stop it, and neither needs anything here. The reasoning the model returns
+ * with a tool call goes back with that call, as gpt-oss expects to find it. And a step requires a tool
+ * call ({@code tool_choice: required}), because gpt-oss, asked to close a step, often began a final
+ * answer and the {@code close_step} call in the same reply. In four runs after both, none of 73 calls
+ * failed.
  */
 public final class PlannerExample {
 
