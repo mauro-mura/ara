@@ -46,10 +46,17 @@ final class PlanNarrator implements Consumer<AgentEvent> {
     private int plans, replans, notes, failedSteps, revisedSteps, emptySteps, toolCalls, dependencies;
     private final boolean planIsApproved;
     private String approval = "";          // how the person decided: approved, changed, rejected; "" if not asked
+    private final String failsOnPurpose;   // the tool the example makes fail once, or null
+    private boolean saidItIsOnPurpose;
 
-    /** @param planIsApproved whether a person approves the first plan, which adds a phase between 1 and 2 */
-    PlanNarrator(boolean planIsApproved) {
+    /**
+     * @param planIsApproved whether a person approves the first plan, which adds a phase between 1 and 2
+     * @param failsOnPurpose the tool the example makes fail on its first call, so its first failure is
+     *                       told as what it is; {@code null} when there is none
+     */
+    PlanNarrator(boolean planIsApproved, String failsOnPurpose) {
         this.planIsApproved = planIsApproved;
+        this.failsOnPurpose = failsOnPurpose;
     }
 
     @Override
@@ -226,6 +233,12 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         boolean aCheck = !lastTool.equals("read_file") && !lastTool.equals("write_file") && !lastTool.equals("list_files");
         if (failed) {
             System.out.println(PAD + Ansi.paint(Ansi.RED, "✘ " + lastTool + " answers: ") + firstLine(text));
+            if (lastTool.equals(failsOnPurpose) && !saidItIsOnPurpose) {
+                // Without this line the reader sees a red error and cannot tell it is the point.
+                System.out.println(PAD + Ansi.paint(Ansi.GREY, "(on purpose: this example's " + lastTool
+                        + " fails its first call, to show what ARA does with a failed step)"));
+                saidItIsOnPurpose = true;
+            }
         } else if (aCheck) {
             System.out.println(PAD + Ansi.paint(Ansi.GREEN, "✔ " + lastTool + " answers: ") + firstLine(text));
         }

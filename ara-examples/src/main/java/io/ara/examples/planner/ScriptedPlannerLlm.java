@@ -121,21 +121,30 @@ final class ScriptedPlannerLlm implements LlmClient {
 
     // ── reading the conversation ─────────────────────────────────────────────
 
-    private static String currentGoal(List<LlmMessage> messages) {
+    private static final String STEP_INSTRUCTION = "Execute step ";
+
+    /**
+     * The message that tells the step what to do. It is the one user message of the step, after
+     * the task, the plan, the results and the notes; the instruction is its last part.
+     */
+    private static int stepMessage(List<LlmMessage> messages) {
         for (int i = messages.size() - 1; i >= 0; i--) {
             String content = messages.get(i).content();
-            if (content != null && content.startsWith("Execute step ")) return content;
+            if (content != null && content.contains(STEP_INSTRUCTION)) return i;
         }
-        return "";
+        return -1;
+    }
+
+    private static String currentGoal(List<LlmMessage> messages) {
+        int at = stepMessage(messages);
+        if (at < 0) return "";
+        String content = messages.get(at).content();
+        return content.substring(content.lastIndexOf(STEP_INSTRUCTION));
     }
 
     /** The tool results this step has already received: its own history follows the step instruction. */
     private static List<String> observationsOfThisStep(List<LlmMessage> messages) {
-        int from = 0;
-        for (int i = 0; i < messages.size(); i++) {
-            String content = messages.get(i).content();
-            if (content != null && content.startsWith("Execute step ")) from = i;
-        }
+        int from = Math.max(stepMessage(messages), 0);
         return messages.subList(from, messages.size()).stream()
                 .map(LlmMessage::content)
                 .filter(content -> content != null && content.startsWith("Observation: "))

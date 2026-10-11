@@ -9,6 +9,10 @@
     <logger name="dev.langchain4j"                              level="WARN"/>
 
     <logger name="io.ara.runtime"                               level="WARN"/>
+
+    <!-- A failed plan step is part of what the planner example shows, and its narrator tells it in
+         plain words; the strategy's own WARN line about it would only interrupt the story. -->
+    <logger name="io.ara.runtime.strategy.PlanExecuteStrategy"  level="ERROR"/>
     
     <logger name="io.ara.runtime.strategy.ReactStrategy"        level="INFO"/>
 

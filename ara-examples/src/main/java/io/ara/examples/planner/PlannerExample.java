@@ -72,6 +72,9 @@ public final class PlannerExample {
     private static final String LIVE_BASE_URL = System.getProperty("ara.base.url", "http://127.0.0.1:8888/v1");
     private static final String LIVE_MODEL    = System.getProperty("ara.model", "gpt-oss-20b-Q4_K_S");
 
+    /** The style check fails its first call on purpose: it is how the example shows a replan. */
+    private static final String FLAKY_TOOL = "check_style";
+
     private static final String TASK = "Build a small Java library: a Book record, a Member record, and a "
             + "LoanService that lends a Book to a Member (it must import both). Run the style check. "
             + "Finish with a README.md that lists every file in the workspace.";
@@ -87,7 +90,7 @@ public final class PlannerExample {
                 live, LIVE_MODEL, LIVE_BASE_URL);
 
         // 1. The tools the agent may use: files in memory, plus a style check that fails the first time.
-        Workspace workspace = new Workspace().withFlakyTool("check_style",
+        Workspace workspace = new Workspace().withFlakyTool(FLAKY_TOOL,
                 "Runs the style check on the whole workspace.", 1,
                 "style service unavailable, try again later", "Style check passed: 0 issues.");
 
@@ -127,7 +130,7 @@ public final class PlannerExample {
             // 5. The task. The listener only watches the steps as they happen; without it the run is the same.
             PlannerConsole.section("the task");
             System.out.println(PlannerConsole.wrap(TASK, "  "));
-            PlanNarrator narrator = new PlanNarrator(true);
+            PlanNarrator narrator = new PlanNarrator(true, FLAKY_TOOL);
             AgentResponse response = agent.execute(AgentTask.of(TASK).withEventListener(narrator));
 
             // What is left only prints: the summary of the run, and what it really left in the workspace.
