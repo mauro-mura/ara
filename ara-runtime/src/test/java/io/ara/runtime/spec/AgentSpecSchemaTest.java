@@ -125,6 +125,7 @@ class AgentSpecSchemaTest {
             Map.entry("strategy object without type", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{}}}"),
             Map.entry("plan_execute with zero steps", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"plan_execute\",\"maxPlanSteps\":0}}}"),
             Map.entry("plan_execute with zero parallel steps", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"plan_execute\",\"maxParallelSteps\":0}}}"),
+            Map.entry("plan_execute with plan approval that is not a boolean", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"plan_execute\",\"approvePlan\":\"yes\"}}}"),
             Map.entry("plan_execute with a bad policy", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"plan_execute\",\"replanPolicy\":\"sometimes\"}}}"),
             Map.entry("react with an extra field", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"react\",\"depth\":2}}}"),
             Map.entry("custom params that are a list", "{\"schemaVersion\":1,\"agent\":{\"type\":\"a\"},\"execution\":{\"strategy\":{\"type\":\"mine\",\"params\":[]}}}"),

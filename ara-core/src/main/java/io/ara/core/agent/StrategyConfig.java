@@ -74,17 +74,35 @@ public sealed interface StrategyConfig permits
      *                              strategy logs a warning when this is above 1. Nullable on
      *                              purpose: a document or a three-argument config that never
      *                              mentions it stays exactly what it was, down to its hash
+     * @param approvePlan           {@code true} to have a person approve the first plan, through the
+     *                              runtime's {@code ApprovalGate}, before any step runs: the person may
+     *                              approve it, reject it (the task ends, with the reason) or send back a
+     *                              corrected plan. {@code null} or {@code false}: the plan runs as soon
+     *                              as it is made (the default). Nullable for the same reason as
+     *                              {@link #maxParallelSteps}: a config that never mentions it keeps its hash
      */
     record PlanExecute(
             String  replanPolicy,
             int     maxPlanSteps,
             int     maxStepRoundsPerStep,
-            Integer maxParallelSteps
+            Integer maxParallelSteps,
+            Boolean approvePlan
     ) implements StrategyConfig {
 
-        /** The configuration without parallelism: steps run one after the other. */
+        /** The configuration without parallelism and without plan approval. */
         public PlanExecute(String replanPolicy, int maxPlanSteps, int maxStepRoundsPerStep) {
-            this(replanPolicy, maxPlanSteps, maxStepRoundsPerStep, null);
+            this(replanPolicy, maxPlanSteps, maxStepRoundsPerStep, null, null);
+        }
+
+        /** The configuration with a parallelism limit and without plan approval. */
+        public PlanExecute(String replanPolicy, int maxPlanSteps, int maxStepRoundsPerStep,
+                           Integer maxParallelSteps) {
+            this(replanPolicy, maxPlanSteps, maxStepRoundsPerStep, maxParallelSteps, null);
+        }
+
+        /** This configuration, asking a person to approve the first plan. */
+        public PlanExecute withPlanApproval() {
+            return new PlanExecute(replanPolicy, maxPlanSteps, maxStepRoundsPerStep, maxParallelSteps, true);
         }
 
         public PlanExecute {
@@ -104,6 +122,9 @@ public sealed interface StrategyConfig permits
 
         /** Steps that may run at once: {@link #maxParallelSteps} or 1 when it is not set. */
         public int parallelSteps() { return maxParallelSteps == null ? 1 : maxParallelSteps; }
+
+        /** Whether a person approves the first plan: {@link #approvePlan} or {@code false} when it is not set. */
+        public boolean approvesPlan() { return Boolean.TRUE.equals(approvePlan); }
 
         @Override public String strategyName() { return "plan_execute"; }
 

@@ -273,6 +273,16 @@ ReAct plus in-loop self-correction — the micro-granularity counterpart to
   untouched. A `revise` step keeps its own result and re-plans the steps *after* it. With
   `"never"`, with no attempts left, with nothing left to revise, or when the new plan cannot
   be read, `revise` does not stop the task: the plan continues and the reason becomes a note.
+- **Plan approval** (`StrategyConfig.PlanExecute.approvePlan`, set with `withPlanApproval()`): after
+  the first plan is made and before any step runs, the plan goes to the runtime's `ApprovalGate` (the
+  one that gates tool calls, configured with `AraRuntime.builder().approvalGate(...)`) as an
+  `ApprovalRequest` with action `approve_plan` and the step goals as payload. `Approved` runs the
+  plan as it is; `Modified` runs the plan the person sent back (a list of goals, or text the plan
+  reader can read); `Rejected`, a timeout or a corrected plan with no step end the task as failed
+  with the reason, and a rejection is not replanned. Only the first plan is submitted, not a replan.
+  A config that asks for approval on a runtime with no gate fails before the first model call. The
+  request and its decision are in the trace (an `approve_plan` call and one observation), and the
+  wait counts against `executionTimeout`.
 - Falls back to concatenating raw step results (`buildFallbackAnswer`) if the synthesis
   call itself returns an empty response (context overflow or provider hiccup).
 - **Records a full execution trace** (`thought` for the plan, `tool_call`/`observation`
@@ -417,7 +427,7 @@ wrong variant) still runs with sane defaults rather than throwing a `ClassCastEx
 | Variant | Parameters (defaults) |
 |---|---|
 | `React` | none |
-| `PlanExecute` | `replanPolicy` (`"never"`), `maxPlanSteps` (8), `maxStepRoundsPerStep` (6) |
+| `PlanExecute` | `replanPolicy` (`"never"`), `maxPlanSteps` (8), `maxStepRoundsPerStep` (6), `maxParallelSteps` (`null`: one at a time; stored, not yet honoured), `approvePlan` (`null`: the plan runs as soon as it is made) |
 | `Reflexion` | `maxReflections` (2), `reflectionPrompt` (`null`), `reflectionProvider` (`null`) |
 | `ReflAct` | `maxReflections` (3), `unproductiveStreak` (2), `reflectOnToolFailure` (`true`), `reflectionProvider` (`null`) |
 | `Custom` | `strategyName` (required), `params` (open `Map<String,Object>`, empty when unset) — the extension seam for a strategy registered from outside `ara-core`; the framework never reads the map |

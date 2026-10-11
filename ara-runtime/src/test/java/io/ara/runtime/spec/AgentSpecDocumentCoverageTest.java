@@ -58,7 +58,7 @@ class AgentSpecDocumentCoverageTest {
             Map.entry(MemoryConfig.class, List.of("workingMemoryTokenBudget", "workingMemoryEviction",
                     "maxConversationTurns", "maxReflections", "reflectionPrompt", "contextSummarizerAgentId")),
             Map.entry(StrategyConfig.PlanExecute.class, List.of("replanPolicy", "maxPlanSteps", "maxStepRoundsPerStep",
-                    "maxParallelSteps")),
+                    "maxParallelSteps", "approvePlan")),
             Map.entry(StrategyConfig.Reflexion.class, List.of("maxReflections", "reflectionPrompt", "reflectionProvider")),
             Map.entry(StrategyConfig.ReflAct.class, List.of("maxReflections", "unproductiveStreak",
                     "reflectOnToolFailure", "reflectionProvider")),

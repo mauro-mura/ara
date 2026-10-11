@@ -44,6 +44,13 @@ final class PlanNarrator implements Consumer<AgentEvent> {
     private String lastTool = "";
     private boolean closedSincePlan;
     private int plans, replans, notes, failedSteps, revisedSteps, emptySteps, toolCalls, dependencies;
+    private final boolean planIsApproved;
+    private String approval = "";          // how the person decided: approved, changed, rejected; "" if not asked
+
+    /** @param planIsApproved whether a person approves the first plan, which adds a phase between 1 and 2 */
+    PlanNarrator(boolean planIsApproved) {
+        this.planIsApproved = planIsApproved;
+    }
 
     @Override
     public void accept(AgentEvent event) {
@@ -77,7 +84,11 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         System.out.println();
         System.out.println(PAD.substring(2) + "The model planned " + plan.path("steps").size() + " steps:");
         printSteps(plan);
-        section("2 · ARA runs the plan, one step at a time");
+        if (!planIsApproved) runSection();
+    }
+
+    private void runSection() {
+        section((planIsApproved ? "3" : "2") + " · ARA runs the plan, one step at a time");
         explain("For each step the model sees only what it needs: the task, the plan, a short result of each "
                 + "earlier step and the notes they left. Not the whole conversation so far. When the step is "
                 + "over, the model must say how it went by calling close_step: done, failed, or done-but-the-"
@@ -106,7 +117,7 @@ final class PlanNarrator implements Consumer<AgentEvent> {
                         + " finished and stay as they are, with their results and notes. "
                         + "Only the work still to do is planned again:"));
         printSteps(plan);
-        section("2 · ARA goes on with the new plan");
+        section((planIsApproved ? "3" : "2") + " · ARA goes on with the new plan");
     }
 
     private void printSteps(JsonNode plan) {
@@ -131,9 +142,50 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         }
     }
 
+    // ── the person approves the plan ─────────────────────────────────────────
+
+    private void onApprovalAsked() {
+        lastTool = "approve_plan";
+        section("2 · A person approves the plan");
+        explain("The agent is set to ask before it acts. ARA sends the plan to its approval gate (the same "
+                + "one that can hold back a tool call) and waits. Nothing runs until someone decides: approve "
+                + "it, change it, or reject it. The wait costs nothing; the agent is parked.");
+    }
+
+    /** What the gate answered, as the strategy recorded it. */
+    private void onApprovalDecided(String text) {
+        lastTool = "";
+        if (text.startsWith("Plan rejected")) {
+            approval = "rejected";
+            System.out.println(PAD + Ansi.paint(Ansi.RED, "✘ the plan is rejected: "
+                    + text.substring("Plan rejected: ".length())));
+            explain("Nothing ran. A rejection ends the task: ARA does not ask the model for another plan, "
+                    + "because nobody said what should be different.");
+            return;
+        }
+        boolean changed = text.startsWith("Plan approved with changes");
+        approval = changed ? "changed" : "approved";
+        System.out.println(PAD + Ansi.paint(Ansi.GREEN, changed
+                ? "✔ the plan is approved, with the person's changes:" : "✔ the plan is approved as it is"));
+        if (changed) {
+            JsonNode corrected = json(text.substring(text.indexOf('{')));
+            goals = new ArrayList<>();
+            numberOfId.clear();
+            if (corrected != null) corrected.path("steps").forEach(goal -> goals.add(goal.asText()));
+            for (int i = 0; i < goals.size(); i++) {
+                System.out.printf("%s%2d. %s%n", PAD, i + 1, goals.get(i));
+            }
+        }
+        runSection();
+    }
+
     // ── one step ─────────────────────────────────────────────────────────────
 
     private void onToolCall(ExecutionStep step) {
+        if ("approve_plan".equals(step.toolId())) {
+            onApprovalAsked();
+            return;
+        }
         announceStep();
         if ("close_step".equals(step.toolId())) {
             onClose(step.arguments());
@@ -165,6 +217,10 @@ final class PlanNarrator implements Consumer<AgentEvent> {
 
     private void onObservation(String text) {
         if (text == null || lastTool.isEmpty()) return;
+        if (lastTool.equals("approve_plan")) {
+            onApprovalDecided(text);
+            return;
+        }
         boolean failed = text.contains("failed") || text.contains("unavailable") || text.contains("error")
                 || text.contains("incompatible types") || text.contains("cannot find symbol");
         boolean aCheck = !lastTool.equals("read_file") && !lastTool.equals("write_file") && !lastTool.equals("list_files");
@@ -231,7 +287,7 @@ final class PlanNarrator implements Consumer<AgentEvent> {
     // ── the end ──────────────────────────────────────────────────────────────
 
     private void onFinalAnswer(String answer) {
-        section("3 · ARA asks the model for the final answer");
+        section((planIsApproved ? "4" : "3") + " · ARA asks the model for the final answer");
         explain("Every step is done. ARA gives the model the results and the notes of all the steps, and asks "
                 + "for one answer to the original task:");
         System.out.println(wrap(answer == null ? "" : answer, PAD));
@@ -251,6 +307,10 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         section("what plan_execute gave you");
         point("A plan before any work, as data: " + dependencies + " step(s) of the first plan said which steps they "
                 + "need, so the plan can be shown, checked and followed.");
+        if (!approval.isEmpty()) {
+            point("A person decided on the plan before anything ran: it was " + approval + ". The agent "
+                    + "waited for them through the same approval gate that holds back risky tool calls.");
+        }
         point("Small, focused prompts: each step saw the task, the plan and short results — not a transcript "
                 + "that grows with every tool call.");
         point(notes + " note(s) carried exact facts (paths, names, signatures) from the step that knew them to "

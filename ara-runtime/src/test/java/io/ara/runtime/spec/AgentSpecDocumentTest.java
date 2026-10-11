@@ -55,7 +55,7 @@ class AgentSpecDocumentTest {
                 .systemPrompt("Classify the request.").promptCatalogId("catalog-1")
                 .primaryLlm(primary).fallbackLlms(List.of(LlmProfile.of("backup")))
                 .llmSelectionPolicy(LlmSelectionPolicy.FAILOVER).logLlmIo(true).logLlmIoMaxChars(99)
-                .strategyConfig(new StrategyConfig.PlanExecute("on_failure", 6, 2, 3))
+                .strategyConfig(new StrategyConfig.PlanExecute("on_failure", 6, 2, 3, true))
                 .enabledTools(List.of("search", "calc")).mcpServerIds(List.of("files"))
                 .maxIterations(7).executionTimeout(Duration.ofSeconds(90)).maxTokensPerStep(2048)
                 .humanApprovalRequired(true).knowledgeBaseId("kb-1")
@@ -152,6 +152,7 @@ class AgentSpecDocumentTest {
                 new StrategyConfig.React(),
                 new StrategyConfig.PlanExecute("never", 4, 2),
                 new StrategyConfig.PlanExecute("on_failure", 4, 2, 3),
+                new StrategyConfig.PlanExecute("on_failure", 4, 2).withPlanApproval(),
                 new StrategyConfig.Reflexion(3, "think again", "judge"),
                 new StrategyConfig.ReflAct(5, 3, false, "judge"));
         for (StrategyConfig arm : arms) {
@@ -169,6 +170,17 @@ class AgentSpecDocumentTest {
         assertFalse(AgentSpecDocument.encode(spec).toString().contains("maxParallelSteps"));
         AgentSpec back = AgentSpecDocument.decode(AgentSpecDocument.encode(spec));
         assertNull(((StrategyConfig.PlanExecute) back.config().execution().strategyConfig()).maxParallelSteps());
+        assertEquals(spec.specHash(), back.specHash());
+    }
+
+    @Test
+    void planExecute_withoutPlanApproval_isEncodedWithoutTheField() {
+        AgentSpec spec = AgentSpec.root(AgentConfig.defaults().agentType("a")
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 4, 2)).build());
+
+        assertFalse(AgentSpecDocument.encode(spec).toString().contains("approvePlan"));
+        AgentSpec back = AgentSpecDocument.decode(AgentSpecDocument.encode(spec));
+        assertNull(((StrategyConfig.PlanExecute) back.config().execution().strategyConfig()).approvePlan());
         assertEquals(spec.specHash(), back.specHash());
     }
 

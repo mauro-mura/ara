@@ -6,6 +6,7 @@ import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionStrategy;
 import io.ara.core.agent.StrategyConfig;
+import io.ara.core.hitl.ApprovalGate;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -17,6 +18,7 @@ import io.ara.core.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -65,6 +67,28 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
     Be thorough and self-contained.
     """;
 
+    /** Where the plan goes when a config asks for it to be approved; {@code null}: there is nowhere to send it. */
+    private final ApprovalGate approvalGate;
+    private final Duration approvalTimeout;
+
+    /** A strategy that cannot have its plan approved: a config that asks for it fails the task. */
+    public PlanExecuteStrategy() {
+        this(null, Duration.ZERO);
+    }
+
+    /**
+     * A strategy that can have its plan approved by a person, through {@code approvalGate}, for the
+     * configs that ask for it ({@code StrategyConfig.PlanExecute.approvePlan}). The gate is the
+     * runtime's own, the one that gates tool calls; the strategy is built once and shared, so the
+     * gate is given here and not looked up per task.
+     *
+     * @param approvalTimeout how long a person has to decide before the task fails
+     */
+    public PlanExecuteStrategy(ApprovalGate approvalGate, Duration approvalTimeout) {
+        this.approvalGate = approvalGate;
+        this.approvalTimeout = Objects.requireNonNull(approvalTimeout, "approvalTimeout must not be null");
+    }
+
     @Override
     public String strategyName() {
         return "plan_execute";
@@ -97,6 +121,13 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                     + "' for closing a step, but this agent has a tool with that name; rename it",
                     0, 0, 0, List.of());
         }
+        if (pe.approvesPlan() && approvalGate == null) {
+            // Failing before the first model call, not after the plan is made: a plan nobody can
+            // approve must not run as if it had been, and the run has spent nothing yet.
+            return ExecutionResult.failure("plan_execute is set to have its plan approved, but the runtime "
+                    + "has no ApprovalGate; configure one with AraRuntime.builder().approvalGate(...)",
+                    0, 0, 0, List.of());
+        }
         PlanRun run = newRun(task, llm, memory, tools, config, resolvedTools, pe);
         PlanTally tally = new PlanTally(task);
 
@@ -107,6 +138,12 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         switch (planning) {
             case PlanPlanning.Planning.Failed failed -> { return failed.result(); }
             case PlanPlanning.Planning.Planned planned -> progress = new Progress(new ArrayList<>(planned.steps()));
+        }
+        if (pe.approvesPlan()) {
+            switch (PlanApproval.review(run, tally, progress.plan, approvalGate, approvalTimeout)) {
+                case PlanApproval.Review.Stopped stopped -> { return stopped.result(); }
+                case PlanApproval.Review.Approved approved -> progress.plan = new ArrayList<>(approved.steps());
+            }
         }
         log.debug("Plan ({} steps) for task [{}]: {}", progress.plan.size(), task.taskId(), progress.plan);
 

@@ -202,7 +202,9 @@ final class RuntimeAssembler {
 
         ReactStrategy       reactStrategy     = new ReactStrategy();
         ReSpActStrategy     respactStrategy   = new ReSpActStrategy();
-        PlanExecuteStrategy planStrategy      = new PlanExecuteStrategy();
+        // Same gate and same waiting time as the tool calls it gates, so one gate serves both.
+        PlanExecuteStrategy planStrategy      = new PlanExecuteStrategy(
+                b.approvalGate, ApprovalToolRegistry.DEFAULT_APPROVAL_TIMEOUT);
         ReflexionStrategy   reflexionStrategy = new ReflexionStrategy(reactStrategy, reflection);
         // Same reflection router as ReflexionStrategy — both support routing the
         // critique call to a different provider than the main loop's own model.
