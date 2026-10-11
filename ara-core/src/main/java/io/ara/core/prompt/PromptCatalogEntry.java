@@ -13,8 +13,9 @@ import java.util.Objects;
  * a data type instead of an agent.
  *
  * <p>This is the content an {@code AgentIdentity.promptCatalogId} and an
- * {@code AgentSpec.fewShotRefs} entry point at; {@link
- * io.ara.runtime.prompt.CatalogPromptShaper} (in {@code ara-runtime}) resolves the former at
+ * {@code AgentSpec.fewShotRefs} entry point at; {@code
+ * io.ara.runtime.prompt.CatalogPromptShaper} (in {@code ara-runtime}; this module cannot
+ * link to it) resolves the former at
  * {@code createAgent()} time.
  *
  * @param entryId            stable identity of this entry. For a {@code SYSTEM_PROMPT}
