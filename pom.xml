@@ -323,6 +323,22 @@
                     <artifactId>maven-javadoc-plugin</artifactId>
                     <version>3.12.0</version>
                 </plugin>
+                <!--
+                Pinned on purpose. The central-publishing plugin stages a release by letting
+                this plugin "install" into target/central-staging, and then deletes the
+                maven-metadata-central-staging.xml that the install leaves in each artifact
+                directory before it zips the bundle. Unpinned, the version follows the Maven
+                that the CI runner happens to have: the 1.0.2 release ran 3.1.4 and was accepted;
+                the 1.0.3 run got 3.2.0, the metadata was not cleaned up, and Central rejected
+                the bundle with "content that does NOT have a .pom file" for ara, ara-core,
+                ara-runtime and ara-adapters. Bump it only with a release that has been
+                validated by Central.
+                -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>3.1.4</version>
+                </plugin>
             </plugins>
         </pluginManagement>
 
