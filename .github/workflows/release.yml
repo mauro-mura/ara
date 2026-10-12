@@ -40,6 +40,27 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      # The ubuntu-latest image now ships Maven 3.10.x, and central-publishing-maven-plugin
+      # 0.11.0 stages releases in a way only Maven 3.9.x cleans up correctly: 3.10 treats
+      # the file:// staging repository as a local repository and writes
+      # maven-metadata-local.xml and _remote.repositories into the bundle, which Central
+      # then rejects with "Bundle has content that does NOT have a .pom file"
+      # (central-publishing-maven-plugin issue #79; the fix, PR #80, is not in any
+      # released version yet). The 1.0.2 release succeeded because the runner image then
+      # shipped 3.9.x; the 1.0.3 runs fail on the newer image regardless of the tag.
+      # Verified locally: same project, 3.10.0 produces a rejected bundle, 3.9.16 a
+      # clean one. Un-pin once the plugin ships a release containing the fix.
+      - name: Install Maven 3.9.16
+        run: |
+          curl -fsSL -o /tmp/maven.tar.gz \
+            https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz
+          sudo mkdir -p /opt/maven-3.9.16
+          sudo tar -xzf /tmp/maven.tar.gz --strip-components=1 -C /opt/maven-3.9.16
+          echo "/opt/maven-3.9.16/bin" >> "$GITHUB_PATH"
+
+      - name: Check Maven version
+        run: mvn -version
+
       - name: Set up JDK 21 and Maven credentials
         uses: actions/setup-java@v4
         with:
