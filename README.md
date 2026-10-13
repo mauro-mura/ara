@@ -103,7 +103,8 @@ LlmClient llama = AraLlmClientFactory.ollama()
 ```
 
 Requires **Java 21+** and **Maven 3.9+**. Add `ara-adapters` for real providers →
-[Providers guide](docs/PROVIDERS.md).
+[Providers guide](docs/PROVIDERS.md). Models can also be declared in `ara.yml` and loaded with
+`AraLlmClientFactory.fromConfig` → [Models in a configuration file](docs/PROVIDERS.md#models-in-a-configuration-file).
 
 <details>
 <summary><b>Build from source</b></summary>

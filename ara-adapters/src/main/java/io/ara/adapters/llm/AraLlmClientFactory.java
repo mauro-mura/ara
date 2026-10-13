@@ -8,6 +8,8 @@ import io.ara.adapters.llm.ollama.OllamaLlmClient;
 import io.ara.adapters.llm.openai.OpenAiLlmClient;
 import io.ara.core.llm.LlmClient;
 
+import java.util.Map;
+
 /**
  * Factory that provides builder access for all ARA-supported LLM adapters.
  *
@@ -49,6 +51,9 @@ import io.ara.core.llm.LlmClient;
  * <p>For OpenAI-compatible endpoints (Azure OpenAI, Groq, LM Studio, Together AI, …)
  * use {@link #openAi()} and call {@code .baseUrl(String)} on the returned builder.
  *
+ * <p>The same clients can be described in a configuration file instead of code — see
+ * {@link #fromConfig(Map)}.
+ *
  * @see OpenAiLlmClient
  * @see AnthropicLlmClient
  * @see OllamaLlmClient
@@ -59,6 +64,62 @@ import io.ara.core.llm.LlmClient;
 public final class AraLlmClientFactory {
 
     private AraLlmClientFactory() {}
+
+    /**
+     * Builds the named clients described by the {@code ara.llm.*} entries of a flat configuration map, so
+     * that a deployment's models live in its configuration file rather than in code:
+     *
+     * <pre>{@code
+     * ara:
+     *   llm:
+     *     main:                          # the name an agent refers to in llm.primary.model
+     *       provider: openai
+     *       model: gpt-4o
+     *       apiKey: ${OPENAI_API_KEY}
+     *     local:
+     *       provider: ollama
+     *       model: llama3.2
+     * }</pre>
+     *
+     * <pre>{@code
+     * AraRuntime.Builder runtime = AraRuntime.builder();
+     * AraLlmClientFactory.fromConfig(AraYamlLoader.load()).forEach(runtime::llmClient);
+     * }</pre>
+     *
+     * <p>The map is the one {@code io.ara.runtime.config.AraYamlLoader} returns: dotted keys, environment
+     * variables already substituted ({@code ${VAR}}, {@code ${VAR:default}}). Keys other than
+     * {@code ara.llm.<name>.<key>} are ignored, so the whole map can be passed. This method does not read
+     * YAML itself — {@code ara-adapters} does not depend on the runtime — and a name cannot contain a dot.
+     *
+     * <table>
+     *   <caption>Providers and their keys</caption>
+     *   <tr><th>{@code provider}</th><th>keys</th></tr>
+     *   <tr><td>{@code openai}</td><td>{@code model} (required), {@code apiKey} (required),
+     *       {@code baseUrl}, {@code temperature}, {@code maxTokens}, {@code timeoutSeconds},
+     *       {@code logRequests}, {@code logResponses}</td></tr>
+     *   <tr><td>{@code anthropic}</td><td>as {@code openai}; {@code model} optional (the adapter's
+     *       default applies)</td></tr>
+     *   <tr><td>{@code mistral}</td><td>as {@code anthropic}</td></tr>
+     *   <tr><td>{@code ollama}</td><td>{@code model}, {@code baseUrl} (both optional: a local
+     *       {@code llama3.2} by default), {@code temperature}, {@code timeoutSeconds},
+     *       {@code logRequests}, {@code logResponses}</td></tr>
+     * </table>
+     *
+     * <p>An OpenAI-compatible server that needs no key still needs a value for {@code apiKey}; write it in
+     * the file — {@code apiKey: ${LLM_API_KEY:not-required}} — rather than having a placeholder chosen here.
+     * {@code chatJimmy} and {@code openCode} are not available from a file; build them with their builders.
+     *
+     * <p>The file is read strictly: an unknown key, a key of another provider, a missing required key, a
+     * value that is not the number or boolean it should be — each is refused with a message that names the
+     * full key. No provider is contacted: a wrong URL or key shows at the first request.
+     *
+     * @param config flat configuration entries, as produced by the YAML loader
+     * @return the clients by name, in name order; empty if the map has no {@code ara.llm.*} entry
+     * @throws IllegalArgumentException if an entry is malformed, as described above
+     */
+    public static Map<String, LlmClient> fromConfig(Map<String, String> config) {
+        return LlmConfigReader.read(config);
+    }
 
     /**
      * Returns a builder for an OpenAI (or OpenAI-compatible) {@link LlmClient}.

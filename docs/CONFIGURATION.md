@@ -306,7 +306,9 @@ test keeps the schema and the decoder in step.
   object whose `type` is none of the built-in names is a custom strategy with free-form `params`.
 
 **Models and tools are names.** `llm.primary.model` is the id of a client registered on the
-runtime, never an endpoint, so an API key cannot be written in a file. A profile that carries
+runtime, never an endpoint, so an API key cannot be written in a file. The clients themselves can be
+defined in `ara.yml` under `ara.llm.<name>` and loaded with `AraLlmClientFactory.fromConfig` — see
+[Models in a configuration file](PROVIDERS.md#models-in-a-configuration-file). A profile that carries
 an inline transport (`baseUrl`/`modelName`/`apiKey`) cannot be exported, and trying fails
 with a message saying so.
 

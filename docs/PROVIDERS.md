@@ -5,6 +5,7 @@
 - [Connecting a real LLM](#connecting-a-real-llm)
 - [Reusing an opencode server](#reusing-an-opencode-server)
 - [Multi-provider runtimes](#multi-provider)
+- [Models in a configuration file](#models-in-a-configuration-file)
 - [LLM I/O logging](#llm-io-logging)
 - [OpenTelemetry tracing](#opentelemetry-tracing)
 - [LlmException — typed error handling](#llmexception--typed-error-handling)
@@ -157,6 +158,66 @@ AgentConfig config = AgentConfig.defaults()
         .primaryLlm(LlmProfile.of("smart"))   // zero credentials in AgentConfig
         .build();
 ```
+
+## Models in a configuration file
+
+The clients above can be described in `ara.yml` instead of Java, so that a deployment's models are
+configuration and not code. Each entry is a name and a provider:
+
+```yaml
+ara:
+  llm:
+    main:
+      provider: openai
+      model: gpt-4o
+      apiKey: ${OPENAI_API_KEY}          # from the environment — never write a key in the file
+      temperature: 0.2
+    local:
+      provider: ollama
+      model: llama3.2
+    lmstudio:                             # any OpenAI-compatible server
+      provider: openai
+      baseUrl: http://localhost:1234/v1
+      model: llama-3.1-8b-instruct
+      apiKey: ${LLM_API_KEY:not-required} # the server needs no key, the client wants a value
+```
+
+```java
+AraRuntime.Builder runtime = AraRuntime.builder();
+AraLlmClientFactory.fromConfig(AraYamlLoader.load()).forEach(runtime::llmClient);
+```
+
+`AraLlmClientFactory.fromConfig(Map<String, String>)` takes the flat map `AraYamlLoader` returns
+(environment variables already substituted) and gives back the clients by name. Pass the whole map: keys
+that are not `ara.llm.<name>.<key>` are ignored. A name cannot contain a dot. The names are what an agent
+refers to in `primaryLlm` or, in an [agent document](CONFIGURATION.md#agents-as-documents--define-an-agent-in-a-file),
+`llm.primary.model`.
+
+| `provider` | keys |
+|---|---|
+| `openai` | `model` and `apiKey` (required); `baseUrl`, `temperature`, `maxTokens`, `timeoutSeconds`, `logRequests`, `logResponses` |
+| `anthropic` | as `openai`; `model` may be left out (the adapter's default applies) |
+| `mistral` | as `anthropic` |
+| `ollama` | `model`, `baseUrl` (both optional — a local `llama3.2` by default), `temperature`, `timeoutSeconds`, `logRequests`, `logResponses` |
+
+**Strict by design.** An unknown key, a key that belongs to another provider (`apiKey` on `ollama`), a
+missing required key, or a value that is not the number or boolean it should be is refused with a message
+that names the full key — `ara.llm.main.modle: unknown key for provider 'openai'`. A typo never becomes
+a client running on a default. A blank value counts as missing, which is what `${OPENAI_API_KEY}` becomes
+when the variable is not set, so that case is reported as a missing key and not as a 401 at the first
+request. One bad entry fails the whole load.
+
+**No provider is contacted.** Loading a file only records settings; a wrong URL or key shows at the first
+request.
+
+**What is not available from a file.** `chatJimmy` and `openCode` — the first is shaped by a proxy and a client-IP header
+switch, which are call-site decisions, the second launches a local executable and its free-tier tools grant access on
+whichever host the server sits on (see [Reusing an opencode server](#reusing-an-opencode-server)). Build
+those with their builders. And there is no placeholder API key: a server that needs none still gets a value
+from the file, as in the `lmstudio` entry.
+
+**The provider list is closed.** `fromConfig` knows the four providers above; it is not a plug-in point. A
+provider of your own is built in Java and registered next to the loaded ones, with `.llmClient(name, client)`.
 
 ## LLM I/O logging
 
