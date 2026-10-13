@@ -13,6 +13,7 @@ import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentContract;
 import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentLifecycleManager;
+import io.ara.core.agent.MemoryScope;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
 import io.ara.core.agent.SessionStore;
@@ -88,6 +89,13 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
     private final MediaStore       mediaStore;
     private final ArtifactExtractor artifactExtractor;
     private final Function<AgentConfig, MemoryManager> memoryManagerFactory;
+    /**
+     * ADR-0091 D3 — factory over {@link MemoryScope}: receives the session id that used to be
+     * discarded at {@link #buildInstance}. When set it takes precedence over
+     * {@link #memoryManagerFactory}, which is then only the fallback a scoped factory never
+     * invokes. {@code null} by default: behaviour unchanged.
+     */
+    private final Function<MemoryScope, MemoryManager> scopedMemoryManagerFactory;
     private final Function<AgentConfig, ToolRegistry>  toolRegistryFactory;
     private final ExecutionPlanner executionPlanner;
     private final List<AgentInterceptor> interceptors;
@@ -146,6 +154,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         this.defaultLlmClientId   = builder.defaultLlmClientId;
         this.llmClientFactory     = builder.llmClientFactory;
         this.memoryManagerFactory = builder.memoryManagerFactory;
+        this.scopedMemoryManagerFactory = builder.scopedMemoryManagerFactory;
         this.toolRegistryFactory  = builder.toolRegistryFactory;
         this.executionPlanner     = builder.executionPlanner;
         this.interceptors         = List.copyOf(builder.interceptors);
@@ -326,7 +335,11 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
      * registry gets rebuilt.
      */
     private AgentInstance buildInstance(AgentConfig config) {
-        Function<SessionId, MemoryManager> sessionMemoryFactory = sid -> memoryManagerFactory.apply(config);
+        // ADR-0091 D3: the scoped factory receives the session id instead of it being discarded
+        // here; the unscoped factory keeps the old contract (same manager regardless of session).
+        Function<SessionId, MemoryManager> sessionMemoryFactory = scopedMemoryManagerFactory != null
+                ? sid -> scopedMemoryManagerFactory.apply(new MemoryScope(config, sid))
+                : sid -> memoryManagerFactory.apply(config);
         ToolRegistry toolRegistry = toolRegistryFactory.apply(config);
         WiringFactory wiringFactory = new DefaultWiringFactory(
                 llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
@@ -467,6 +480,7 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         private ArtifactExtractor artifactExtractor = ArtifactExtractor.none();
         private final Map<String, McpServerBinding> mcpServers = new LinkedHashMap<>();
         private Function<AgentConfig, MemoryManager>  memoryManagerFactory;
+        private Function<MemoryScope, MemoryManager>  scopedMemoryManagerFactory;
         private Function<AgentConfig, ToolRegistry>   toolRegistryFactory;
         private ExecutionPlanner  executionPlanner;
         private List<AgentInterceptor> interceptors = List.of();
@@ -572,6 +586,32 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
 
         public Builder memoryManagerFactory(Function<AgentConfig, MemoryManager> factory) {
             this.memoryManagerFactory = factory;
+            return this;
+        }
+
+        /**
+         * ADR-0091 D3 — sets a memory factory that receives {@link MemoryScope}: the agent
+         * config <em>and</em> the session id the manager will serve, so a memory implementation
+         * that scopes its events per session can learn the session. Takes precedence over
+         * {@link #memoryManagerFactory(Function)}: when both are set, the scoped one builds
+         * every session's manager and the other is never invoked. One of the two is required;
+         * not calling either leaves {@link #build()} failing as before.
+         */
+        public Builder memoryManagerScopeFactory(Function<MemoryScope, MemoryManager> factory) {
+            this.scopedMemoryManagerFactory = Objects.requireNonNull(factory, "factory must not be null");
+            return this;
+        }
+
+        /**
+         * ADR-0091 D3 — as {@link #memoryManagerScopeFactory(Function)} for assemblers that hold
+         * an optional factory ({@code null} means "not set", identical to never calling this):
+         * the runtime assembler wires the scoped factory only when the runtime builder received
+         * one, and must degrade to the unscoped behaviour otherwise.
+         */
+        public Builder memoryManagerScopeFactoryIfPresent(Function<MemoryScope, MemoryManager> factory) {
+            if (factory != null) {
+                this.scopedMemoryManagerFactory = factory;
+            }
             return this;
         }
 
@@ -683,7 +723,10 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
             if (llmClientRegistry.isEmpty()) {
                 throw new IllegalStateException("AgentFactory.Builder: at least one llmClient must be registered");
             }
-            requireNonNull(memoryManagerFactory, "memoryManagerFactory");
+            // ADR-0091 D3: one of the two memory factories; the scoped one supersedes the other.
+            if (memoryManagerFactory == null && scopedMemoryManagerFactory == null) {
+                requireNonNull(null, "memoryManagerFactory / memoryManagerScopeFactory");
+            }
             requireNonNull(toolRegistryFactory,  "toolRegistry / toolRegistryFactory");
             requireNonNull(executionPlanner,     "executionPlanner");
             requireNonNull(registry,             "registry");

@@ -153,6 +153,13 @@ final class RuntimeAssembler {
             throw new IllegalStateException(
                     "AraRuntime.Builder: set either toolRegistry(...) or toolRegistryFactory(...), not both");
         }
+        // ADR-0091 D3: the scoped factory supersedes the unscoped one; supplying both would
+        // silently leave one of them never invoked.
+        if (b.memoryManagerFactory != null && b.memoryManagerScopeFactory != null) {
+            throw new IllegalStateException(
+                    "AraRuntime.Builder: set either memoryManagerFactory(...) or "
+                    + "memoryManagerScopeFactory(...), not both — the scoped factory supersedes the other");
+        }
     }
 
     /** Wraps every registered client so every LLM call — including reflection — is instrumented. */
@@ -262,6 +269,9 @@ final class RuntimeAssembler {
                 .toolRegistryFactory(agentCfg ->
                         buildToolChain(agentCfg, perAgentToolRegistry, messageBus))
                 .memoryManagerFactory(memFactory)
+                // ADR-0091 D3: when the builder set a scoped memory factory, it supersedes
+                // memFactory per session (which stays as the fallback AgentFactory requires).
+                .memoryManagerScopeFactoryIfPresent(b.memoryManagerScopeFactory)
                 .executionPlanner(planner)
                 .telemetry(b.telemetry)
                 .sessionStore(b.sessionStore)

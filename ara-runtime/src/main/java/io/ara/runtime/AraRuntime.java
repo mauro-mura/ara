@@ -3,6 +3,7 @@ package io.ara.runtime;
 import io.ara.core.agent.AgentConfig;
 import io.ara.core.agent.AgentContract;
 import io.ara.core.agent.AgentFuture;
+import io.ara.core.agent.MemoryScope;
 import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentTask;
@@ -972,6 +973,8 @@ public final class AraRuntime implements AutoCloseable {
         String defaultRetrieverId;
         RetrieverRouter retrieverRouter;
         Function<AgentConfig, MemoryManager> memoryManagerFactory;
+        /** ADR-0091 D3 — session-scoped memory factory; see {@link #memoryManagerScopeFactory}. */
+        Function<MemoryScope, MemoryManager> memoryManagerScopeFactory;
         EmbeddingClient embeddingClient;
         SemanticStore   semanticStore;
         TokenCounter    tokenCounter;
@@ -1133,6 +1136,19 @@ public final class AraRuntime implements AutoCloseable {
 
         public Builder memoryManagerFactory(Function<AgentConfig, MemoryManager> factory) {
             this.memoryManagerFactory = factory;
+            return this;
+        }
+
+        /**
+         * ADR-0091 D3 — memory factory over {@link MemoryScope}: the agent config <em>and</em>
+         * the session id each manager will serve, so a memory implementation that scopes its
+         * events per session can learn the session ({@code AgentFactory} used to discard it).
+         * Mutually exclusive with {@link #memoryManagerFactory(Function)}: supplying both is
+         * refused at build time, like {@code toolRegistry}/{@code toolRegistryFactory}, rather
+         * than silently ignoring one.
+         */
+        public Builder memoryManagerScopeFactory(Function<MemoryScope, MemoryManager> factory) {
+            this.memoryManagerScopeFactory = Objects.requireNonNull(factory, "factory must not be null");
             return this;
         }
 
