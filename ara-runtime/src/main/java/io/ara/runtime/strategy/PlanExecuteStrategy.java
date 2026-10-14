@@ -137,18 +137,26 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         Progress progress;
         switch (planning) {
             case PlanPlanning.Planning.Failed failed -> { return failed.result(); }
-            case PlanPlanning.Planning.Planned planned -> progress = new Progress(new ArrayList<>(planned.steps()));
+            case PlanPlanning.Planning.Planned planned ->
+                    progress = new Progress(new ArrayList<>(planned.steps()), new ArrayList<>(planned.dependsOn()));
         }
         if (pe.approvesPlan()) {
             switch (PlanApproval.review(run, tally, progress.plan, approvalGate, approvalTimeout)) {
                 case PlanApproval.Review.Stopped stopped -> { return stopped.result(); }
-                case PlanApproval.Review.Approved approved -> progress.plan = new ArrayList<>(approved.steps());
+                case PlanApproval.Review.Approved approved -> {
+                    // A person may have added, removed or reordered steps — the dependency
+                    // indices resolved against the original plan cannot be trusted against
+                    // whatever they sent back, so the approved plan runs one step at a time,
+                    // exactly like a plan with no dependency information at all.
+                    progress.plan = new ArrayList<>(approved.steps());
+                    progress.dependsOn = emptyDependencies(progress.plan.size());
+                }
             }
         }
         log.debug("Plan ({} steps) for task [{}]: {}", progress.plan.size(), task.taskId(), progress.plan);
 
         // ── Phase 2: Execution ─────────────────────────────────────────────────
-        Optional<ExecutionResult> aborted = executeSteps(run, tally, progress, pe.replanPolicy());
+        Optional<ExecutionResult> aborted = executeSteps(run, tally, progress, pe.replanPolicy(), pe.parallelSteps());
         if (aborted.isPresent()) {
             return aborted.get();
         }
@@ -175,10 +183,6 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         boolean nativeTools = llm.supportsNativeTools();
         String plannerCatalog = ToolCatalogFormatter.formatForPlanning(resolvedTools);
         String stepCatalog = nativeTools ? "" : ToolCatalogFormatter.format(stepTools);
-        if (pe.parallelSteps() > 1) {
-            log.warn("maxParallelSteps={} is set but parallel steps are not implemented yet; "
-                    + "steps run one at a time", pe.parallelSteps());
-        }
         return new PlanRun(
                 task, llm, LlmCallContext.of(config, task), tools,
                 resolvedTools, List.copyOf(stepTools),
@@ -190,31 +194,89 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
     }
 
     /**
-     * Where phase 2 stands: the plan (which a replan may rewrite from the current step on), the
-     * results of the steps done so far, the step to run next and how many replans were used.
+     * Where phase 2 stands: the plan (which a replan may rewrite from the current step on), each
+     * step's dependencies (resolved to indices, kept in step with {@code plan} — see
+     * {@link #replaceFrom}), the results of the steps done so far, the step to run next and how
+     * many replans were used.
      *
      * <p>{@code results} is a compact key-value store, not appended to working memory: each step
      * call receives only the system prompt, the task, a plan summary and a summary of the
-     * previous results. Not thread-safe; steps run one at a time.
+     * previous results. Not thread-safe; steps run one at a time or, inside one batch, on
+     * worker threads that each write their own local tally and nothing of {@code Progress}
+     * itself until the batch is done and the caller merges in plan order.
      */
     private static final class Progress {
         List<String> plan;
+        List<java.util.Set<Integer>> dependsOn;
         final Map<Integer, String> results = new LinkedHashMap<>();
         int stepIdx;
         int replanAttempts;
+        /**
+         * Set by {@link #replaceFrom} whenever a replan rewrites the plan from some step on;
+         * checked (and cleared) by the batch loop in {@code executeSteps} to stop applying the
+         * rest of a batch's already-computed outcomes once they no longer describe steps the
+         * (possibly different) rewritten plan still has at those indices. Not reliable as "did
+         * {@code stepIdx} move": {@code stepRevised}'s successful-replan path advances
+         * {@code stepIdx} unconditionally before deciding whether to replan at all, so comparing
+         * indices cannot tell the two apart from here.
+         */
+        boolean planRewritten;
 
-        Progress(List<String> plan) {
+        Progress(List<String> plan, List<java.util.Set<Integer>> dependsOn) {
             this.plan = plan;
+            this.dependsOn = dependsOn;
         }
     }
 
+    /** {@code count} empty dependency sets — "no known dependency", the one-at-a-time default. */
+    private static List<java.util.Set<Integer>> emptyDependencies(int count) {
+        List<java.util.Set<Integer>> empty = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            empty.add(java.util.Set.of());
+        }
+        return empty;
+    }
+
     /**
-     * Runs the plan's steps in order until all are done.
+     * The steps that may run together starting at {@code progress.stepIdx}: as many consecutive
+     * steps as declare no dependency on anything at or after {@code stepIdx} itself — i.e. every
+     * dependency they have is already satisfied before this batch starts — capped at
+     * {@code maxParallel}.
+     *
+     * <p>This is deliberately not full topological batching across the remaining plan: steps run
+     * in written order (unchanged from before parallelism existed), so the question is only "how
+     * far past {@code stepIdx} can the next batch reach", never "which steps anywhere in the plan
+     * are independent of each other". A step whose dependency falls <em>inside</em> this batch —
+     * on another step that would start in the same breath, not one already finished — stops the
+     * batch before it, since that dependency's result would not exist yet.
+     *
+     * <p>Always returns at least {@code [stepIdx]}: a batch is never empty while there is a step
+     * left to run.
+     */
+    private static List<Integer> nextBatch(Progress progress, int maxParallel) {
+        int start = progress.stepIdx;
+        List<Integer> batch = new ArrayList<>(maxParallel);
+        batch.add(start);
+        for (int candidate = start + 1; candidate < progress.plan.size() && batch.size() < maxParallel; candidate++) {
+            java.util.Set<Integer> deps = progress.dependsOn.get(candidate);
+            boolean allSatisfiedBeforeBatch = deps.stream().allMatch(dep -> dep < start);
+            if (!allSatisfiedBeforeBatch) {
+                break;
+            }
+            batch.add(candidate);
+        }
+        return batch;
+    }
+
+    /**
+     * Runs the plan's steps in order until all are done. Steps a {@linkplain #nextBatch batch}
+     * groups together run concurrently; everything else about step execution — the Think →
+     * Act → Observe loop, {@code close_step}, replanning, notes — is unchanged.
      *
      * @return empty when every step finished; otherwise the result that ends the task
      */
     private static Optional<ExecutionResult> executeSteps(
-            PlanRun run, PlanTally tally, Progress progress, String replanPolicy) {
+            PlanRun run, PlanTally tally, Progress progress, String replanPolicy, int maxParallel) {
         while (progress.stepIdx < progress.plan.size()) {
             if (PlanRun.cancelled()) {
                 return Optional.of(tally.fail("Cancelled"));
@@ -225,8 +287,11 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                         "Max iterations reached while executing step " + (progress.stepIdx + 1)));
             }
 
-            StepOutcome outcome = PlanStepExecutor.executeStep(
-                    progress.stepIdx, progress.plan, progress.results, run, tally);
+            List<Integer> batch = nextBatch(progress, maxParallel);
+            List<StepOutcome> outcomes = batch.size() == 1
+                    ? List.of(PlanStepExecutor.executeStep(
+                            batch.get(0), progress.plan, progress.results, run, tally))
+                    : executeBatch(batch, progress, run, tally);
 
             if (tally.budgetFailure != null) {
                 return Optional.of(tally.budgetFailure);
@@ -235,16 +300,109 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
                 return Optional.of(tally.fail("Cancelled"));
             }
 
-            Optional<ExecutionResult> ended = switch (outcome) {
-                case StepOutcome.Done done -> stepDone(done, progress);
-                case StepOutcome.Revise revise -> stepRevised(revise, progress, replanPolicy, run, tally);
-                case StepOutcome.Failed failed -> stepFailed(failed, progress, replanPolicy, run, tally);
-            };
-            if (ended.isPresent()) {
-                return ended;
+            // Outcomes are applied in plan order, exactly as a sequential run would: a batch of
+            // one takes this loop body once, same as before batching existed, and a batch of
+            // several applies stepDone/stepRevised/stepFailed's existing per-step logic to each
+            // in turn rather than inventing a batch-level variant of it. The first outcome that
+            // ends the task (a failure with no replan left, a cancellation, a budget breach)
+            // stops there — later outcomes in the same batch, already computed, are simply not
+            // applied, the same way a sequential run never reaches steps after the one that
+            // ended it.
+            progress.planRewritten = false;
+            for (int i = 0; i < batch.size(); i++) {
+                StepOutcome outcome = outcomes.get(i);
+                Optional<ExecutionResult> ended = switch (outcome) {
+                    case StepOutcome.Done done -> stepDone(done, progress);
+                    case StepOutcome.Revise revise -> stepRevised(revise, progress, replanPolicy, run, tally);
+                    case StepOutcome.Failed failed -> stepFailed(failed, progress, replanPolicy, run, tally);
+                };
+                if (ended.isPresent()) {
+                    return ended;
+                }
+                if (tally.budgetFailure != null) {
+                    return Optional.of(tally.budgetFailure);
+                }
+                // stepRevised/stepFailed may have replanned, which rewrites progress.plan (and
+                // dependsOn) from some index on — the remaining outcomes in this batch were
+                // computed against the plan as it stood before that, so they no longer describe
+                // steps the (possibly different) revised plan still has at those indices.
+                if (progress.planRewritten) {
+                    break;
+                }
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Runs every step in {@code batch} on its own virtual thread, each against a {@link
+     * PlanTally} local to that worker — {@code PlanTally} is not thread-safe and steps run one
+     * at a time outside of a batch, so concurrent steps must not share one. Bounded by
+     * {@code run.deadline()}, mirroring {@code ReactExecutionSupport.dispatchParallel}: a worker
+     * still running when the deadline passes is interrupted and abandoned, never joined, so a
+     * step blocked in a tool call cannot strand the whole batch past the task's own timeout.
+     *
+     * <p>Local tallies are merged into {@code tally} by the caller, in {@code batch} order — not
+     * completion order — immediately after this returns, so the trace and the accumulated token
+     * counts read the same regardless of which worker happened to finish first.
+     *
+     * @return each step's outcome, in the same order as {@code batch}; a worker that was still
+     *         running at the deadline reports {@link StepOutcome.Failed} naming the timeout
+     */
+    private static List<StepOutcome> executeBatch(
+            List<Integer> batch, Progress progress, PlanRun run, PlanTally parentTally) {
+        int n = batch.size();
+        PlanTally[] localTallies = new PlanTally[n];
+        StepOutcome[] localOutcomes = new StepOutcome[n];
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(n);
+        List<Thread> workers = new ArrayList<>(n);
+
+        for (int i = 0; i < n; i++) {
+            int idx = i;
+            int stepIdx = batch.get(i);
+            // Each worker gets its own PlanTally, seeded with the parent's running totals so
+            // iteration/token/budget accounting carries over — but notes and steps recorded
+            // during this step land only in the local copy until the merge, so two concurrent
+            // steps never race on the same list.
+            PlanTally local = parentTally.copyForWorker();
+            localTallies[idx] = local;
+            workers.add(Thread.ofVirtual().start(run.tools().wrapForPropagation(() -> {
+                try {
+                    localOutcomes[idx] = PlanStepExecutor.executeStep(
+                            stepIdx, progress.plan, progress.results, run, local);
+                } catch (Exception e) {
+                    localOutcomes[idx] = new StepOutcome.Failed(
+                            "Unexpected error running step " + (stepIdx + 1) + " in parallel: " + e.getMessage());
+                } finally {
+                    latch.countDown();
+                }
+            })));
+        }
+
+        try {
+            long remainingMs = Math.max(0,
+                    java.time.Duration.between(java.time.Instant.now(), run.deadline()).toMillis());
+            if (!latch.await(remainingMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                log.warn("Parallel step batch {} did not finish before the deadline for task [{}]",
+                        batch, run.task().taskId());
+                workers.forEach(Thread::interrupt);
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            workers.forEach(Thread::interrupt);
+            log.warn("Parallel step batch {} interrupted for task [{}]", batch, run.task().taskId());
+        }
+
+        // Merge in batch (= plan) order, not completion order: the trace and the usage totals
+        // must read the same every run, regardless of which worker happened to finish first.
+        for (int i = 0; i < n; i++) {
+            if (localOutcomes[i] == null) {
+                localOutcomes[i] = new StepOutcome.Failed("step " + (batch.get(i) + 1)
+                        + " did not finish before the deadline (parallel batch)");
+            }
+            parentTally.mergeFrom(localTallies[i]);
+        }
+        return List.of(localOutcomes);
     }
 
     private static Optional<ExecutionResult> stepDone(StepOutcome.Done done, Progress progress) {
@@ -321,6 +479,16 @@ public final class PlanExecuteStrategy implements ExecutionStrategy {
         List<String> newPlan = new ArrayList<>(progress.plan.subList(0, fromStep));
         newPlan.addAll(revised);
         progress.plan = newPlan;
+        // The revised tail carries no dependency information of its own (replan() reads the
+        // plain goal list, not readSteps) — kept in step with the new plan by truncating to the
+        // untouched prefix and padding the rest with "no known dependency", same as an
+        // approved-plan rewrite. A replan is rare enough that forgoing parallelism on the
+        // rewritten tail costs little, and guessing dependencies for steps nobody declared any
+        // for is the one thing worth not doing here.
+        List<java.util.Set<Integer>> newDependsOn = new ArrayList<>(progress.dependsOn.subList(0, fromStep));
+        newDependsOn.addAll(emptyDependencies(revised.size()));
+        progress.dependsOn = newDependsOn;
+        progress.planRewritten = true;
     }
 
     /** Phase 3: one call that turns the task, the plan, the results and the notes into the answer. */

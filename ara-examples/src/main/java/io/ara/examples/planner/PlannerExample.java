@@ -31,6 +31,10 @@ import java.time.Duration;
  *
  * <ol>
  *   <li><b>The plan comes first, as data.</b> The model returns JSON that says which step needs which.</li>
+ *   <li><b>Independent steps run together.</b> The Book and Member steps declare no dependency on each
+ *       other ({@code "dependsOn":[]}), so {@code maxParallelSteps} lets them run on separate virtual
+ *       threads instead of waiting their turn; LoanService, which needs them both, still runs only once
+ *       they are finished.</li>
  *   <li><b>Every step has its own small context</b>: the task, the plan, the results of the earlier
  *       steps. Not a transcript that grows with every tool call.</li>
  *   <li><b>A step closes with an outcome and notes.</b> The steps that choose a package or a path leave
@@ -69,8 +73,8 @@ import java.time.Duration;
 public final class PlannerExample {
 
     /** Unsloth on this machine; override with {@code -Dara.base.url=...} and {@code -Dara.model=...}. */
-    private static final String LIVE_BASE_URL = System.getProperty("ara.base.url", "http://127.0.0.1:8888/v1");
-    private static final String LIVE_MODEL    = System.getProperty("ara.model", "gpt-oss-20b-Q4_K_S");
+    private static final String LIVE_BASE_URL = System.getProperty("ara.base.url", "http://139.191.3.189:8000/v1");
+    private static final String LIVE_MODEL    = System.getProperty("ara.model", "gpt-oss-120b");
 
     /** The style check fails its first call on purpose: it is how the example shows a replan. */
     private static final String FLAKY_TOOL = "check_style";
@@ -83,6 +87,10 @@ public final class PlannerExample {
     private static final int MAX_PLAN_STEPS = 8;       // the plan may have at most this many steps
     private static final int ROUNDS_PER_STEP = 6;      // think, call a tool, read the result: at most this often per step
     private static final int MAX_ITERATIONS = 60;      // model calls in the whole run, planning and replanning included
+    // The scripted plan's first two steps (Book, Member) declare no dependency on each other, so a cap
+    // of 2 is enough to show both running at once; LoanService, the step after them, needs them both and
+    // starts only once they are finished — see ScriptedPlannerLlm.PLAN.
+    private static final int MAX_PARALLEL_STEPS = 2;
 
     public static void main(String[] args) {
         boolean live = Live.requested(args);
@@ -120,7 +128,7 @@ public final class PlannerExample {
                     .plannerStrategy("plan_execute")                          // plan first, then run the plan
                     .strategyConfig(new StrategyConfig.PlanExecute(
                             "on_failure",                                     // plan again if a step fails
-                            MAX_PLAN_STEPS, ROUNDS_PER_STEP)
+                            MAX_PLAN_STEPS, ROUNDS_PER_STEP, MAX_PARALLEL_STEPS)
                             .withPlanApproval())                              // a person approves the plan first
                     .enabledTools(workspace.toolIds())
                     .executionTimeout(Duration.ofMinutes(10))
@@ -130,7 +138,7 @@ public final class PlannerExample {
             // 5. The task. The listener only watches the steps as they happen; without it the run is the same.
             PlannerConsole.section("the task");
             System.out.println(PlannerConsole.wrap(TASK, "  "));
-            PlanNarrator narrator = new PlanNarrator(true, FLAKY_TOOL);
+            PlanNarrator narrator = new PlanNarrator(true, FLAKY_TOOL, MAX_PARALLEL_STEPS);
             AgentResponse response = agent.execute(AgentTask.of(TASK).withEventListener(narrator));
 
             // What is left only prints: the summary of the run, and what it really left in the workspace.

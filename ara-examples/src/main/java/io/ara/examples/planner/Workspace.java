@@ -8,11 +8,11 @@ import io.ara.core.tool.ToolResult;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.function.Function;
 
 /**
@@ -28,15 +28,19 @@ import java.util.function.Function;
  * directory, the flaky tool a scope). Some local model servers lose a tool call that has no arguments,
  * and the model gets nothing back; an argument costs nothing and works everywhere.
  *
- * <p>Not thread-safe: one workspace per run, used by the one thread that runs the plan.
+ * <p>Thread-safe for concurrent tool calls: {@code plan_execute} can run independent steps of a plan on
+ * separate virtual threads ({@code dependsOn: []} on each), and two such steps calling {@code write_file}
+ * at the same time is exactly what this example's own plan does (the Book and Member record steps declare
+ * no dependency on each other). {@code files}/{@code callsByTool} are concurrent maps for that reason —
+ * still one workspace per run, but no longer one thread.
  */
 final class Workspace {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final Map<String, String> files = new TreeMap<>();
+    private final Map<String, String> files = new ConcurrentSkipListMap<>();
     private final List<AraTool> tools = new ArrayList<>();
-    private final Map<String, Integer> callsByTool = new HashMap<>();
+    private final Map<String, Integer> callsByTool = new ConcurrentHashMap<>();
 
     Workspace() {
         tools.add(writeFile());

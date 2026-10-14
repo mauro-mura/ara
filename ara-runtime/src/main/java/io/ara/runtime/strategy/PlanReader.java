@@ -4,7 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,12 +25,13 @@ import java.util.regex.Pattern;
  *       plan in another format, so it is accepted rather than rejected.</li>
  * </ol>
  *
- * <p>{@code id} and {@code dependsOn} are <b>deliberately not read</b>. Steps run in the order
- * they are written and each sees everything before it, exactly as before; the fields are asked
- * for now only so that the plans the models already write carry them, ready for the day steps
- * may run in parallel. Reading a field that changes nothing would create cases (a dependency
- * cycle, a dangling id) that nobody asked this class to handle. The plan text itself stays in
- * the execution trace, which is where the validity of those fields can be measured.
+ * <p>{@code id} and {@code dependsOn} are read only by {@link #readSteps(String)} — the shape
+ * {@link PlanExecuteStrategy} uses to batch independent steps. {@link #read(String)} still
+ * discards them exactly as before: steps run in the order they are written and, by default,
+ * each sees everything before it; {@code readSteps} is the opt-in that exposes dependencies to
+ * a caller that wants to run some of them together. A dependency graph that cannot be trusted
+ * (a dangling or self-referencing id, a forward reference) degrades per-step to "no known
+ * dependency" rather than rejecting the plan — see {@link PlanStep}.
  *
  * <p>An empty result means "unreadable": the reply is neither shape, or has no steps. Deciding
  * what to do about that is the caller's job — this class never invents a plan.
@@ -76,22 +81,50 @@ final class PlanReader {
 
     /** The step goals in the reply, in order; empty when the reply holds no readable plan. */
     static List<String> read(String reply) {
-        if (reply == null || reply.isBlank()) {
-            return List.of();
-        }
-        List<String> fromJson = readJson(reply);
-        return fromJson != null ? fromJson : readList(reply);
+        return readSteps(reply).stream().map(PlanStep::goal).toList();
     }
 
     /**
-     * The goals of a JSON plan, or {@code null} when the reply is not a JSON plan at all (so the
-     * caller can try the list shape). An empty list means "was a JSON plan, with no usable step".
-     *
-     * <p>The JSON is taken from the first {@code '{'} to the last {@code '}'}: models routinely
-     * wrap it in a markdown fence or a sentence, and a strict whole-reply parse would throw
-     * away a plan that is perfectly clear.
+     * One step of a JSON plan: its goal, and the <em>indices</em> (into the returned list, not
+     * the model's own {@code id} strings) of the steps it depends on. {@code dependsOn} is
+     * empty for a step read from the numbered/bulleted-list shape, which carries no dependency
+     * information at all — the same "no known dependency" value a JSON step gets when its
+     * {@code dependsOn} names an id this plan does not have (a step the model invented, or a
+     * forward reference) or when it names itself: a malformed graph degrades to "depends on
+     * nothing", which {@link PlanExecuteStrategy}'s batching reads as "cannot be grouped with
+     * anything that has not finished yet" — never a reason to reject the plan or guess a
+     * different id.
      */
-    private static List<String> readJson(String reply) {
+    record PlanStep(String goal, Set<Integer> dependsOn) {
+        PlanStep(String goal) {
+            this(goal, Set.of());
+        }
+    }
+
+    /**
+     * Same reading as {@link #read(String)}, carrying each step's {@code dependsOn} resolved to
+     * indices into the result. {@link #read(String)} is now a thin wrapper over this one that
+     * keeps only the goals — unchanged behaviour, including that it still never reads
+     * {@code dependsOn} for anything.
+     *
+     * <p>This is the one place {@code dependsOn} is actually read: {@link PlanExecuteStrategy}
+     * uses it to batch steps whose dependencies are already satisfied, and nothing else in this
+     * class or in {@code read(String)} is affected by its presence or absence.
+     */
+    static List<PlanStep> readSteps(String reply) {
+        if (reply == null || reply.isBlank()) {
+            return List.of();
+        }
+        List<PlanStep> fromJson = readJsonSteps(reply);
+        return fromJson != null ? fromJson : readListSteps(reply);
+    }
+
+    /**
+     * The steps of a JSON plan with dependencies resolved, or {@code null} when the reply is not
+     * a JSON plan at all (so the caller falls back to the list shape). An empty list means "was
+     * a JSON plan, with no usable step".
+     */
+    private static List<PlanStep> readJsonSteps(String reply) {
         int start = reply.indexOf('{');
         int end = reply.lastIndexOf('}');
         if (start < 0 || end <= start) {
@@ -101,23 +134,74 @@ final class PlanReader {
         try {
             root = MAPPER.readTree(reply.substring(start, end + 1));
         } catch (Exception notJson) {
-            // Not JSON after all — a numbered item that merely contained braces. The list
-            // reader decides; there is nothing to report here.
             return null;
         }
-        JsonNode steps = root.path("steps");
-        if (!steps.isArray()) {
+        JsonNode stepsNode = root.path("steps");
+        if (!stepsNode.isArray()) {
             return null;
         }
+
+        // First pass: goals and raw ids, in written order — needed before dependsOn can be
+        // resolved to an index, since a step may depend on one written after it (ignored, per
+        // the class javadoc, but still parseable rather than order-sensitive by accident).
         List<String> goals = new ArrayList<>();
-        for (JsonNode step : steps) {
-            String goal = step.isObject() ? step.path("goal").asText("") : step.asText("");
-            if (!goal.isBlank()) {
-                goals.add(goal.strip());
+        List<String> ids = new ArrayList<>();
+        List<List<String>> rawDeps = new ArrayList<>();
+        for (JsonNode stepNode : stepsNode) {
+            String goal = stepNode.isObject() ? stepNode.path("goal").asText("") : stepNode.asText("");
+            if (goal.isBlank()) {
+                continue;
+            }
+            goals.add(goal.strip());
+            String id = stepNode.isObject() ? stepNode.path("id").asText("") : "";
+            ids.add(id);
+            List<String> deps = new ArrayList<>();
+            if (stepNode.isObject() && stepNode.path("dependsOn").isArray()) {
+                stepNode.path("dependsOn").forEach(d -> deps.add(d.asText("")));
+            }
+            rawDeps.add(deps);
+        }
+
+        // id -> index, skipping blank/duplicate ids: a blank id cannot be depended on by
+        // construction, and a duplicate's second occurrence would silently steal references
+        // meant for the first — excluding both from the lookup means every dependency on either
+        // simply does not resolve, which is the same "no known dependency" degradation as a
+        // dangling or self reference, not a different failure mode to special-case.
+        Map<String, Integer> idToIndex = new HashMap<>();
+        Map<String, Integer> seenOnce = new HashMap<>();
+        for (int i = 0; i < ids.size(); i++) {
+            String id = ids.get(i);
+            if (id.isBlank()) continue;
+            if (seenOnce.containsKey(id)) {
+                idToIndex.remove(id);
+            } else {
+                seenOnce.put(id, i);
+                idToIndex.put(id, i);
             }
         }
-        return goals;
+
+        List<PlanStep> result = new ArrayList<>(goals.size());
+        for (int i = 0; i < goals.size(); i++) {
+            Set<Integer> resolved = new LinkedHashSet<>();
+            for (String depId : rawDeps.get(i)) {
+                Integer idx = idToIndex.get(depId);
+                // A dangling id, a self-reference, or a forward reference (idx >= i: this plan's
+                // steps run in written order, so "depends on a step not yet written" cannot be
+                // honoured) all degrade to "not a known dependency" rather than failing the plan.
+                if (idx != null && idx < i) {
+                    resolved.add(idx);
+                }
+            }
+            result.add(new PlanStep(goals.get(i), resolved));
+        }
+        return result;
     }
+
+    /** The list/bullet shape carries no dependency information: every step depends on nothing. */
+    private static List<PlanStep> readListSteps(String reply) {
+        return readList(reply).stream().map(PlanStep::new).toList();
+    }
+
 
     private static List<String> readList(String reply) {
         List<String> goals = new ArrayList<>();

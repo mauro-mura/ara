@@ -64,10 +64,14 @@ class PlanExecuteStrategyPlanTest {
                 AgentTask.of("build the model"), llm, seededMemory(), NO_TOOLS, config);
     }
 
-    // ── maxParallelSteps is stored, not yet honoured ─────────────────────────
+    // ── maxParallelSteps: batching by declared dependsOn ─────────────────────
 
     @Test
-    void maxParallelSteps_aboveOne_stillRunsTheStepsOneAfterTheOther() {
+    void maxParallelSteps_withARealDependency_stillRunsTheStepsOneAfterTheOther() {
+        // TWO_STEP_JSON's step 2 depends on step 1 ("dependsOn":["s1"]), so even with
+        // maxParallelSteps=4 the batch starting at step 1 cannot reach step 2: its one
+        // dependency is not yet satisfied before the batch starts. This is the correct
+        // outcome of batching by declared dependencies, not a sign parallelism is unimplemented.
         PlanPhaseLlmClient llm = new PlanPhaseLlmClient().planReplies(TWO_STEP_JSON);
         AgentConfig parallel = AgentConfig.defaults()
                 .primaryLlm(LlmProfile.builder().transportId("stub").build())
@@ -77,6 +81,135 @@ class PlanExecuteStrategyPlanTest {
                 .build();
 
         ExecutionResult result = run(llm, parallel);
+
+        assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
+        assertEquals(2, llm.callsIn(Phase.STEP).size());
+    }
+
+    @Test
+    void maxParallelSteps_withNoDependencies_runsTheStepsConcurrently() {
+        String independentSteps = """
+                {"steps":[{"id":"s1","goal":"Create Person","dependsOn":[]},
+                          {"id":"s2","goal":"Create Address","dependsOn":[]}]}""";
+        // Each worker needs its own reply queue slot: PlanPhaseLlmClient answers STEP calls off
+        // one shared deque, so two concurrent step calls must each find a usable answer.
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient()
+                .planReplies(independentSteps)
+                .stepReplies("STEP_DONE", "STEP_DONE");
+        AgentConfig parallel = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.builder().transportId("stub").build())
+                .executionTimeout(Duration.ofSeconds(30))
+                .maxIterations(20)
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 8, 3, 4))
+                .build();
+
+        ExecutionResult result = run(llm, parallel);
+
+        assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
+        assertEquals(2, llm.callsIn(Phase.STEP).size());
+    }
+
+    @Test
+    void maxParallelSteps_withNoDependencies_tracesBothStepsInPlanOrder() {
+        // Both steps run concurrently, so the two STEP calls can arrive at the test double in
+        // either order — asserting on llm.callsIn(Phase.STEP) by position would be asserting on
+        // a race. What PlanTally.mergeFrom actually guarantees is that the recorded trace reads
+        // in plan order regardless of completion order, which is what this checks instead: the
+        // THOUGHT step for "Create Person" must precede the one for "Create Address" in
+        // ExecutionResult.steps(), and both STEP calls must have happened (in whichever order).
+        String independentSteps = """
+                {"steps":[{"id":"s1","goal":"Create Person","dependsOn":[]},
+                          {"id":"s2","goal":"Create Address","dependsOn":[]}]}""";
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient()
+                .planReplies(independentSteps)
+                .stepReplyFor("Execute step 1/2: Create Person", "Person done.")
+                .stepReplyFor("Execute step 2/2: Create Address", "Address done.");
+        AgentConfig parallel = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.builder().transportId("stub").build())
+                .executionTimeout(Duration.ofSeconds(30))
+                .maxIterations(20)
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 8, 3, 4))
+                .build();
+
+        ExecutionResult result = run(llm, parallel);
+
+        assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
+        List<String> stepPrompts = llm.callsIn(Phase.STEP).stream()
+                .map(PlanExecuteStrategyPlanTest::lastUserMessage).toList();
+        assertTrue(stepPrompts.stream().anyMatch(p -> p.contains("Execute step 1/2: Create Person")));
+        assertTrue(stepPrompts.stream().anyMatch(p -> p.contains("Execute step 2/2: Create Address")));
+
+        List<String> thoughtsInTraceOrder = result.steps().stream()
+                .filter(s -> s.content() != null && (s.content().equals("Person done.")
+                        || s.content().equals("Address done.")))
+                .map(io.ara.core.agent.ExecutionStep::content).toList();
+        assertEquals(List.of("Person done.", "Address done."), thoughtsInTraceOrder,
+                "the merged trace must read in plan order, not completion order: " + result.steps());
+    }
+
+    @Test
+    void maxParallelSteps_capsTheBatchSize() {
+        // Three independent steps with maxParallelSteps=2: the first batch takes only the first
+        // two, the third runs in a batch of its own — never more than the configured cap at once.
+        String threeIndependentSteps = """
+                {"steps":[{"id":"s1","goal":"Step A","dependsOn":[]},
+                          {"id":"s2","goal":"Step B","dependsOn":[]},
+                          {"id":"s3","goal":"Step C","dependsOn":[]}]}""";
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient()
+                .planReplies(threeIndependentSteps)
+                .stepReplies("STEP_DONE", "STEP_DONE", "STEP_DONE");
+        AgentConfig cappedAtTwo = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.builder().transportId("stub").build())
+                .executionTimeout(Duration.ofSeconds(30))
+                .maxIterations(20)
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 8, 3, 2))
+                .build();
+
+        ExecutionResult result = run(llm, cappedAtTwo);
+
+        assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
+        List<PlanPhaseLlmClient.Call> steps = llm.callsIn(Phase.STEP);
+        assertEquals(3, steps.size());
+        assertTrue(lastUserMessage(steps.get(2)).contains("Execute step 3/3: Step C"));
+    }
+
+    @Test
+    void aChainOfDependencies_runsOneAtATimeEvenWithParallelismAllowed() {
+        // s2 depends on s1, s3 depends on s2: every batch along this chain has exactly one
+        // satisfiable step, so a cap of 4 changes nothing — the plan is sequential by its own
+        // declared structure, not by any limit this strategy imposes.
+        String chain = """
+                {"steps":[{"id":"s1","goal":"First","dependsOn":[]},
+                          {"id":"s2","goal":"Second","dependsOn":["s1"]},
+                          {"id":"s3","goal":"Third","dependsOn":["s2"]}]}""";
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient()
+                .planReplies(chain)
+                .stepReplies("STEP_DONE", "STEP_DONE", "STEP_DONE");
+        AgentConfig parallel = AgentConfig.defaults()
+                .primaryLlm(LlmProfile.builder().transportId("stub").build())
+                .executionTimeout(Duration.ofSeconds(30))
+                .maxIterations(20)
+                .strategyConfig(new StrategyConfig.PlanExecute("never", 8, 3, 4))
+                .build();
+
+        ExecutionResult result = run(llm, parallel);
+
+        assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
+        assertEquals(3, llm.callsIn(Phase.STEP).size());
+    }
+
+    @Test
+    void noMaxParallelSteps_meansOneAtATimeEvenWithNoDependencies() {
+        // The default (maxParallelSteps unset -> parallelSteps() == 1) must not change just
+        // because the plan happens to declare independent steps: parallelism is opt-in.
+        String independentSteps = """
+                {"steps":[{"id":"s1","goal":"Create Person","dependsOn":[]},
+                          {"id":"s2","goal":"Create Address","dependsOn":[]}]}""";
+        PlanPhaseLlmClient llm = new PlanPhaseLlmClient()
+                .planReplies(independentSteps)
+                .stepReplies("STEP_DONE", "STEP_DONE");
+
+        ExecutionResult result = run(llm, config("never", false));
 
         assertTrue(result.isSuccess(), () -> "expected success, got: " + result.failureReasonOpt());
         assertEquals(2, llm.callsIn(Phase.STEP).size());

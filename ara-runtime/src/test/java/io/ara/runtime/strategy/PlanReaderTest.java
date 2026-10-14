@@ -3,6 +3,7 @@ package io.ara.runtime.strategy;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -83,5 +84,92 @@ class PlanReaderTest {
     void nullAndBlank_areUnreadable() {
         assertTrue(PlanReader.read(null).isEmpty());
         assertTrue(PlanReader.read("   ").isEmpty());
+    }
+
+    // ── readSteps: dependsOn resolved to indices ─────────────────────────────
+
+    @Test
+    void readSteps_resolvesDependsOnToIndices() {
+        String reply = """
+                {"steps":[
+                  {"id":"s1","goal":"Create Person","dependsOn":[]},
+                  {"id":"s2","goal":"Create Address","dependsOn":[]},
+                  {"id":"s3","goal":"Link them","dependsOn":["s1","s2"]}]}""";
+
+        List<PlanReader.PlanStep> steps = PlanReader.readSteps(reply);
+
+        assertEquals(3, steps.size());
+        assertEquals(Set.of(), steps.get(0).dependsOn());
+        assertEquals(Set.of(), steps.get(1).dependsOn());
+        assertEquals(Set.of(0, 1), steps.get(2).dependsOn());
+    }
+
+    @Test
+    void readSteps_readOrMatchesRead_forTheGoals() {
+        String reply = """
+                {"steps":[
+                  {"id":"s1","goal":"A","dependsOn":[]},
+                  {"id":"s2","goal":"B","dependsOn":["s1"]}]}""";
+
+        assertEquals(PlanReader.read(reply),
+                PlanReader.readSteps(reply).stream().map(PlanReader.PlanStep::goal).toList());
+    }
+
+    @Test
+    void readSteps_aDanglingDependency_degradesToNoKnownDependency() {
+        String reply = """
+                {"steps":[
+                  {"id":"s1","goal":"A","dependsOn":["does-not-exist"]}]}""";
+
+        assertEquals(Set.of(), PlanReader.readSteps(reply).get(0).dependsOn());
+    }
+
+    @Test
+    void readSteps_aSelfReference_degradesToNoKnownDependency() {
+        String reply = """
+                {"steps":[
+                  {"id":"s1","goal":"A","dependsOn":["s1"]}]}""";
+
+        assertEquals(Set.of(), PlanReader.readSteps(reply).get(0).dependsOn());
+    }
+
+    @Test
+    void readSteps_aForwardReference_degradesToNoKnownDependency() {
+        // s1 depends on s2, which is written after it — steps run in written order, so a step
+        // cannot usefully depend on one that has not run yet.
+        String reply = """
+                {"steps":[
+                  {"id":"s1","goal":"A","dependsOn":["s2"]},
+                  {"id":"s2","goal":"B","dependsOn":[]}]}""";
+
+        List<PlanReader.PlanStep> steps = PlanReader.readSteps(reply);
+        assertEquals(Set.of(), steps.get(0).dependsOn());
+        assertEquals(Set.of(), steps.get(1).dependsOn());
+    }
+
+    @Test
+    void readSteps_aDuplicateId_resolvesDependenciesOnEitherToNoKnownDependency() {
+        String reply = """
+                {"steps":[
+                  {"id":"dup","goal":"A","dependsOn":[]},
+                  {"id":"dup","goal":"B","dependsOn":[]},
+                  {"id":"s3","goal":"C","dependsOn":["dup"]}]}""";
+
+        assertEquals(Set.of(), PlanReader.readSteps(reply).get(2).dependsOn());
+    }
+
+    @Test
+    void readSteps_theListShape_carriesNoDependencies() {
+        List<PlanReader.PlanStep> steps = PlanReader.readSteps("1. First\n2. Second");
+
+        assertEquals(2, steps.size());
+        assertEquals(Set.of(), steps.get(0).dependsOn());
+        assertEquals(Set.of(), steps.get(1).dependsOn());
+    }
+
+    @Test
+    void readSteps_unreadable_isEmptyJustLikeRead() {
+        assertTrue(PlanReader.readSteps("I would simply answer the question directly.").isEmpty());
+        assertTrue(PlanReader.readSteps(null).isEmpty());
     }
 }

@@ -48,15 +48,21 @@ final class PlanNarrator implements Consumer<AgentEvent> {
     private String approval = "";          // how the person decided: approved, changed, rejected; "" if not asked
     private final String failsOnPurpose;   // the tool the example makes fail once, or null
     private boolean saidItIsOnPurpose;
+    private final int maxParallelSteps;
+    private int parallelBatches;           // how many batches of >1 step this run actually formed
 
     /**
      * @param planIsApproved whether a person approves the first plan, which adds a phase between 1 and 2
      * @param failsOnPurpose the tool the example makes fail on its first call, so its first failure is
      *                       told as what it is; {@code null} when there is none
+     * @param maxParallelSteps the agent's {@code StrategyConfig.PlanExecute.maxParallelSteps()} — how many
+     *                         independent steps {@code PlanExecuteStrategy} may batch together, used only
+     *                         to print which groups of the plan it actually forms (see {@link #printSteps})
      */
-    PlanNarrator(boolean planIsApproved, String failsOnPurpose) {
+    PlanNarrator(boolean planIsApproved, String failsOnPurpose, int maxParallelSteps) {
         this.planIsApproved = planIsApproved;
         this.failsOnPurpose = failsOnPurpose;
+        this.maxParallelSteps = maxParallelSteps;
     }
 
     @Override
@@ -91,7 +97,54 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         System.out.println();
         System.out.println(PAD.substring(2) + "The model planned " + plan.path("steps").size() + " steps:");
         printSteps(plan);
+        printBatches(plan);
         if (!planIsApproved) runSection();
+    }
+
+    /**
+     * Prints which of the plan's steps {@code PlanExecuteStrategy} will actually run together, given
+     * {@link #maxParallelSteps}: as many consecutive steps as declare no dependency on anything in or
+     * after the batch, capped at the limit — the same rule {@code PlanExecuteStrategy.nextBatch} applies
+     * when the run gets there. Illustrative only: this does not drive the run, it only shows ahead of
+     * time what the strategy's own batching will do with this plan. Silent when the first plan is a
+     * single step, or {@code maxParallelSteps <= 1} (parallelism is opt-in).
+     */
+    private void printBatches(JsonNode plan) {
+        if (maxParallelSteps <= 1 || goals.size() < 2) return;
+        List<List<Integer>> dependsOn = new ArrayList<>();
+        for (JsonNode node : plan.path("steps")) {
+            List<Integer> deps = new ArrayList<>();
+            for (JsonNode entry : node.path("dependsOn")) {
+                for (String id : entry.asText().split("[,\\s]+")) {
+                    if (id.isBlank()) continue;
+                    Integer number = numberOfId.get(id);
+                    if (number != null) deps.add(number - 1);   // numberOfId is 1-based, batching is 0-based
+                }
+            }
+            dependsOn.add(deps);
+        }
+        System.out.println();
+        System.out.println(PAD.substring(2) + "With up to " + maxParallelSteps + " step(s) running at once, "
+                + "ARA will batch it as:");
+        int start = 0;
+        while (start < goals.size()) {
+            List<Integer> batch = new ArrayList<>(List.of(start));
+            for (int candidate = start + 1; candidate < goals.size() && batch.size() < maxParallelSteps; candidate++) {
+                int cStart = start;
+                boolean allBefore = dependsOn.get(candidate).stream().allMatch(dep -> dep < cStart);
+                if (!allBefore) break;
+                batch.add(candidate);
+            }
+            if (batch.size() > 1) {
+                parallelBatches++;
+                String names = batch.stream().map(i -> (i + 1) + ". " + goals.get(i))
+                        .reduce((a, b) -> a + "  +  " + b).orElse("");
+                System.out.println(PAD + Ansi.paint(Ansi.CYAN, "together: ") + names);
+            } else {
+                System.out.println(PAD + "alone:    " + (start + 1) + ". " + goals.get(start));
+            }
+            start += batch.size();
+        }
     }
 
     private void runSection() {
@@ -320,6 +373,10 @@ final class PlanNarrator implements Consumer<AgentEvent> {
         section("what plan_execute gave you");
         point("A plan before any work, as data: " + dependencies + " step(s) of the first plan said which steps they "
                 + "need, so the plan can be shown, checked and followed.");
+        if (parallelBatches > 0) {
+            point("Independent steps ran together: " + parallelBatches + " batch(es) of more than one step shared "
+                    + "a virtual thread each, instead of waiting their turn — see the \"together:\" lines above.");
+        }
         if (!approval.isEmpty()) {
             point("A person decided on the plan before anything ran: it was " + approval + ". The agent "
                     + "waited for them through the same approval gate that holds back risky tool calls.");

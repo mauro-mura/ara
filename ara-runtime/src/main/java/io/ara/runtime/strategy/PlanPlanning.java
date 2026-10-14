@@ -82,7 +82,15 @@ final class PlanPlanning {
 
     /** How phase 1 ended: the steps to execute, or the failed result to hand back as it is. */
     sealed interface Planning {
-        record Planned(List<String> steps) implements Planning { }
+        /**
+         * @param steps     the step goals, in written order
+         * @param dependsOn each step's dependencies, resolved to indices into {@code steps} —
+         *                  same length as {@code steps}, empty sets for a plan with no known
+         *                  dependency information (the numbered/bulleted-list shape, or a JSON
+         *                  plan whose {@code dependsOn} entries do not resolve). See
+         *                  {@link PlanReader.PlanStep}.
+         */
+        record Planned(List<String> steps, List<java.util.Set<Integer>> dependsOn) implements Planning { }
         record Failed(ExecutionResult result) implements Planning { }
     }
 
@@ -156,13 +164,15 @@ final class PlanPlanning {
         tally.record(ExecutionStep.thought(
                 completion.text() != null ? completion.text() : "", tally.iterations));
 
-        List<String> steps = PlanReader.read(completion.text());
-        if (steps.size() > maxPlanSteps) {
+        List<PlanReader.PlanStep> parsed = PlanReader.readSteps(completion.text());
+        if (parsed.size() > maxPlanSteps) {
             log.debug("Plan truncated from {} to {} steps (maxPlanSteps={})",
-                    steps.size(), maxPlanSteps, maxPlanSteps);
-            steps = steps.subList(0, maxPlanSteps);
+                    parsed.size(), maxPlanSteps, maxPlanSteps);
+            parsed = parsed.subList(0, maxPlanSteps);
         }
-        return new Planning.Planned(steps);
+        List<String> steps = parsed.stream().map(PlanReader.PlanStep::goal).toList();
+        List<java.util.Set<Integer>> dependsOn = parsed.stream().map(PlanReader.PlanStep::dependsOn).toList();
+        return new Planning.Planned(steps, dependsOn);
     }
 
     /**
