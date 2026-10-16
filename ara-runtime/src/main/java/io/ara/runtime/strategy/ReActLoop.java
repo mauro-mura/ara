@@ -5,6 +5,9 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.ExecutionResult;
 import io.ara.core.agent.ExecutionStep;
 import io.ara.core.agent.ExecutionTimeoutException;
+import io.ara.core.agent.PendingApproval;
+import io.ara.core.hitl.ApprovalRequest;
+import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmCompletion;
@@ -64,6 +67,8 @@ abstract class ReActLoop {
     final LlmCallContext ctx;
     final LlmCallContext stepCtx;
     final LlmCallContext forcedCtx;
+    private final RunCheckpointer checkpointer;   // null when the run is not checkpointed
+    private ExecutionResult suspension;           // set by dispatch() when the turn stopped for an approval
 
     private final String toolCatalog;
     // The message list grows incrementally across iterations — see MessageBuffer.
@@ -86,6 +91,7 @@ abstract class ReActLoop {
         this.nativeTools   = llm.supportsNativeTools();
         this.deadline      = Instant.now().plus(config.executionTimeout());
         this.ctx           = LlmCallContext.of(config, task);
+        this.checkpointer  = RunCheckpointer.from(task);
 
         // Resolve tools once — the list is stable for the lifetime of this execution.
         this.resolvedTools = tools.resolveEnabled(config.enabledTools());
@@ -98,11 +104,30 @@ abstract class ReActLoop {
         // Same hoisting: the text catalog only varies by which tools are exposed, so
         // precompute the string once instead of re-serialising every schema per iteration.
         this.toolCatalog   = ReactExecutionSupport.toolCatalog(resolvedTools, nativeTools);
+        task.resumeCheckpoint().ifPresent(this::resumeFrom);
+    }
+
+    /**
+     * Continues a saved run: the counters and trace pick up where the checkpoint left them, so
+     * budgets, the iteration cap and the final response account for the work already done. The
+     * working memory was already restored by the caller.
+     *
+     * <p>The synthesis nudge is a message in that memory, so whether it was already injected is
+     * decided by the iteration count alone — the nudge fires at the start of the first iteration
+     * past the threshold, and a checkpoint is only taken at the end of one.
+     */
+    private void resumeFrom(RunCheckpoint checkpoint) {
+        iterations        = checkpoint.iteration();
+        totalPromptTokens = checkpoint.promptTokens();
+        totalOutputTokens = checkpoint.outputTokens();
+        steps.addAll(checkpoint.steps());
+        synthesisModeActive = ReactExecutionSupport.synthesisDue(config, iterations);
     }
 
     /** Runs the loop to completion, success or failure. */
     final ExecutionResult run() {
         logStart();
+        task.resumeCheckpoint().map(RunCheckpoint::pendingApproval).ifPresent(this::completePendingTurn);
         while (iterations < config.maxIterations()) {
             // Cooperative cancellation: AgentInstance.terminate(session) interrupts this thread.
             if (Thread.currentThread().isInterrupted()) {
@@ -174,6 +199,12 @@ abstract class ReActLoop {
             if (decision != null) {
                 return decision;
             }
+            // dispatch() runs inside decide(), whose subclasses ignore what it returns about
+            // suspension; the field is how the loop learns the turn stopped for an approval.
+            if (suspension != null) {
+                return suspension;
+            }
+            checkpointIteration();
         }
         return onMaxIterations();
     }
@@ -187,16 +218,94 @@ abstract class ReActLoop {
      *         {@link ReflActStrategy}'s reflect-on-tool-failure trigger reacts to
      */
     final boolean dispatch(List<ToolCallParser.ToolCallRequest> calls, LlmCompletion completion, int iteration) {
+        if (suspendForApproval(calls, completion)) {
+            return false;   // nothing ran, so nothing failed
+        }
         ReActSupport.DispatchContext dispatchCtx = new ReActSupport.DispatchContext(
                 tools, memory, steps, task, iteration, deadline, logIo, logIoMaxChars);
         if (calls.size() == 1) {
             // Single tool call — same deadline-bounded dispatch, plus the legacy
-            // top-level toolCallId fallback batches never need.
-            return ReactExecutionSupport.dispatchSingle(calls.get(0), completion.toolCallId(), dispatchCtx);
+            // top-level toolCallId fallback batches never need. A turn being completed after
+            // an approval has no completion: its call ids were resolved when it was suspended.
+            return ReactExecutionSupport.dispatchSingle(calls.get(0),
+                    completion != null ? completion.toolCallId() : null, dispatchCtx);
         }
         // Multiple tool calls — dispatch in parallel via virtual threads.
         log.debug("Parallel dispatch: {} tool calls for task [{}]", calls.size(), task.taskId());
         return ReactExecutionSupport.dispatchParallel(calls, dispatchCtx);
+    }
+
+    /**
+     * Stops the run before this turn's calls if one of them needs a human's approval, saving the
+     * run so it can be continued once that is decided (ADR-048 D2). Asked <em>before</em> any
+     * call is dispatched, so the turn is either run whole or not at all: a suspension after
+     * some of a parallel batch had already executed would run those calls again on resume.
+     *
+     * <p>Does nothing, and the caller dispatches as before — with the gate blocking its thread
+     * for the answer — when the run cannot be resumed (no store, or a strategy that does not
+     * resume) or when the checkpoint could not be written.
+     *
+     * @return {@code true} when the turn was suspended; {@link #suspension} then holds the result
+     */
+    private boolean suspendForApproval(List<ToolCallParser.ToolCallRequest> calls, LlmCompletion completion) {
+        if (checkpointer == null || !checkpointer.canSuspend()) {
+            return false;
+        }
+        // A request for every call that needs one, opened together: the model asked for the
+        // turn as a whole, and so does the operator get to see it.
+        List<PendingApproval.ToolCall> pendingCalls = new ArrayList<>(calls.size());
+        boolean anyNeedsApproval = false;
+        for (ToolCallParser.ToolCallRequest call : calls) {
+            ApprovalRequest request = tools.approvalRequestFor(call.toolId(), call.argumentJson(), task).orElse(null);
+            anyNeedsApproval |= request != null;
+            // The id a single call is known by may be only on the completion (the legacy
+            // shape); resolve it now, the resumed turn has no completion to read it from.
+            String callId = call.toolCallId() != null ? call.toolCallId()
+                    : calls.size() == 1 && completion != null ? completion.toolCallId() : null;
+            pendingCalls.add(new PendingApproval.ToolCall(call.toolId(), call.argumentJson(), callId, request));
+        }
+        return anyNeedsApproval && suspendBefore(new PendingApproval(pendingCalls));
+    }
+
+    private boolean suspendBefore(PendingApproval pending) {
+        boolean saved = checkpointer.saveSuspended(iterations, memory.workingMemory(), steps,
+                totalPromptTokens, totalOutputTokens, pending);
+        if (!saved) {
+            return false;
+        }
+        log.info("Task [{}] suspended at iteration {} awaiting {} approval(s)",
+                task.taskId(), iterations, pending.requests().size());
+        suspension = ExecutionResult.awaitingApproval(pending.requests(), iterations,
+                totalPromptTokens, totalOutputTokens, steps);
+        return true;
+    }
+
+    /**
+     * Completes the turn a resumed run was suspended in: its calls run as one batch, each
+     * answered by the decision the operator gave (see {@code ApprovalVerdicts}), before the loop
+     * goes on to the next iteration. The turn's own iteration number is kept, so budgets and the
+     * iteration cap count it once.
+     *
+     * <p>Only the plain dispatch runs here: a strategy's reaction to a failed call (ReflAct's
+     * self-correction) is not applied to this one turn.
+     */
+    private void completePendingTurn(PendingApproval pending) {
+        List<ToolCallParser.ToolCallRequest> calls = pending.calls().stream()
+                .map(call -> new ToolCallParser.ToolCallRequest(call.toolId(), call.argumentJson(), call.toolCallId()))
+                .toList();
+        dispatch(calls, null, iterations);
+        checkpointIteration();
+    }
+
+    /**
+     * Persists the run at the boundary of a finished iteration (ADR-048 D2) — the point where
+     * the next turn is about to start, so a resumed run continues from the next iteration with
+     * nothing half-done. Does nothing when the run is not checkpointed, which is the default.
+     */
+    private void checkpointIteration() {
+        if (checkpointer != null) {
+            checkpointer.save(iterations, memory.workingMemory(), steps, totalPromptTokens, totalOutputTokens);
+        }
     }
 
     /** The strategy-neutral "Cancelled" failure, carrying the counters accumulated so far. */

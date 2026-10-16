@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -16,6 +17,8 @@ import io.ara.core.agent.AgentLifecycleManager;
 import io.ara.core.agent.MemoryScope;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.SessionId;
+import io.ara.core.agent.CheckpointStore;
+import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.llm.LlmClient;
 import io.ara.core.llm.LlmClientFactory;
@@ -102,6 +105,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
     private final AgentRegistry registry;
     private final AraTelemetry telemetry;
     private final SessionStore sessionStore;
+    private final CheckpointStore checkpointStore;
+    private final Consumer<RunCheckpoint> suspensionListener;
 
     /**
      * ADR-0068 D1 — when both are set, every agent this factory registers is wrapped in a
@@ -161,6 +166,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         this.registry             = builder.registry;
         this.telemetry            = builder.telemetry;
         this.sessionStore         = builder.sessionStore;
+        this.checkpointStore      = builder.checkpointStore;
+        this.suspensionListener   = builder.suspensionListener;
         this.mediaStore           = builder.mediaStore;
         this.artifactExtractor    = builder.artifactExtractor;
         this.traceStore           = builder.traceStore;
@@ -345,7 +352,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
                 llmTransports, defaultLlmClientId, mcpTransports, mcpServers, cfg -> toolRegistry,
                 mediaStore, telemetry, artifactExtractor, circuitStates);
         AgentInterceptorChain chain = new AgentInterceptorChain(interceptors);
-        return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore);
+        return new AgentInstance(config, wiringFactory, sessionMemoryFactory, executionPlanner, chain, telemetry, sessionStore,
+                checkpointStore, suspensionListener);
     }
 
     /**
@@ -487,6 +495,8 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
         private AgentRegistry registry;
         private AraTelemetry telemetry = AraTelemetry.noop();
         private SessionStore sessionStore = SessionStore.noop();
+        private CheckpointStore checkpointStore = CheckpointStore.noop();
+        private Consumer<RunCheckpoint> suspensionListener = checkpoint -> { };
         private io.ara.core.trace.TraceStore traceStore;
         private io.ara.core.trace.BlobStore  traceBlobStore;
         private java.util.function.Function<AgentConfig, String> traceSpecHash;
@@ -691,6 +701,25 @@ public final class AgentFactory implements AgentLifecycleManager, AutoCloseable 
          */
         public Builder sessionStore(SessionStore sessionStore) {
             this.sessionStore = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the {@link CheckpointStore} that receives a snapshot of each run at every
+         * iteration boundary (ADR-048 D2). Defaults to {@link CheckpointStore#noop()}: no
+         * snapshots are taken, exactly today's behavior.
+         */
+        public Builder checkpointStore(CheckpointStore checkpointStore) {
+            this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the listener told of every run that stops to wait for an approval, with the
+         * checkpoint to resume it from (ADR-048 D2). Defaults to doing nothing.
+         */
+        public Builder suspensionListener(Consumer<RunCheckpoint> suspensionListener) {
+            this.suspensionListener = Objects.requireNonNull(suspensionListener, "suspensionListener must not be null");
             return this;
         }
 

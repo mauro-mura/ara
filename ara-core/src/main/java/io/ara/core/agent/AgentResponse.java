@@ -2,6 +2,7 @@ package io.ara.core.agent;
 
 import io.ara.core.common.AgentId;
 import io.ara.core.common.Money;
+import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.media.MediaRef;
 
 import java.time.Duration;
@@ -40,6 +41,10 @@ import java.util.Optional;
  *                        unless the runtime was given an extractor and a store that accepts
  *                        writes. Their bytes live in the runtime's {@code MediaStore}, never in
  *                        this record, so a long output does not inflate the response
+ * @param pendingApprovals the approvals the run is waiting for when {@code finalState} is {@link
+ *                        AgentState#AWAITING_APPROVAL}, one per tool call of the suspended turn
+ *                        that needs it; empty otherwise. Each {@code requestId} is what a
+ *                        decision is submitted against
  */
 public record AgentResponse(
         String taskId,
@@ -56,7 +61,8 @@ public record AgentResponse(
         List<ExecutionStep> steps,
         String llmProvider,
         ContractViolation violation,
-        List<MediaRef> artifacts
+        List<MediaRef> artifacts,
+        List<ApprovalRequest> pendingApprovals
 ) {
 
     public AgentResponse {
@@ -69,6 +75,7 @@ public record AgentResponse(
         Objects.requireNonNull(completedAt, "completedAt must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
         artifacts = artifacts != null ? List.copyOf(artifacts) : List.of();
+        pendingApprovals = pendingApprovals != null ? List.copyOf(pendingApprovals) : List.of();
         // violation stays nullable: most responses are not a contract violation
     }
 
@@ -103,6 +110,23 @@ public record AgentResponse(
     ) {
         this(taskId, agentId, content, finalState, iterationsUsed, inputTokens, outputTokens,
                 estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider, violation, List.of());
+    }
+
+    /**
+     * The 15-component shape from before {@code pendingApprovals} was added, kept for the same
+     * reason as the earlier ones: a response that is not waiting for a human — almost all of
+     * them — has nothing to migrate to.
+     */
+    public AgentResponse(
+            String taskId, AgentId agentId, String content, AgentState finalState,
+            int iterationsUsed, int inputTokens, int outputTokens, Money estimatedCost,
+            Duration elapsedTime, String failureReason, Instant completedAt,
+            List<ExecutionStep> steps, String llmProvider, ContractViolation violation,
+            List<MediaRef> artifacts
+    ) {
+        this(taskId, agentId, content, finalState, iterationsUsed, inputTokens, outputTokens,
+                estimatedCost, elapsedTime, failureReason, completedAt, steps, llmProvider, violation,
+                artifacts, List.of());
     }
 
     /**
@@ -273,6 +297,23 @@ public record AgentResponse(
     }
 
     /**
+     * A response reporting that the run stopped before a turn's tool calls and is waiting for
+     * {@code requests} to be answered (ADR-048 D2). Not a success — {@link #isSuccess()} is false and
+     * there is no content — and not a failure either: {@link #failureReason} is empty and the
+     * run can be continued.
+     */
+    public static AgentResponse awaitingApproval(
+            String taskId, AgentId agentId, List<ApprovalRequest> requests, int iterationsUsed,
+            int inputTokens, int outputTokens, Money estimatedCost, Duration elapsed,
+            List<ExecutionStep> steps
+    ) {
+        return new AgentResponse(
+                taskId, agentId, "", AgentState.AWAITING_APPROVAL,
+                iterationsUsed, inputTokens, outputTokens, estimatedCost, elapsed, null, Instant.now(),
+                steps, null, null, List.of(), Objects.requireNonNull(requests, "requests must not be null"));
+    }
+
+    /**
      * Returns a copy of this response with its artifacts replaced. Only the runtime calls this, after
      * storing the bytes: a reference whose payload is not in the store would resolve to nothing.
      */
@@ -280,7 +321,7 @@ public record AgentResponse(
         Objects.requireNonNull(newArtifacts, "newArtifacts must not be null");
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation, newArtifacts);
+                llmProvider, violation, newArtifacts, pendingApprovals);
     }
 
     /** Returns a copy of this response with {@code content} replaced by {@code newContent}. */
@@ -288,14 +329,14 @@ public record AgentResponse(
         Objects.requireNonNull(newContent, "newContent must not be null");
         return new AgentResponse(taskId, agentId, newContent, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation, artifacts);
+                llmProvider, violation, artifacts, pendingApprovals);
     }
 
     /** Returns a copy of this response with {@code llmProvider} set. */
     public AgentResponse withLlmProvider(String llmProvider) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation, artifacts);
+                llmProvider, violation, artifacts, pendingApprovals);
     }
 
     /** Returns a copy of this response with {@code estimatedCost} replaced. */
@@ -303,7 +344,7 @@ public record AgentResponse(
         Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, violation, artifacts);
+                llmProvider, violation, artifacts, pendingApprovals);
     }
 
     /**
@@ -314,6 +355,6 @@ public record AgentResponse(
     public AgentResponse withViolation(ContractViolation newViolation) {
         return new AgentResponse(taskId, agentId, content, finalState, iterationsUsed,
                 inputTokens, outputTokens, estimatedCost, elapsedTime, failureReason, completedAt, steps,
-                llmProvider, newViolation, artifacts);
+                llmProvider, newViolation, artifacts, pendingApprovals);
     }
 }

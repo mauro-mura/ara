@@ -60,6 +60,11 @@ public final class ReactStrategy implements ExecutionStrategy {
     }
 
     @Override
+    public boolean resumable() {
+        return true;
+    }
+
+    @Override
     public ExecutionResult execute(
             AgentTask task,
             LlmClient llm,

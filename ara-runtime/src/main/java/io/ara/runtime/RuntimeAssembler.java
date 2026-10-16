@@ -1,6 +1,7 @@
 package io.ara.runtime;
 
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.common.AgentId;
 import io.ara.core.llm.LlmClient;
@@ -18,6 +19,7 @@ import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
 import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.runtime.hitl.ApprovalToolRegistry;
+import io.ara.runtime.hitl.ApprovalResumer;
 import io.ara.runtime.llm.InstrumentedLlmClient;
 import io.ara.runtime.memory.EvictionPolicy;
 import io.ara.runtime.memory.SlidingWindowMemoryManager;
@@ -38,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Consumer;
 
 /**
  * Validates a configured {@link AraRuntime.Builder} and assembles the runtime object
@@ -71,9 +74,18 @@ final class RuntimeAssembler {
         ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
         Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
+        // ADR-048 D2: a run suspended for an approval is only a checkpoint until something waits
+        // for the answer. That something needs the registry (to find the agent when the answer
+        // comes) and the gate, so it can only exist when there is a gate to put the questions in.
+        ApprovalResumer approvalResumer = b.approvalGate == null ? null
+                : new ApprovalResumer(b.approvalGate, b.checkpointStore, registry::findById, b.resumedRunListener);
         AgentFactory agentFactory = buildAgentFactory(
-                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry, cfg);
+                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry, cfg,
+                approvalResumer == null ? checkpoint -> { } : approvalResumer::watch);
         AgentScheduler scheduler = new LocalAgentScheduler(registry, b.scheduleExecutionListener);
+        if (approvalResumer != null) {
+            approvalResumer.recover();   // after a restart, the questions the checkpoints still hold
+        }
         return new AraRuntime(cfg, agentFactory, registry, b.agentProvider, scheduler, ctxStore,
                 b.approvalGate, b.temporaryScopeRegistry, b.abacPolicyEngine,
                 Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
@@ -246,7 +258,8 @@ final class RuntimeAssembler {
             LocalMessageBus messageBus,
             Function<AgentConfig, MemoryManager> memFactory,
             AgentRegistry registry,
-            AraRuntimeConfig cfg) {
+            AraRuntimeConfig cfg,
+            Consumer<RunCheckpoint> suspensionListener) {
 
         AgentFactory.Builder factoryBuilder = AgentFactory.builder()
                 .defaultLlmClient(b.defaultClientId)
@@ -275,6 +288,8 @@ final class RuntimeAssembler {
                 .executionPlanner(planner)
                 .telemetry(b.telemetry)
                 .sessionStore(b.sessionStore)
+                .checkpointStore(b.checkpointStore)
+                .suspensionListener(suspensionListener)
                 .mediaStore(b.mediaStore)
                 .artifactExtractor(b.artifactExtractor)
                 .interceptors(b.interceptors)

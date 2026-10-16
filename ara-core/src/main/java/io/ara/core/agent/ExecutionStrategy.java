@@ -53,6 +53,17 @@ public interface ExecutionStrategy {
     );
 
     /**
+     * Whether this strategy can continue a run from a {@link RunCheckpoint}: it restores its
+     * iteration count, trace and token totals from the task's {@link
+     * AgentTask#resumeCheckpoint()} instead of starting at zero. {@code false} by default —
+     * resuming is opt-in per strategy, and an agent asked to resume with one that cannot fails
+     * the run rather than start it over under a restored memory it does not understand.
+     */
+    default boolean resumable() {
+        return false;
+    }
+
+    /**
      * Returns the canonical name of this strategy (e.g. {@code "react"}).
      *
      * @return strategy name matching the {@code AgentConfig.plannerStrategy()} field

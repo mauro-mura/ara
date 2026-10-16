@@ -10,6 +10,8 @@ import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolCallNormalizer;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -163,6 +165,31 @@ public final class DelegatingToolRegistry implements ToolRegistry {
             return Optional.of(delegationTool);
         }
         return inner.findById(id);
+    }
+
+    /**
+     * Forwarded to {@code inner}, with the same namespace stripping as {@link #findById}: the
+     * classification of the user's tools lives there, and {@code ApprovalToolRegistry} — which
+     * wraps this registry — reads it to decide whether a call is gated (ADR-0067 D6). {@code
+     * delegate_task} has no classification of its own: what it may do is decided by the
+     * delegate's own tools, each gated in the delegate's chain.
+     */
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        String id = ToolCallNormalizer.stripNamespace(toolId);
+        return AgentDelegationTool.TOOL_ID.equals(id) ? Optional.empty() : inner.specFor(id);
+    }
+
+    /**
+     * Forwarded like {@link #specFor}, with the same namespace stripping and the same
+     * exception: {@code delegate_task} is not gated here, its delegate's tools are.
+     */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        String id = ToolCallNormalizer.stripNamespace(toolId);
+        return AgentDelegationTool.TOOL_ID.equals(id)
+                ? Optional.empty()
+                : inner.approvalRequestFor(id, argumentJson, task);
     }
 
     /** {@code inner}'s full catalog plus {@code delegate_task}, unless {@code inner} already declares it. */

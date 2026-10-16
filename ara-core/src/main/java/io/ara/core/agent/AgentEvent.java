@@ -1,8 +1,10 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.Money;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -77,16 +79,31 @@ public sealed interface AgentEvent
      * <p>It describes the run as the agent instance saw it. A wrapper that changes the response
      * afterwards (a contract that rejects the answer) is not reflected: that outcome is in
      * {@code AgentResponse.violation()}.
+     *
+     * <p>A run that stopped to wait for a human (ADR-048 D2) also arrives here, with {@code
+     * success == false}, {@code finalState == AWAITING_APPROVAL}, no {@code failureReason} and the
+     * questions in {@code pendingApprovals}: the run has not ended, this event ends only the
+     * stretch that was running, and a later run under the same task id continues it.
      */
     record RunFinished(String taskId, String agentId, String parentTaskId, String correlationId,
                        long seq, Instant at, boolean success, AgentState finalState,
                        int iterationsUsed, int inputTokens, int outputTokens, Money estimatedCost,
-                       String failureReason) implements AgentEvent {
+                       String failureReason, List<ApprovalRequest> pendingApprovals) implements AgentEvent {
 
         public RunFinished {
             checkEnvelope(taskId, agentId, seq, at);
             Objects.requireNonNull(finalState, "finalState must not be null");
             Objects.requireNonNull(estimatedCost, "estimatedCost must not be null");
+            pendingApprovals = pendingApprovals != null ? List.copyOf(pendingApprovals) : List.of();
+        }
+
+        /** The shape from before {@code pendingApprovals}: a run that is not waiting for anyone. */
+        public RunFinished(String taskId, String agentId, String parentTaskId, String correlationId,
+                           long seq, Instant at, boolean success, AgentState finalState,
+                           int iterationsUsed, int inputTokens, int outputTokens, Money estimatedCost,
+                           String failureReason) {
+            this(taskId, agentId, parentTaskId, correlationId, seq, at, success, finalState,
+                    iterationsUsed, inputTokens, outputTokens, estimatedCost, failureReason, List.of());
         }
     }
 

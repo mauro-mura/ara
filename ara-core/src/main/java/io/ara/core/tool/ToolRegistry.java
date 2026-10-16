@@ -1,6 +1,7 @@
 package io.ara.core.tool;
 
 import io.ara.core.agent.AgentTask;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.util.List;
 import java.util.Optional;
@@ -67,6 +68,23 @@ public interface ToolRegistry {
      * @return the {@link ToolSpec} for that tool, or empty if this registry has none
      */
     default Optional<ToolSpec> specFor(String toolId) {
+        return Optional.empty();
+    }
+
+    /**
+     * The approval a human must give before this call may run, or empty when it may run
+     * straight away (ADR-048 D2). A pure question: it registers nothing with any gate and has
+     * no effect, so it can be asked before a call is dispatched — which is what lets a run
+     * suspend <em>before</em> executing anything, instead of parking a thread inside the call.
+     *
+     * <p>Default: empty — a registry that does not gate asks nobody. A registry that wraps
+     * another MUST forward this, as it forwards {@link #specFor}: one decorator that drops it
+     * turns suspension off for every agent built on top of it, silently, because "empty" reads
+     * as "no approval needed".
+     *
+     * @param task the task the call belongs to, or {@code null} when there is none
+     */
+    default Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
         return Optional.empty();
     }
 

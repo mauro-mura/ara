@@ -7,7 +7,8 @@ package io.ara.core.agent;
  * <pre>
  *   IDLE ──► PLANNING ──► EXECUTING ──► DONE
  *                              │
- *                              └──► FAILED
+ *                              ├──► FAILED
+ *                              └──► AWAITING_APPROVAL ──► IDLE   (run saved, see below)
  *
  *   DONE  ──► IDLE   (instance reuse)
  *   FAILED ──► IDLE  (instance reuse after reflexion)
@@ -48,5 +49,14 @@ public enum AgentState {
      * <p>A reflexion event is written to episodic memory so that future attempts can
      * learn from this failure. The instance may transition back to {@link #IDLE} for retry.
      */
-    FAILED
+    FAILED,
+
+    /**
+     * The run stopped before a tool call a human must approve, and was saved as a
+     * {@link RunCheckpoint} (ADR-048 D2). Not a state the agent sits in: it is the label of the
+     * response that reports the suspension, and the agent goes straight on to {@link #IDLE} so
+     * the session and its leases are free while nobody has decided yet. The run is continued,
+     * not retried, once the approval is answered.
+     */
+    AWAITING_APPROVAL
 }

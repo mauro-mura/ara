@@ -24,7 +24,7 @@ ARA — Agent Runtime Architecture: a Java 21 framework for autonomous agents an
 
 - `docs/CODING-GUIDELINES.md` is the enforced style guide — read it before editing and follow it in every development (both new code and refactors). It mandates simplicity-first design, no premature abstractions, short single-responsibility functions, and a comment taxonomy. This repo deliberately keeps verbose "why"/design comments (including discarded alternatives) and expects them preserved and matched — this overrides the default "avoid comments" instinct.
 - Comments must stand alone: never point to an external doc/ADR in place of writing the rationale.
-- Version bumps are separate `Version X.Y.Z` commits; current version is `1.0.3` (root `pom.xml`).
+- Version bumps are separate `Version X.Y.Z` commits; current version is `1.0.4-SNAPSHOT` (root `pom.xml`; last released is `1.0.3`).
 
 ## Docs
 

@@ -11,7 +11,10 @@ import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.llm.LlmProfile;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.core.tool.Reversibility;
+import io.ara.core.tool.SideEffects;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
 import io.ara.runtime.AraRuntime;
 import io.ara.runtime.stubs.ScriptedLlmClient;
 import org.junit.jupiter.api.Test;
@@ -62,7 +65,15 @@ class AraRuntimeApprovalGateTest {
     };
 
     private static ToolRegistry echoRegistry() {
+        return echoRegistry(null);
+    }
+
+    /** As {@link #echoRegistry()}, classifying {@code echo} with {@code spec} when it is not null. */
+    private static ToolRegistry echoRegistry(ToolSpec spec) {
         return new ToolRegistry() {
+            @Override public Optional<ToolSpec> specFor(String id) {
+                return spec != null && spec.toolId().equals(id) ? Optional.of(spec) : Optional.empty();
+            }
             @Override public List<AraTool> resolveEnabled(List<String> ids) { return List.of(ECHO); }
             @Override public Optional<AraTool> findById(String id) {
                 return ECHO.toolId().equals(id) ? Optional.of(ECHO) : Optional.empty();
@@ -82,11 +93,16 @@ class AraRuntimeApprovalGateTest {
 
     /** Runs one agent that makes exactly one tool call, and reports what the gate saw. */
     private static List<ApprovalRequest> runOnce(ApprovalGate gate, boolean humanApprovalRequired) {
+        return runOnce(gate, humanApprovalRequired, echoRegistry());
+    }
+
+    private static List<ApprovalRequest> runOnce(ApprovalGate gate, boolean humanApprovalRequired,
+                                                 ToolRegistry registry) {
         CountingGate counting = gate instanceof CountingGate c ? c : null;
 
         AraRuntime.Builder builder = AraRuntime.builder()
                 .llmClient(oneToolCallThenDone())
-                .toolRegistry(echoRegistry());
+                .toolRegistry(registry);
         if (gate != null) builder.approvalGate(gate);
 
         try (AraRuntime runtime = builder.build()) {
@@ -121,6 +137,29 @@ class AraRuntimeApprovalGateTest {
         CountingGate gate = new CountingGate();
         assertTrue(runOnce(gate, false).isEmpty(),
                 "a gate on the runtime must not gate agents that did not ask for it");
+    }
+
+    @Test
+    void aToolClassifiedAsIrreversibleHighImpact_isGatedEvenWhenTheAgentDidNotOptIn() {
+        // ADR-0067 D6 through the real runtime chain, not the registry alone: the
+        // classification lives on the user's registry, several decorators deep, and the
+        // gate only sees it if every decorator in between forwards specFor.
+        CountingGate gate = new CountingGate();
+        ToolSpec highImpact = ToolSpec.builtin("echo", SideEffects.EXTERNAL_WRITE,
+                new Reversibility.IrreversibleHighImpact());
+
+        List<ApprovalRequest> seen = runOnce(gate, false, echoRegistry(highImpact));
+
+        assertEquals(1, seen.size(), "an irreversible high-impact tool must be gated whatever the agent flag says");
+        assertEquals("echo", seen.getFirst().action());
+    }
+
+    @Test
+    void aToolClassifiedAsReversible_staysUngatedWhenTheAgentDidNotOptIn() {
+        CountingGate gate = new CountingGate();
+        ToolSpec reversible = ToolSpec.builtin("echo", SideEffects.NONE, new Reversibility.Reversible());
+
+        assertTrue(runOnce(gate, false, echoRegistry(reversible)).isEmpty());
     }
 
     @Test

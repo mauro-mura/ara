@@ -108,6 +108,20 @@ public record RunContext(
      */
     public static final String EVENT_LISTENER_KEY = "io.ara.run.eventListener";
 
+    /**
+     * {@link #opaque()} key under which a {@link RunCheckpoint} travels when a task is resumed
+     * rather than started (see {@link AgentTask#resuming}). Read back through {@link
+     * AgentTask#resumeCheckpoint()}, which also checks the checkpoint belongs to that task.
+     */
+    public static final String RESUME_KEY = "io.ara.run.resumeFrom";
+
+    /**
+     * {@link #opaque()} key under which the decisions that unblock a suspended run travel, as a
+     * {@code Map<String, ApprovalDecision>} from approval request id to decision (see {@link
+     * AgentTask#resuming(RunCheckpoint, java.util.Map)}).
+     */
+    public static final String RESUME_DECISIONS_KEY = "io.ara.run.resumeDecisions";
+
     public RunContext {
         promptVars = Map.copyOf(Objects.requireNonNullElse(promptVars, Map.of()));
         opaque     = Map.copyOf(Objects.requireNonNullElse(opaque, Map.of()));

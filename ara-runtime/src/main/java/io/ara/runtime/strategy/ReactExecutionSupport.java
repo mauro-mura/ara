@@ -339,9 +339,7 @@ final class ReactExecutionSupport {
         if (wasActive) {
             return true;
         }
-        int synthesisTail = Math.max(SYNTHESIS_MIN_TAIL, config.maxIterations() / SYNTHESIS_TAIL_DIVISOR);
-        if (config.maxIterations() < SYNTHESIS_MIN_ITERATIONS
-                || iterations < config.maxIterations() - synthesisTail) {
+        if (!synthesisDue(config, iterations)) {
             return false;
         }
         boolean hasFileWrite = resolvedTools.stream().anyMatch(t -> "file_write".equals(t.toolId()));
@@ -349,6 +347,26 @@ final class ReactExecutionSupport {
         log.debug("Synthesis trigger injected at iteration {}/{} for task [{}] (persistClause={}, sentinelClause={})",
                 iterations, config.maxIterations(), task.taskId(), hasFileWrite, !nativeTools);
         return true;
+    }
+
+    /** Whether {@code iterations} is at or past the point where the synthesis nudge fires. */
+    static boolean synthesisDue(AgentConfig config, int iterations) {
+        int synthesisTail = Math.max(SYNTHESIS_MIN_TAIL, config.maxIterations() / SYNTHESIS_TAIL_DIVISOR);
+        return config.maxIterations() >= SYNTHESIS_MIN_ITERATIONS
+                && iterations >= config.maxIterations() - synthesisTail;
+    }
+
+    /**
+     * The plain messages of a working-memory snapshot — what a {@code RunCheckpoint} stores.
+     * Unlike {@link MessageBuffer#build} it leaves the system prompt un-enhanced: the tool
+     * catalog is rebuilt from the agent's configuration on resume, not frozen into the snapshot.
+     */
+    static List<LlmMessage> toMessages(List<MemoryEntry> entries) {
+        List<LlmMessage> messages = new ArrayList<>(entries.size());
+        for (MemoryEntry entry : entries) {
+            messages.add(MessageBuffer.materialize(entry));
+        }
+        return messages;
     }
 
     /**
@@ -453,7 +471,7 @@ final class ReactExecutionSupport {
          * The plain, un-enhanced form of a memory entry. The metadata branch is what lets
          * the adapter reconstruct native function-calling turns from the history.
          */
-        private static LlmMessage materialize(MemoryEntry e) {
+        static LlmMessage materialize(MemoryEntry e) {
             if (e.metadata() instanceof ToolCallMetadata meta
                     && ("tool".equals(e.role()) || "assistant_tool_call".equals(e.role()))) {
                 // Propagate toolCallId and toolName for native function-calling reconstruction
