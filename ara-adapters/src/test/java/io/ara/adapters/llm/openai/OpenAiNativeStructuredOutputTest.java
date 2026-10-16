@@ -141,7 +141,7 @@ class OpenAiNativeStructuredOutputTest {
      * from the generic one's messages and parameters in order to layer the provider's own
      * parameter type underneath. A {@code responseFormat} set on the first builder would be
      * silently lost there if it did not travel inside {@code parameters()} — and since a real
-     * deployment (Secpacx sets {@code returnReasoning(TRUE)} on every agent) always takes this
+     * deployment ({@code returnReasoning(TRUE)} enabled on every agent) always takes this
      * branch, losing it would mean the native schema never reaching the provider precisely where
      * it is used.
      */

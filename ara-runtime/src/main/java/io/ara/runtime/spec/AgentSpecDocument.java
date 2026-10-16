@@ -25,7 +25,7 @@ import static io.ara.runtime.spec.DocumentFields.stringArray;
  * <pre>{@code
  * { "schemaVersion": 1,
  *   "agent":     { "id", "type", "name", "description", "version", "tags",
- *                  "systemPrompt", "promptCatalogId" },
+ *                  "systemPrompt", "promptCatalogId", "presentationMessage" },
  *   "llm":       { "primary", "fallbacks", "selectionPolicy", "logIo", "logIoMaxChars" },
  *   "execution": { "strategy", "tools", "mcpServers", "maxIterations", "timeout", ... },
  *   "memory":    { "workingMemoryTokenBudget", "workingMemoryEviction", ... },
@@ -142,6 +142,7 @@ public final class AgentSpecDocument {
         set(builder::tags, agent.stringList("tags"));
         set(builder::systemPrompt, agent.string("systemPrompt"));
         set(builder::promptCatalogId, agent.string("promptCatalogId"));
+        set(builder::presentationMessage, agent.string("presentationMessage"));
         agent.finish();
     }
 
@@ -213,6 +214,7 @@ public final class AgentSpecDocument {
         out.set("tags", stringArray(identity.tags()));
         out.put("systemPrompt", identity.systemPrompt());
         put(out, "promptCatalogId", identity.promptCatalogId());
+        put(out, "presentationMessage", identity.presentationMessage());
         return out;
     }
 

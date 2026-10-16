@@ -53,6 +53,7 @@ class AgentSpecDocumentTest {
                 .agentId(AgentId.of("triage-1")).agentType("support-triage").name("Triage")
                 .description("Sorts requests").version("2.1.0").tags(List.of("support", "l1"))
                 .systemPrompt("Classify the request.").promptCatalogId("catalog-1")
+                .presentationMessage("Hello, I am Triage.")
                 .primaryLlm(primary).fallbackLlms(List.of(LlmProfile.of("backup")))
                 .llmSelectionPolicy(LlmSelectionPolicy.FAILOVER).logLlmIo(true).logLlmIoMaxChars(99)
                 .strategyConfig(new StrategyConfig.PlanExecute("on_failure", 6, 2, 3, true))

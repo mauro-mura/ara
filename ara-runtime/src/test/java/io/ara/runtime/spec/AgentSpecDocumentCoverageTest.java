@@ -44,7 +44,7 @@ class AgentSpecDocumentCoverageTest {
     private static final Map<Class<?>, List<String>> COMPONENTS = Map.ofEntries(
             Map.entry(AgentConfig.class, List.of("identity", "llm", "execution", "memory")),
             Map.entry(AgentIdentity.class, List.of("agentId", "agentType", "name", "description", "version",
-                    "tags", "systemPrompt", "promptCatalogId")),
+                    "tags", "systemPrompt", "promptCatalogId", "presentationMessage")),
             Map.entry(LlmConfig.class, List.of("primary", "fallbacks", "policy", "logIo", "logIoMaxChars")),
             Map.entry(LlmProfile.class, List.of("transportId", "inlineTransport", "temperature", "topP",
                     "maxTokens", "costBudget", "costCurrency", "streamingEnabled", "nativeJsonSchema",

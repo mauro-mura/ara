@@ -57,6 +57,7 @@ public record AgentConfig(
     public String       version()     { return identity.version(); }
     public List<String> tags()        { return identity.tags(); }
     public String       promptCatalogId() { return identity.promptCatalogId(); }
+    public String       presentationMessage() { return identity.presentationMessage(); }
 
     // -------------------------------------------------------------------------
     // Backward-compat delegation methods — llm
@@ -152,6 +153,7 @@ public record AgentConfig(
                 .tags(identity.tags())
                 .systemPrompt(identity.systemPrompt())
                 .promptCatalogId(identity.promptCatalogId())
+                .presentationMessage(identity.presentationMessage())
                 .logLlmIo(llm.logIo())
                 .logLlmIoMaxChars(llm.logIoMaxChars())
                 .primaryLlm(llm.primary())
@@ -197,6 +199,7 @@ public record AgentConfig(
         private List<String> tags            = List.of();
         private String       systemPrompt    = "You are a helpful AI agent.";
         private String       promptCatalogId = null;
+        private String       presentationMessage = null;
 
         // llm
         private boolean    logLlmIo               = false;
@@ -243,6 +246,12 @@ public record AgentConfig(
         public Builder tags(List<String> v)   { tags = v;             return this; }
         public Builder systemPrompt(String v) { systemPrompt = v;     return this; }
         public Builder promptCatalogId(String v) { promptCatalogId = v; return this; }
+        /**
+         * Optional message an application may show the user when a conversation with this
+         * agent opens (a chat welcome message). Presentation concern only: it never
+         * reaches the LLM. {@code null} (default) = not configured.
+         */
+        public Builder presentationMessage(String v) { presentationMessage = v; return this; }
 
         // --- llm ---
         public Builder logLlmIo(boolean v)                 { logLlmIo = v;              return this; }
@@ -333,7 +342,7 @@ public record AgentConfig(
 
             AgentIdentity id = new AgentIdentity(
                     agentId, agentType, agentName, agentDescription,
-                    agentVersion, tags, systemPrompt, promptCatalogId);
+                    agentVersion, tags, systemPrompt, promptCatalogId, presentationMessage);
 
             LlmConfig llmCfg = new LlmConfig(primary, fallbackLlms, llmPolicy, logLlmIo, logLlmIoMaxChars);
 

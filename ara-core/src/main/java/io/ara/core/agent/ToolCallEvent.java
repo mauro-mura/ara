@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * A tool call about to be dispatched, delivered to {@link AgentTask#toolCallCallback()} just
  * before execution so a caller (e.g. a streaming UI) can show which tool is running and with
- * what arguments — the SSE {@code tool_call} event and Secpac's chat "tool chip" are both
+ * what arguments — the SSE {@code tool_call} event and a chat UI's "tool chip" are both
  * built from this.
  *
  * <p>A small dedicated type rather than a raw string or an anonymous pair: {@link

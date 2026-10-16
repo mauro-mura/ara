@@ -21,7 +21,8 @@
         "version": { "type": "string", "description": "Version label of this agent definition (not the document's schemaVersion)." },
         "tags": { "$ref": "#/$defs/stringList" },
         "systemPrompt": { "type": "string" },
-        "promptCatalogId": { "type": "string", "description": "Resolve the system prompt from a prompt catalog instead of inlining it." }
+        "promptCatalogId": { "type": "string", "description": "Resolve the system prompt from a prompt catalog instead of inlining it." },
+        "presentationMessage": { "type": "string", "description": "Optional message an application may show the user when a conversation with this agent opens. Presentation only: it never reaches the LLM." }
       }
     },
     "llm": {
