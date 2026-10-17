@@ -141,6 +141,7 @@ public final class AraRuntime implements AutoCloseable {
             AraRuntimeConfig config,
             AgentFactory factory,
             AgentRegistry registry,
+            RuntimeLifecycle lifecycle,
             AgentProvider agentProvider,
             AgentScheduler scheduler,
             InstanceContextStore instanceContextStore,
@@ -159,7 +160,7 @@ public final class AraRuntime implements AutoCloseable {
         this.approvalGate  = approvalGate;
         this.temporaryScopeRegistry = temporaryScopeRegistry;
         this.authorizationService = new io.ara.runtime.auth.AuthorizationService(abacPolicyEngine);
-        this.lifecycle = new RuntimeLifecycle(config.name(), config.shutdownTimeoutSec());
+        this.lifecycle = lifecycle;
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;

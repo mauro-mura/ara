@@ -78,6 +78,8 @@ the shorthand) carries the per-model settings:
 | `retrieverId(String)` | `null` | Which registered `Retriever` a `"rag+…"` strategy uses; `null` = the runtime's default retriever. Setting it with a non-`rag+` strategy is rejected at construction |
 | `knowledgeBaseId(String)` | `null` | Knowledge base the agent searches *as a tool*: combined with `search_documents` in `enabledTools`, it attaches a `KnowledgeBasePromptShaper` |
 | `sessionBusyPolicy(SessionBusyPolicy)` | `REJECT` | Same-session concurrency: `REJECT` fails fast with `"Session busy"`, `ENQUEUE` queues FIFO |
+| `asyncDelegation(AsyncDelegation)` | `null` (off) | Lets this agent start sub-tasks in the background with `delegate_task` and carry on; see [Background delegation](#background-delegation). `AsyncDelegation.defaults()` allows 4 running tasks and delivers at most 8 000 characters of each result |
+| `asyncSupport(AsyncSupport)` | `null` (= `OPTIONAL`) | What this agent accepts **as a delegate**: `FORBIDDEN` (only waited delegation), `OPTIONAL`, or `REQUIRED` (only in the background) |
 
 ## Memory — working memory and conversation
 
@@ -143,6 +145,48 @@ AgentConfig cfg = AgentConfig.defaults()
         .sessionBusyPolicy(SessionBusyPolicy.ENQUEUE)
         .build();
 ```
+
+### Background delegation
+
+By default `delegate_task` waits for the other agent's answer. An agent configured with
+`asyncDelegation(AsyncDelegation.defaults())` may instead start a sub-task and carry on with
+its own work:
+
+```java
+AgentConfig coordinator = AgentConfig.defaults()
+        .agentType("coordinator")
+        .enabledTools(List.of("delegate_task"))
+        .asyncDelegation(AsyncDelegation.defaults())   // 4 running tasks, 8 000 characters per result
+        .build();
+```
+
+`delegate_task` then also takes `"wait": false` and a `"label"`, and answers at once with a
+`task_id`. What follows is the same for the model and for you:
+
+- **The result arrives by itself.** Before each model call the finished tasks are put in the
+  agent's working memory as a message marked `[automated — background task result, not a
+  message from the user]`. The model never has to ask. `await_tasks` exists for the moment it
+  has nothing else to do until a task ends; `cancel_task` stops one.
+- **A run does not end with tasks open.** If the model answers while tasks are still running,
+  the run waits for them (up to `executionTimeout`) and lets the model answer once more with
+  their results. If they do not finish in time, the answer already given stands. Every other
+  way a run can end — a failure, a timeout, a budget, a cancellation — stops its background
+  tasks with it.
+- **A background task has a session of its own**, so two of them aimed at the same agent do
+  not collide, but it does not see the conversation of earlier *waited* delegations to that
+  agent. Use a waited call when that continuity matters.
+- **A run that stops for a human approval** (`ApprovalGate` with a `CheckpointStore`) cancels
+  its background tasks first, because a task in flight cannot be saved. The saved run says
+  which ones were cancelled, so the model can start them again.
+- **Strategies.** It works with `react`, `reflact` and `respact`. Other strategies keep no
+  task registry; a `wait: false` call from them fails with a message instead of starting a
+  task nobody would close.
+
+The agent being delegated to has the last word. `asyncSupport(AsyncSupport.FORBIDDEN)` makes
+it refuse a background start (use it for an agent whose value is a continuing conversation);
+`REQUIRED` makes a delegation to it run in the background even when the model asked to wait
+(use it for work longer than the delegation timeout). A caller that is *not* configured for
+background delegation is refused a `REQUIRED` agent.
 
 ### Cancellation & termination
 

@@ -99,6 +99,10 @@ public record AgentConfig(
     public List<String>              visibleToScopes()       { return execution.visibleToScopes(); }
     public List<String>              requiredScopes()        { return execution.requiredScopes(); }
     public boolean                   requiresApproval()      { return execution.requiresApproval(); }
+    /** {@code null} when this agent may not start background sub-tasks (the default). */
+    public AsyncDelegation           asyncDelegation()       { return execution.asyncDelegation(); }
+    /** What this agent accepts as a delegate; {@code null} means {@link AsyncSupport#OPTIONAL}. */
+    public AsyncSupport              asyncSupport()          { return execution.asyncSupport(); }
 
     // -------------------------------------------------------------------------
     // Backward-compat delegation methods — memory
@@ -176,6 +180,8 @@ public record AgentConfig(
                 .visibleToScopes(execution.visibleToScopes())
                 .requiredScopes(execution.requiredScopes())
                 .requiresApproval(execution.requiresApproval())
+                .asyncDelegation(execution.asyncDelegation())
+                .asyncSupport(execution.asyncSupport())
                 .workingMemoryTokenBudget(memory.workingMemoryTokenBudget())
                 .workingMemoryEviction(memory.workingMemoryEviction())
                 .maxConversationTurns(memory.maxConversationTurns())
@@ -226,6 +232,8 @@ public record AgentConfig(
         private List<String>              visibleToScopes       = List.of();
         private List<String>              requiredScopes        = List.of();
         private boolean                   requiresApproval      = false;
+        private AsyncDelegation           asyncDelegation       = null;
+        private AsyncSupport              asyncSupport          = null;
 
         // memory
         private int    workingMemoryTokenBudget = 0;
@@ -328,6 +336,8 @@ public record AgentConfig(
          * before this per-invocation approval flag existed.
          */
         public Builder requiresApproval(boolean v)                     { requiresApproval = v;      return this; }
+        public Builder asyncDelegation(AsyncDelegation v)              { asyncDelegation = v;       return this; }
+        public Builder asyncSupport(AsyncSupport v)                    { asyncSupport = v;          return this; }
 
         // --- memory ---
         public Builder workingMemoryTokenBudget(int v)    { workingMemoryTokenBudget = v; return this; }
@@ -351,7 +361,8 @@ public record AgentConfig(
                     maxIterations, executionTimeout, maxTokensPerStep,
                     humanApprovalRequired, knowledgeBaseId, sessionBusyPolicy, retrieverId,
                     delegateStateAccess, sessionTtl,
-                    grantedScopes, visibleToScopes, requiredScopes, requiresApproval);
+                    grantedScopes, visibleToScopes, requiredScopes, requiresApproval,
+                    asyncDelegation, asyncSupport);
 
             MemoryConfig mem = new MemoryConfig(
                     workingMemoryTokenBudget, workingMemoryEviction,

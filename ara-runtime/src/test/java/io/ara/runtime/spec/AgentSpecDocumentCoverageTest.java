@@ -54,7 +54,7 @@ class AgentSpecDocumentCoverageTest {
                     "mcpServerIds", "maxIterations", "executionTimeout", "maxTokensPerStep",
                     "humanApprovalRequired", "knowledgeBaseId", "sessionBusyPolicy", "retrieverId",
                     "delegateStateAccess", "sessionTtl", "grantedScopes", "visibleToScopes",
-                    "requiredScopes", "requiresApproval")),
+                    "requiredScopes", "requiresApproval", "asyncDelegation", "asyncSupport")),
             Map.entry(MemoryConfig.class, List.of("workingMemoryTokenBudget", "workingMemoryEviction",
                     "maxConversationTurns", "maxReflections", "reflectionPrompt", "contextSummarizerAgentId")),
             Map.entry(StrategyConfig.PlanExecute.class, List.of("replanPolicy", "maxPlanSteps", "maxStepRoundsPerStep",

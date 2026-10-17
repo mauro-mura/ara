@@ -1,6 +1,7 @@
 package io.ara.runtime;
 
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AsyncSupport;
 import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.common.AgentId;
@@ -69,7 +70,11 @@ final class RuntimeAssembler {
         InstanceContextStore ctxStore = resolveInstanceContextStore();
         AgentRegistry registry = new AgentRegistry();
         Function<AgentConfig, MemoryManager> memFactory = resolveMemoryFactory(registry);
-        LocalMessageBus messageBus = new LocalMessageBus(registry, b.telemetry, b.approvalGate, b.temporaryScopeRegistry);
+        // Built here, ahead of the runtime, because the bus needs its executor: a delegate has to
+        // run where the runtime counts and drains its work (see RuntimeLifecycle#trackedExecutor).
+        RuntimeLifecycle lifecycle = new RuntimeLifecycle(cfg.name(), cfg.shutdownTimeoutSec());
+        LocalMessageBus messageBus = new LocalMessageBus(registry, b.telemetry, b.approvalGate,
+                b.temporaryScopeRegistry, lifecycle.trackedExecutor());
         Map<String, LlmClient> instrumentedClients = instrumentClients();
         ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
@@ -86,7 +91,7 @@ final class RuntimeAssembler {
         if (approvalResumer != null) {
             approvalResumer.recover();   // after a restart, the questions the checkpoints still hold
         }
-        return new AraRuntime(cfg, agentFactory, registry, b.agentProvider, scheduler, ctxStore,
+        return new AraRuntime(cfg, agentFactory, registry, lifecycle, b.agentProvider, scheduler, ctxStore,
                 b.approvalGate, b.temporaryScopeRegistry, b.abacPolicyEngine,
                 Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                 Map.copyOf(b.namedRetrievers));
@@ -280,7 +285,7 @@ final class RuntimeAssembler {
 
         return factoryBuilder
                 .toolRegistryFactory(agentCfg ->
-                        buildToolChain(agentCfg, perAgentToolRegistry, messageBus))
+                        buildToolChain(agentCfg, perAgentToolRegistry, messageBus, registry))
                 .memoryManagerFactory(memFactory)
                 // ADR-0091 D3: when the builder set a scoped memory factory, it supersedes
                 // memFactory per session (which stays as the fallback AgentFactory requires).
@@ -318,14 +323,25 @@ final class RuntimeAssembler {
      */
     private ToolRegistry buildToolChain(AgentConfig agentCfg,
                                         Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
-                                        LocalMessageBus messageBus) {
+                                        LocalMessageBus messageBus, AgentRegistry registry) {
         ToolRegistry base = new DelegatingToolRegistry(
                 perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
                 b.delegationTimeout, agentCfg.delegateStateAccess(), b.sessionStore,
-                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
+                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null,
+                agentCfg.asyncDelegation(), recipientId -> asyncSupportOf(registry, recipientId));
         ToolRegistry withApproval = b.approvalGate != null
                 ? new ApprovalToolRegistry(base, b.approvalGate, agentCfg)
                 : base;
         return new TelemetryToolRegistry(withApproval, b.telemetry);
+    }
+
+    /**
+     * What the agent registered under {@code recipientId} declares about being delegated to in
+     * the background, or {@code null} when no such agent is registered (the delegation then
+     * fails on its own, with the bus's own "not found"). Looked up in the registry on every
+     * call, not captured, because an agent can be registered after the delegating agent exists.
+     */
+    private static AsyncSupport asyncSupportOf(AgentRegistry registry, String recipientId) {
+        return registry.findById(AgentId.of(recipientId)).map(agent -> agent.config().asyncSupport()).orElse(null);
     }
 }

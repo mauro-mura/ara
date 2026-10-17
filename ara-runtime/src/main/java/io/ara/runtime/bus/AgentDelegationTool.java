@@ -3,6 +3,8 @@ package io.ara.runtime.bus;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.AsyncDelegation;
+import io.ara.core.agent.AsyncSupport;
 import io.ara.core.agent.AgentView;
 import io.ara.core.agent.DelegatedBy;
 import io.ara.core.agent.DelegateStateAccess;
@@ -20,6 +22,8 @@ import io.ara.core.tool.ToolResult;
 import io.ara.runtime.trace.TraceProjection;
 
 import java.time.Duration;
+import java.util.UUID;
+import java.util.function.Function;
 import java.util.Objects;
 
 /**
@@ -72,6 +76,8 @@ public final class AgentDelegationTool implements AraTool {
     private final SessionStore        sessionStore;
     private final ScopeSet            ownGrantedScopes;
     private final AgentView           agentView;
+    private final AsyncDelegation     asyncDelegation;
+    private final Function<String, AsyncSupport> recipientSupport;
 
     /**
      * @param bus    the local message bus
@@ -142,6 +148,26 @@ public final class AgentDelegationTool implements AraTool {
      */
     public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
                                 SessionStore sessionStore, ScopeSet ownGrantedScopes, AgentView agentView) {
+        this(bus, selfId, timeout, stateAccess, sessionStore, ownGrantedScopes, agentView, null, id -> null);
+    }
+
+    /**
+     * @param asyncDelegation   when not {@code null}, this agent may start sub-tasks in the
+     *                          background: {@code delegate_task} then accepts {@code "wait": false}
+     *                          (and a {@code "label"}), and the task registry its run carries
+     *                          holds what it starts. {@code null} (every shorter constructor)
+     *                          leaves the tool exactly as it was: no extra parameter in its schema.
+     * @param recipientSupport  what a recipient declares about background delegation, by agent id;
+     *                          may return {@code null} for "unknown", which counts as
+     *                          {@link AsyncSupport#OPTIONAL}. A function and not the agent view,
+     *                          because the view is deliberately not wired in production and this
+     *                          needs only the declaration, not the right to see the agent.
+     */
+    public AgentDelegationTool(MessageBus bus, String selfId, Duration timeout, DelegateStateAccess stateAccess,
+                                SessionStore sessionStore, ScopeSet ownGrantedScopes, AgentView agentView,
+                                AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport) {
+        this.asyncDelegation  = asyncDelegation;
+        this.recipientSupport = Objects.requireNonNull(recipientSupport, "recipientSupport must not be null");
         this.bus              = Objects.requireNonNull(bus,    "bus must not be null");
         this.selfId           = Objects.requireNonNull(selfId, "selfId must not be null");
         this.timeout          = Objects.requireNonNull(timeout, "timeout must not be null");
@@ -158,14 +184,38 @@ public final class AgentDelegationTool implements AraTool {
 
     @Override
     public String description() {
-        return "Delegates a sub-task to another agent on the same node and returns its answer. "
+        String base = "Delegates a sub-task to another agent on the same node and returns its answer. "
                 + "Use to decompose complex work across specialised peer agents. "
                 + "The target agent must be registered and idle.";
+        return asyncDelegation == null ? base : base + BACKGROUND_GUIDANCE;
     }
+
+    /**
+     * Added to the description only for an agent that may delegate in the background. It states
+     * the three rules a small model gets wrong without being told — a result is not known until
+     * it is delivered, results are told apart by label, open tasks are awaited — and shows one
+     * whole sequence, since models that have never seen results arrive later answer worse
+     * without an example. The example names no task id on purpose: a literal one ("t-1") was copied by a
+     * model that then waited on ids it had invented, because it had never started a task.
+     */
+    private static final String BACKGROUND_GUIDANCE = """
+             Background mode: pass "wait": false to start the sub-task and carry on with your own work. \
+            You get a task_id at once, and the result is delivered to you automatically in a later turn, \
+            in a message marked as automated. A background task's result is not known until it is \
+            delivered: never assume it, and never start work that depends on it before then. Give each \
+            task a short "label" so results are not mixed up. Use await_tasks only when you have nothing \
+            else to do until a task ends, and cancel_task to stop one. Before your final answer, cancel \
+            the background tasks you no longer need; open tasks are awaited. \
+            Example: delegate_task {"agent_id":"researcher","task":"find sources","wait":false,"label":"sources"} \
+            returns a task_id; do your own work; the result of "sources" arrives in a later turn; then \
+            answer using it. Use a task_id only exactly as it was returned to you; never make one up.""";
 
     @Override
     public String argumentSchema() {
-        return """
+        return asyncDelegation == null ? WAITED_SCHEMA : BACKGROUND_SCHEMA;
+    }
+
+    private static final String WAITED_SCHEMA = """
                 {
                   "type": "object",
                   "properties": {
@@ -180,7 +230,30 @@ public final class AgentDelegationTool implements AraTool {
                   },
                   "required": ["agent_id", "task"]
                 }""";
-    }
+
+    private static final String BACKGROUND_SCHEMA = """
+                {
+                  "type": "object",
+                  "properties": {
+                    "agent_id": {
+                      "type": "string",
+                      "description": "ID of the target agent to delegate to"
+                    },
+                    "task": {
+                      "type": "string",
+                      "description": "The sub-task to execute on the target agent"
+                    },
+                    "wait": {
+                      "type": "boolean",
+                      "description": "true (default): wait for the answer. false: start the sub-task in the background and carry on; its result is delivered to you later"
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "A short name for a background task, repeated in its result"
+                    }
+                  },
+                  "required": ["agent_id", "task"]
+                }""";
 
     @Override
     public ToolResult execute(String argumentJson) {
@@ -315,10 +388,92 @@ public final class AgentDelegationTool implements AraTool {
             return ToolResult.failure(TOOL_ID, "Agent not found: " + recipientId);
         }
 
-        SessionId delegateSessionId = delegateSessionId(caller.sessionId(), recipientId);
-
-        return dispatch(request, delegateSessionId,
+        Mode mode = chooseMode(argumentJson, recipientId);
+        if (mode.refusal() != null) {
+            return ToolResult.failure(TOOL_ID, mode.refusal());
+        }
+        // A background task gets a session of its own: two of them aimed at the same agent
+        // would otherwise share the derived session and the second would be turned away as
+        // "busy" (or queued behind the first, which is not background at all).
+        SessionId delegateSessionId = mode.background()
+                ? backgroundSessionId(caller.sessionId(), recipientId)
+                : delegateSessionId(caller.sessionId(), recipientId);
+        AgentMessage message = buildMessage(request, delegateSessionId,
                 attenuateForHops(caller.context(), delegateSessionId, caller.taskId()), caller.workflowId());
+
+        return mode.background()
+                ? startInBackground(message, caller, label(argumentJson, request), mode.notice())
+                : dispatch(message, recipientId);
+    }
+
+    /**
+     * How one call is to run, and the sentence to tell the model when it differs from what it
+     * asked: a refusal, or the mode with an optional notice.
+     */
+    private record Mode(boolean background, String notice, String refusal) {
+        static final Mode WAITED = new Mode(false, null, null);
+        static Mode inBackground(String notice) { return new Mode(true, notice, null); }
+        static Mode refuse(String reason) { return new Mode(false, null, reason); }
+    }
+
+    /**
+     * Joins what the calling model asked ({@code wait}) with what the recipient declared
+     * ({@link AsyncSupport}) and with whether this agent may delegate in the background at all.
+     * The recipient's word wins over the model's in both directions: a recipient that only
+     * works waited is refused a background start, and one that only works in the background is
+     * started as one even when asked to be waited on.
+     */
+    private Mode chooseMode(String argumentJson, String recipientId) {
+        AsyncSupport support = Objects.requireNonNullElse(recipientSupport.apply(recipientId), AsyncSupport.OPTIONAL);
+        boolean asksForBackground = asyncDelegation != null && asksForBackground(argumentJson);
+        if (asksForBackground && support == AsyncSupport.FORBIDDEN) {
+            return Mode.refuse("Agent [" + recipientId + "] accepts only waited delegation: "
+                    + "call delegate_task again without \"wait\": false.");
+        }
+        if (!asksForBackground && support == AsyncSupport.REQUIRED) {
+            return asyncDelegation == null
+                    ? Mode.refuse("Agent [" + recipientId + "] runs only in the background, and this agent "
+                            + "cannot start background tasks.")
+                    : Mode.inBackground("Agent [" + recipientId + "] runs only in the background, "
+                            + "so it was started as a background task; its result will be delivered to you.");
+        }
+        return asksForBackground ? Mode.inBackground(null) : Mode.WAITED;
+    }
+
+    /** {@code "wait": false}, as a boolean or as the string a model sometimes writes instead. */
+    private static boolean asksForBackground(String argumentJson) {
+        JsonNode wait = uncheckedReadTree(argumentJson).get("wait");
+        return wait != null && "false".equalsIgnoreCase(wait.asText());
+    }
+
+    /** The model's own name for a background task, or the start of its text. */
+    private static String label(String argumentJson, DelegationRequest request) {
+        JsonNode label = uncheckedReadTree(argumentJson).get("label");
+        if (label != null && label.isTextual() && !label.asText().isBlank()) {
+            return label.asText();
+        }
+        String task = request.task();
+        return task.length() <= 40 ? task : task.substring(0, 40) + "…";
+    }
+
+    /**
+     * {@code <caller session>::deleg::<agent>::<fresh id>}: the sessions of waited delegations
+     * with a suffix that is new every time. {@code null} without a caller session, like {@link
+     * #delegateSessionId}; the bus then gives the task an ephemeral one, also unique.
+     */
+    private static SessionId backgroundSessionId(SessionId callerSessionId, String recipientId) {
+        SessionId waited = delegateSessionId(callerSessionId, recipientId);
+        return waited == null ? null : SessionId.of(waited.value() + "::" + UUID.randomUUID());
+    }
+
+    private ToolResult startInBackground(AgentMessage message, Caller caller, String label, String notice) {
+        BackgroundTasks tasks = BackgroundTasks.from(caller.context()).orElse(null);
+        if (tasks == null) {
+            // Not an error to hide: starting the task anyway would leave one nobody ever closes.
+            return ToolResult.failure(TOOL_ID, "Background delegation is not available in this run: "
+                    + "the agent's strategy keeps no task registry. Delegate without \"wait\": false.");
+        }
+        return BackgroundStart.start(bus, tasks, message, label, notice);
     }
 
     /**
@@ -380,6 +535,10 @@ public final class AgentDelegationTool implements AraTool {
             outgoing = outgoing.withOpaque(RunContext.DELEGATED_BY_KEY, new DelegatedBy(selfId, callerTaskId));
         }
 
+        // The caller's background tasks are the caller's alone: a delegate, waited or not, starts
+        // with none, and cannot see, await or cancel the caller's or its siblings'.
+        outgoing = BackgroundTasks.without(outgoing);
+
         return new PreparedHop(outgoing, effectiveForThisHop, outgoingContext);
     }
 
@@ -405,47 +564,60 @@ public final class AgentDelegationTool implements AraTool {
         };
     }
 
+    /** The message one hop hands to the bus, built from the same pieces for a waited and a background call. */
+    private AgentMessage buildMessage(DelegationRequest request, SessionId delegateSessionId, PreparedHop hop,
+                                      String workflowId) {
+        // ADR-033: the same effectiveForThisHop that ADR-0077 threads onward for
+        // the *next* hop's own attenuation is also what LocalMessageBus checks against
+        // *this* hop's recipient — one value, two consumers, instead of separate scope
+        // plumbing for "am I allowed to call this" and "what do I hand my own delegate".
+        // When outgoingContext (the on-behalf-of subject identity) is present it
+        // supersedes senderScopes at the bus — both are still set so a recipient not
+        // yet ExecutionContext-aware still sees a correct senderScopes.
+        AgentMessage message = AgentMessage
+                .of(selfId, request.recipientAgentId(), request.task(), hop.context(), delegateSessionId)
+                .withSenderScopes(hop.effectiveScopes());
+        if (hop.executionContext() != null) {
+            message = message.withExecutionContext(hop.executionContext());
+        }
+        // The chain keeps the caller's workflow id (see Caller). Without a calling task the
+        // message keeps the fresh id it was born with, exactly as before.
+        if (workflowId != null) {
+            message = message.withCorrelationId(workflowId);
+        }
+        return message;
+    }
+
     /**
      * Sends the delegation and renders either the delegate's answer or the reason it could
-     * not be obtained. The four {@code catch} clauses are not redundant: each maps a distinct
-     * bus failure onto a message that tells the LLM something different about what to try
-     * next (the agent is gone / it is busy / the hop failed outright), and the tool reports a
-     * failure as a {@link ToolResult} rather than propagating, because the ReAct loop is
-     * built to read a failed tool call as an observation and keep reasoning.
+     * not be obtained. See {@link #failureFor} for why the failures are told apart.
      */
-    private ToolResult dispatch(DelegationRequest request, SessionId delegateSessionId, PreparedHop hop,
-                                String workflowId) {
-        String recipientId = request.recipientAgentId();
+    private ToolResult dispatch(AgentMessage message, String recipientId) {
         try {
-            // ADR-033: the same effectiveForThisHop that ADR-0077 threads onward for
-            // the *next* hop's own attenuation is also what LocalMessageBus checks against
-            // *this* hop's recipient — one value, two consumers, instead of separate scope
-            // plumbing for "am I allowed to call this" and "what do I hand my own delegate".
-            // When outgoingContext (the on-behalf-of subject identity) is present it
-            // supersedes senderScopes at the bus — both are still set so a recipient not
-            // yet ExecutionContext-aware still sees a correct senderScopes.
-            AgentMessage message = AgentMessage
-                    .of(selfId, recipientId, request.task(), hop.context(), delegateSessionId)
-                    .withSenderScopes(hop.effectiveScopes());
-            if (hop.executionContext() != null) {
-                message = message.withExecutionContext(hop.executionContext());
-            }
-            // The chain keeps the caller's workflow id (see Caller). Without a calling task the
-            // message keeps the fresh id it was born with, exactly as before.
-            if (workflowId != null) {
-                message = message.withCorrelationId(workflowId);
-            }
             AgentMessage reply = bus.request(message, timeout);
             return ToolResult.success(TOOL_ID,
                     "[" + recipientId + "] " + reply.content());
-        } catch (java.util.NoSuchElementException e) {
+        } catch (RuntimeException e) {
+            return failureFor(recipientId, e);
+        }
+    }
+
+    /**
+     * What a bus failure tells the delegating model. The three cases are not redundant: each maps
+     * a distinct failure onto a message that says something different about what to try next
+     * (the agent is gone / it is busy / the hop failed outright), and the tool reports a failure
+     * as a {@link ToolResult} rather than propagating, because the ReAct loop is built to read a
+     * failed tool call as an observation and keep reasoning.
+     */
+    static ToolResult failureFor(String recipientId, RuntimeException e) {
+        if (e instanceof java.util.NoSuchElementException) {
             return ToolResult.failure(TOOL_ID, "Agent not found: " + recipientId);
-        } catch (IllegalStateException e) {
+        }
+        if (e instanceof IllegalStateException) {
             return ToolResult.failure(TOOL_ID,
                     "Agent [" + recipientId + "] is not available: " + e.getMessage());
-        } catch (RuntimeException e) {
-            return ToolResult.failure(TOOL_ID,
-                    "Delegation to [" + recipientId + "] failed: " + e.getMessage());
         }
+        return ToolResult.failure(TOOL_ID,
+                "Delegation to [" + recipientId + "] failed: " + e.getMessage());
     }
 }

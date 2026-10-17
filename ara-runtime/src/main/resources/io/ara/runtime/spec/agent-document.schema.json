@@ -63,7 +63,20 @@
         "grantedScopes": { "$ref": "#/$defs/stringList" },
         "visibleToScopes": { "$ref": "#/$defs/stringList" },
         "requiredScopes": { "$ref": "#/$defs/stringList" },
-        "requiresApproval": { "type": "boolean" }
+        "requiresApproval": { "type": "boolean" },
+        "asyncSupport": {
+          "enum": ["FORBIDDEN", "OPTIONAL", "REQUIRED"],
+          "description": "Whether this agent accepts being delegated to in the background. Absent means OPTIONAL."
+        },
+        "asyncDelegation": {
+          "type": "object",
+          "description": "Lets this agent start sub-tasks in the background and carry on. Absent means off.",
+          "additionalProperties": false,
+          "properties": {
+            "maxConcurrent": { "type": "integer", "minimum": 1, "description": "Default 4." },
+            "maxResultChars": { "type": "integer", "minimum": 1, "description": "Default 8000." }
+          }
+        }
       }
     },
     "memory": {

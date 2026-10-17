@@ -15,6 +15,7 @@ import io.ara.core.llm.LlmMessage;
 import io.ara.core.memory.MemoryManager;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
+import io.ara.runtime.bus.BackgroundTasks;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -69,6 +70,8 @@ abstract class ReActLoop {
     final LlmCallContext forcedCtx;
     private final RunCheckpointer checkpointer;   // null when the run is not checkpointed
     private ExecutionResult suspension;           // set by dispatch() when the turn stopped for an approval
+    private final BackgroundTasks backgroundTasks;   // null unless the agent may delegate in the background
+    private boolean finalAnswerHeld;                 // the run already waited once for its background tasks
 
     private final String toolCatalog;
     // The message list grows incrementally across iterations — see MessageBuffer.
@@ -81,7 +84,11 @@ abstract class ReActLoop {
     boolean synthesisModeActive;
 
     ReActLoop(AgentTask task, LlmClient llm, MemoryManager memory, ToolRegistry tools, AgentConfig config) {
-        this.task          = task;
+        // The registry rides in the task's context, which is where the tools look for it. It is
+        // made here, per run, and only for an agent that opted in: a run that never starts a
+        // background task pays nothing and sees nothing of the feature.
+        this.backgroundTasks = config.asyncDelegation() != null ? new BackgroundTasks(config.asyncDelegation()) : null;
+        this.task          = backgroundTasks != null ? backgroundTasks.attachTo(task) : task;
         this.llm           = llm;
         this.memory        = memory;
         this.tools         = tools;
@@ -124,8 +131,21 @@ abstract class ReActLoop {
         synthesisModeActive = ReactExecutionSupport.synthesisDue(config, iterations);
     }
 
-    /** Runs the loop to completion, success or failure. */
+    /**
+     * Runs the loop to completion, success or failure, and then stops whatever the run left
+     * running in the background. In a {@code finally}, so that every way a run can end — an
+     * answer, a failure, a deadline, a budget, a cancellation — takes its children with it: a
+     * background task that outlived the run that started it would spend tokens for nobody.
+     */
     final ExecutionResult run() {
+        try {
+            return runLoop();
+        } finally {
+            stopBackgroundTasks();
+        }
+    }
+
+    private ExecutionResult runLoop() {
         logStart();
         task.resumeCheckpoint().map(RunCheckpoint::pendingApproval).ifPresent(this::completePendingTurn);
         while (iterations < config.maxIterations()) {
@@ -149,6 +169,8 @@ abstract class ReActLoop {
                 synthesisModeActive = ReactExecutionSupport.maybeInjectSynthesis(
                         memory, config, task, iterations, synthesisModeActive, resolvedTools, nativeTools);
             }
+
+            deliverBackgroundResults();
 
             // Hard stop: on the final iteration(s) withhold tools so the model cannot
             // emit a structured tool call and MUST produce plain text, which the forced
@@ -197,6 +219,10 @@ abstract class ReActLoop {
 
             ExecutionResult decision = decide(output, completion, forceFinal, iterations);
             if (decision != null) {
+                if (holdFinalAnswer(decision)) {
+                    checkpointIteration();
+                    continue;
+                }
                 return decision;
             }
             // dispatch() runs inside decide(), whose subclasses ignore what it returns about
@@ -207,6 +233,84 @@ abstract class ReActLoop {
             checkpointIteration();
         }
         return onMaxIterations();
+    }
+
+    // ── Background tasks ──────────────────────────────────────────────────────
+
+    /**
+     * Hands the model what finished while it was thinking, as messages in its working memory,
+     * and marks the start of the turn for {@code await_tasks}. Pushed here, before the model
+     * call, so the model never has to ask whether something finished.
+     */
+    private void deliverBackgroundResults() {
+        if (backgroundTasks == null) {
+            return;
+        }
+        backgroundTasks.deliverFinished().forEach(message -> memory.appendToWorkingMemory("user", message));
+        backgroundTasks.beginTurn();
+    }
+
+    /**
+     * Keeps a final answer from ending a run that still has background tasks: the run waits for
+     * them (up to its deadline), puts their results in front of the model and lets it answer once
+     * more, with them. Only once per run, and only if the iteration budget has a turn left — a
+     * second answer the loop has no room to take would turn a good answer into "max iterations".
+     *
+     * <p>The answer already in hand is kept when waiting brings nothing to answer with — the
+     * tasks did not finish, or the deadline passed — and is then the run's answer: another turn
+     * would only run into the deadline and lose a good answer. The tasks still open are stopped
+     * by {@link #run}.
+     *
+     * <p>Known cost: an answer already streamed to the user is followed by a second one.
+     *
+     * @return {@code true} when the answer was held and the loop should go on
+     */
+    private boolean holdFinalAnswer(ExecutionResult decision) {
+        if (backgroundTasks == null || finalAnswerHeld || !decision.isSuccess()
+                || iterations >= config.maxIterations() || !backgroundTasks.hasTasks()) {
+            return false;
+        }
+        finalAnswerHeld = true;
+        log.debug("Task [{}] answered with background tasks open: waiting for them", task.taskId());
+        List<String> results = backgroundTasks.awaitAllAndDeliver(deadline);
+        if (results.isEmpty() || Instant.now().isAfter(deadline)) {
+            return false;
+        }
+        results.forEach(message -> memory.appendToWorkingMemory("user", message));
+        memory.appendToWorkingMemory("user", backgroundTasks.hasTasks()
+                ? "[automated] Some of your background tasks did not finish in time and will be stopped. "
+                        + "Give your final answer with what you have."
+                : "[automated] Your background tasks have finished. Give your final answer using their results.");
+        return true;
+    }
+
+    /**
+     * Before the run is saved for an approval: results that already arrived go into the
+     * working memory (and so into the checkpoint), and what is still running is stopped, with
+     * a note the resumed run will read. A future in flight cannot be saved, and pretending
+     * otherwise would promise the model a result that cannot arrive.
+     */
+    private void settleBackgroundTasksForSuspension() {
+        if (backgroundTasks == null) {
+            return;
+        }
+        backgroundTasks.deliverFinished().forEach(message -> memory.appendToWorkingMemory("user", message));
+        List<String> stopped = backgroundTasks.cancelAll();
+        if (!stopped.isEmpty()) {
+            memory.appendToWorkingMemory("user", "[automated] These background tasks were cancelled because the run "
+                    + "stopped to wait for an approval: " + String.join(", ", stopped)
+                    + ". Start them again if you still need them.");
+        }
+    }
+
+    private void stopBackgroundTasks() {
+        if (backgroundTasks == null) {
+            return;
+        }
+        List<String> stopped = backgroundTasks.cancelAll();
+        if (!stopped.isEmpty() && log.isInfoEnabled()) {
+            log.info("Task [{}] ended with background tasks still running; stopped: {}", task.taskId(), stopped);
+        }
     }
 
     /**
@@ -268,6 +372,7 @@ abstract class ReActLoop {
     }
 
     private boolean suspendBefore(PendingApproval pending) {
+        settleBackgroundTasksForSuspension();
         boolean saved = checkpointer.saveSuspended(iterations, memory.workingMemory(), steps,
                 totalPromptTokens, totalOutputTokens, pending);
         if (!saved) {

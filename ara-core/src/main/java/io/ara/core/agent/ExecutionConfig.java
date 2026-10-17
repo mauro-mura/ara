@@ -28,7 +28,9 @@ public record ExecutionConfig(
         List<String>              grantedScopes,
         List<String>              visibleToScopes,
         List<String>              requiredScopes,
-        boolean                   requiresApproval
+        boolean                   requiresApproval,
+        AsyncDelegation           asyncDelegation,
+        AsyncSupport              asyncSupport
 ) {
     /** Idle time after which an unused session is reclaimed, when none is configured. */
     public static final Duration DEFAULT_SESSION_TTL = Duration.ofMinutes(30);
@@ -135,6 +137,25 @@ public record ExecutionConfig(
                 executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
                 sessionBusyPolicy, retrieverId, delegateStateAccess, sessionTtl,
                 grantedScopes, visibleToScopes, requiredScopes, false);
+    }
+
+    /**
+     * The 17-component shape from before background delegation was added, kept for callers
+     * that build an {@code ExecutionConfig} directly: no {@link AsyncDelegation} (off) and no
+     * declared {@link AsyncSupport} (so {@link AsyncSupport#OPTIONAL}).
+     */
+    public ExecutionConfig(
+            String plannerStrategy, StrategyConfig strategyConfig, List<String> enabledTools,
+            List<String> mcpServerIds, int maxIterations, Duration executionTimeout,
+            int maxTokensPerStep, boolean humanApprovalRequired, String knowledgeBaseId,
+            SessionBusyPolicy sessionBusyPolicy, String retrieverId,
+            DelegateStateAccess delegateStateAccess, Duration sessionTtl,
+            List<String> grantedScopes, List<String> visibleToScopes, List<String> requiredScopes,
+            boolean requiresApproval) {
+        this(plannerStrategy, strategyConfig, enabledTools, mcpServerIds, maxIterations,
+                executionTimeout, maxTokensPerStep, humanApprovalRequired, knowledgeBaseId,
+                sessionBusyPolicy, retrieverId, delegateStateAccess, sessionTtl,
+                grantedScopes, visibleToScopes, requiredScopes, requiresApproval, null, null);
     }
 
     public static ExecutionConfig defaults() {

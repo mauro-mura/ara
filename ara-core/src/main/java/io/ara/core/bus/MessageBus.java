@@ -64,4 +64,26 @@ public interface MessageBus {
      * @throws java.util.NoSuchElementException if the recipient is not registered
      */
     AgentMessage request(AgentMessage message, Duration timeout);
+
+    /**
+     * Starts delivering a message to the recipient and returns at once with a {@link Delegation}
+     * for the run, instead of waiting for its answer as {@link #request} does. The caller then
+     * waits on {@link Delegation#response()} when it wants the answer, or goes on and collects
+     * it later.
+     *
+     * <p>Checks and dispatches exactly as {@link #request} does — same lookup, same scope and
+     * approval checks, same task built from the message — and so throws the same exceptions
+     * for a recipient that is missing or not authorized. Only the wait differs.
+     *
+     * <p>The default refuses, so a bus written before this method existed still compiles and
+     * fails a background delegation with a message instead of failing to load.
+     *
+     * @param message the message to deliver; must not be {@code null}
+     * @return the started delegation
+     * @throws UnsupportedOperationException if this bus cannot start a delegation without waiting
+     * @throws java.util.NoSuchElementException if the recipient is not registered
+     */
+    default Delegation delegate(AgentMessage message) {
+        throw new UnsupportedOperationException("this message bus cannot start a delegation in the background");
+    }
 }

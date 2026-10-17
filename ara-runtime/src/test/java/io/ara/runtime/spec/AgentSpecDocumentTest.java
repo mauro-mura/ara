@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AsyncDelegation;
+import io.ara.core.agent.AsyncSupport;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.SessionBusyPolicy;
 import io.ara.core.agent.StrategyConfig;
@@ -64,6 +66,7 @@ class AgentSpecDocumentTest {
                 .sessionTtl(Duration.ofMinutes(10))
                 .grantedScopes(List.of("tools:read")).visibleToScopes(List.of("team"))
                 .requiredScopes(List.of("tenant")).requiresApproval(true)
+                .asyncDelegation(new AsyncDelegation(2, 500)).asyncSupport(AsyncSupport.REQUIRED)
                 .workingMemoryTokenBudget(1000).workingMemoryEviction("drop_oldest")
                 .maxConversationTurns(5).maxReflections(4).reflectionPrompt("Reflect.")
                 .contextSummarizerAgentId("summariser")
