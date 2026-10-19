@@ -5,8 +5,8 @@ import java.util.Locale;
 /**
  * How hard a model that reasons is asked to reason, for the providers that have such a dial.
  *
- * <p>Not every provider has one, and none of them share a scale beyond the three words below: OpenAI
- * takes {@code "low"}, {@code "medium"} or {@code "high"}; Anthropic takes a budget of tokens
+ * <p>Not every provider has one, and none of them share a scale beyond the four words below: OpenAI
+ * takes {@code "none"}, {@code "low"}, {@code "medium"} or {@code "high"}; Anthropic takes a budget of tokens
  * instead ({@link LlmProfile#thinkingBudgetTokens()}); Ollama can only turn thinking on or off.
  * There is deliberately no table converting one into another, because it would be a claim about
  * models this library does not control. An adapter that cannot apply an effort rejects it.
@@ -21,9 +21,14 @@ import java.util.Locale;
  * that the effort changes the reasoning tokens before relying on it.
  */
 public enum ReasoningEffort {
-    LOW, MEDIUM, HIGH;
+    /**
+     * No reasoning at all: for a model that reasons by default (a Qwen3 served by LM Studio spent 36 s and 450
+     * tokens thinking before a six-word answer), asked for a short, mechanical answer. Not the same as leaving the
+     * option unset, which leaves the choice to the model's own default.
+     */
+    NONE, LOW, MEDIUM, HIGH;
 
-    /** The lower-case word a provider's API expects ({@code "low"}, {@code "medium"}, {@code "high"}). */
+    /** The lower-case word a provider's API expects ({@code "none"}, {@code "low"}, {@code "medium"}, {@code "high"}). */
     public String wireValue() {
         return name().toLowerCase(Locale.ROOT);
     }

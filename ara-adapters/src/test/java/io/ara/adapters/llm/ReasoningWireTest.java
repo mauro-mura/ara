@@ -102,6 +102,15 @@ class ReasoningWireTest {
     }
 
     @Test
+    void openAi_sendsNone_asAnEffortOfItsOwn_notAsNoField() throws Exception {
+        OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
+
+        ask(client, context().reasoningEffort(ReasoningEffort.NONE).build());
+
+        assertTrue(wire().contains("\"reasoning_effort\":\"none\""), body.get());
+    }
+
+    @Test
     void openAi_withNoOptions_sendsNoReasoningField() throws Exception {
         OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
 

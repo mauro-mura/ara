@@ -239,6 +239,18 @@ class AgentSpecDocumentTest {
     }
 
     @Test
+    void theEffortNone_survivesTheDocument_asAnEffortOfItsOwn() throws Exception {
+        AgentSpec spec = AgentSpec.root(AgentConfig.defaults().agentType("a").primaryLlm(
+                LlmProfile.builder().transportId("m").reasoningEffort(io.ara.core.llm.ReasoningEffort.NONE).build()).build());
+
+        JsonNode document = AgentSpecDocument.encode(spec);
+
+        assertEquals("NONE", document.path("llm").path("primary").path("reasoning").path("effort").asText());
+        assertEquals(io.ara.core.llm.ReasoningEffort.NONE,
+                AgentSpecDocument.decode(document).config().reasoningEffort());
+    }
+
+    @Test
     void decode_aBadReasoningValue_isReportedWithItsPath() throws Exception {
         assertEquals("llm.primary.reasoning.effort", rejected(json("""
                 {"schemaVersion":1,"agent":{"type":"a"},"llm":{"primary":{"reasoning":{"effort":"EXTREME"}}}}""")).path());

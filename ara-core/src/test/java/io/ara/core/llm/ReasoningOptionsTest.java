@@ -56,6 +56,7 @@ class ReasoningOptionsTest {
 
     @Test
     void theEffort_hasTheWordsProvidersExpect() {
+        assertEquals("none", ReasoningEffort.NONE.wireValue());
         assertEquals("low", ReasoningEffort.LOW.wireValue());
         assertEquals("medium", ReasoningEffort.MEDIUM.wireValue());
         assertEquals("high", ReasoningEffort.HIGH.wireValue());
