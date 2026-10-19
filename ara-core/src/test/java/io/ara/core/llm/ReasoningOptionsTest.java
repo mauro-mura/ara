@@ -158,6 +158,19 @@ class ReasoningOptionsTest {
     }
 
     @Test
+    void withReasoningEffort_changesTheEffortAndNothingElse() {
+        LlmCallContext plain = LlmCallContext.from(agent().primaryLlm(LlmProfile.of("main")).build()).withTemperature(0.0);
+
+        LlmCallContext none = plain.withReasoningEffort(ReasoningEffort.NONE);
+
+        assertEquals(ReasoningEffort.NONE, none.reasoningEffort());
+        assertTrue(none.hasReasoningOptions(), "NONE is an option: the call is built with it");
+        assertEquals(plain.temperature(), none.temperature());
+        assertNull(none.withReasoningEffort(null).reasoningEffort(), "null leaves the choice to the model");
+        assertNull(plain.reasoningEffort(), "the original is not touched");
+    }
+
+    @Test
     void returnReasoningFalse_isNotAReasoningOption() {
         LlmCallContext context = LlmCallContext.from(agent().primaryLlm(
                 LlmProfile.builder().transportId("main").returnReasoning(false).build()).build());

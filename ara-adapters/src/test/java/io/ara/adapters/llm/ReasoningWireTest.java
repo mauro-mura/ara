@@ -111,6 +111,19 @@ class ReasoningWireTest {
     }
 
     @Test
+    void openAi_sendsTheEffortAlongWithANativeSchema() throws Exception {
+        OpenAiLlmClient client = OpenAiLlmClient.builder().apiKey("k").baseUrl(serve(OPENAI_REPLY) + "/v1").modelName("m")
+                .timeout(Duration.ofSeconds(10)).forceHttp1(true).structuredOutputSupport(true).build();
+
+        ask(client, context().reasoningEffort(ReasoningEffort.NONE).nativeJsonSchema(true)
+                .outputJsonSchema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}")
+                .build());
+
+        assertTrue(wire().contains("\"response_format\""), "the schema travels as the response format: " + body.get());
+        assertTrue(wire().contains("\"reasoning_effort\":\"none\""), "and so does the effort: " + body.get());
+    }
+
+    @Test
     void openAi_withNoOptions_sendsNoReasoningField() throws Exception {
         OpenAiLlmClient client = openAi(serve(OPENAI_REPLY));
 
