@@ -155,16 +155,47 @@ public final class ApprovalToolRegistry implements ToolRegistry {
         return delegate.wrapForPropagation(task);
     }
 
-    private ToolResult executeWithApproval(String toolId, String argumentJson, AgentTask task,
-                                           ToolExecutor executor) {
-        // ADR-0067 D6: gate when the agent forces it OR the tool's own classification
-        // requires it — never a condition the agent flag alone can switch off.
-        // ADR-0073 D2: plus a third disjunct — the autonomy track record for this
-        // task_class asks to escalate (level floor / confidence threshold). Additive.
-        boolean needsGate = agentForcesApproval
+    /**
+     * The request a human must answer before this call runs, built the same way {@link
+     * #execute} builds it, or empty when the call is not gated. Registers nothing with the
+     * gate: the caller decides what to do with the request — wait on it, or suspend the run.
+     */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        // A call whose decision the resumed run already holds needs no new request: asking again
+        // would suspend the run on the question it was just resumed to answer.
+        ApprovalVerdicts verdicts = ApprovalVerdicts.from(task);
+        if (verdicts != null && verdicts.holds(task, toolId, argumentJson)) {
+            return Optional.empty();
+        }
+        return needsGate(toolId, task)
+                ? Optional.of(ApprovalRequest.of(agentId, toolId, argumentJson, approvalTimeout))
+                : Optional.empty();
+    }
+
+    /**
+     * ADR-0067 D6: gate when the agent forces it OR the tool's own classification requires
+     * it — never a condition the agent flag alone can switch off. ADR-0073 D2: plus a third
+     * disjunct — the autonomy track record for this task_class asks to escalate (level floor /
+     * confidence threshold). Additive. The one place this is decided, shared by {@link
+     * #execute} and {@link #approvalRequestFor}, so asking beforehand and gating at dispatch
+     * can never disagree.
+     */
+    private boolean needsGate(String toolId, AgentTask task) {
+        return agentForcesApproval
                 || delegate.specFor(toolId).map(ToolSpec::approvalRequired).orElse(false)
                 || autonomyEscalates(toolId, task);
-        if (!needsGate) {
+    }
+
+    private ToolResult executeWithApproval(String toolId, String argumentJson, AgentTask task,
+                                           ToolExecutor executor) {
+        ApprovalVerdicts verdicts = ApprovalVerdicts.from(task);
+        Optional<ApprovalDecision> verdict = verdicts == null
+                ? Optional.empty() : verdicts.take(task, toolId, argumentJson);
+        if (verdict.isPresent()) {
+            return applyDecision(verdict.get(), toolId, argumentJson, "(resumed run)", executor);
+        }
+        if (!needsGate(toolId, task)) {
             return executor.execute(toolId, argumentJson);
         }
 
@@ -194,22 +225,30 @@ public final class ApprovalToolRegistry implements ToolRegistry {
                     "Approval gate error: " + e.getMessage());
         }
 
+        return applyDecision(decision, toolId, argumentJson, request.requestId(), executor);
+    }
+
+    /**
+     * Turns a human decision into a dispatch or a failed result — the one place that does, for
+     * a decision that arrived while a thread waited and for one a resumed run already holds
+     * (see {@link ApprovalVerdicts}), so the two can never behave differently.
+     */
+    private ToolResult applyDecision(ApprovalDecision decision, String toolId, String argumentJson,
+                                     String requestId, ToolExecutor executor) {
         return switch (decision) {
             case ApprovalDecision.Approved ignored -> {
-                log.debug("Approved: tool [{}] on agent [{}], requestId={}",
-                        toolId, agentId, request.requestId());
+                log.debug("Approved: tool [{}] on agent [{}], requestId={}", toolId, agentId, requestId);
                 yield executor.execute(toolId, argumentJson);
             }
             case ApprovalDecision.Rejected r -> {
                 log.info("Rejected: tool [{}] on agent [{}], reason='{}', requestId={}",
-                        toolId, agentId, r.reason(), request.requestId());
+                        toolId, agentId, r.reason(), requestId);
                 yield ToolResult.failure(toolId,
                         "Human rejected action '" + toolId + "': " + r.reason());
             }
             case ApprovalDecision.Modified m -> {
                 String newArgs = m.newPayload() instanceof String s ? s : argumentJson;
-                log.debug("Modified: tool [{}] on agent [{}], requestId={}",
-                        toolId, agentId, request.requestId());
+                log.debug("Modified: tool [{}] on agent [{}], requestId={}", toolId, agentId, requestId);
                 yield executor.execute(toolId, newArgs);
             }
         };

@@ -123,7 +123,7 @@ public final class RunEvents {
         emit(seq -> new AgentEvent.RunFinished(taskId, agentId, parentTaskId, correlationId, seq,
                 Instant.now(), response.isSuccess(), response.finalState(), response.iterationsUsed(),
                 response.inputTokens(), response.outputTokens(), response.estimatedCost(),
-                response.failureReason()));
+                response.failureReason(), response.pendingApprovals()));
     }
 
     /** The run ended by throwing {@code error}; the exception itself still propagates to the caller. */

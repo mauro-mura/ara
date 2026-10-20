@@ -1,6 +1,8 @@
 package io.ara.runtime;
 
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AsyncSupport;
+import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.common.AgentId;
 import io.ara.core.llm.LlmClient;
@@ -18,6 +20,7 @@ import io.ara.runtime.factory.AgentFactory;
 import io.ara.runtime.factory.DefaultLlmRouter;
 import io.ara.runtime.factory.DefaultRetrieverRouter;
 import io.ara.runtime.hitl.ApprovalToolRegistry;
+import io.ara.runtime.hitl.ApprovalResumer;
 import io.ara.runtime.llm.InstrumentedLlmClient;
 import io.ara.runtime.memory.EvictionPolicy;
 import io.ara.runtime.memory.SlidingWindowMemoryManager;
@@ -38,6 +41,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Consumer;
 
 /**
  * Validates a configured {@link AraRuntime.Builder} and assembles the runtime object
@@ -66,15 +70,28 @@ final class RuntimeAssembler {
         InstanceContextStore ctxStore = resolveInstanceContextStore();
         AgentRegistry registry = new AgentRegistry();
         Function<AgentConfig, MemoryManager> memFactory = resolveMemoryFactory(registry);
-        LocalMessageBus messageBus = new LocalMessageBus(registry, b.telemetry, b.approvalGate, b.temporaryScopeRegistry);
+        // Built here, ahead of the runtime, because the bus needs its executor: a delegate has to
+        // run where the runtime counts and drains its work (see RuntimeLifecycle#trackedExecutor).
+        RuntimeLifecycle lifecycle = new RuntimeLifecycle(cfg.name(), cfg.shutdownTimeoutSec());
+        LocalMessageBus messageBus = new LocalMessageBus(registry, b.telemetry, b.approvalGate,
+                b.temporaryScopeRegistry, lifecycle.trackedExecutor());
         Map<String, LlmClient> instrumentedClients = instrumentClients();
         ExecutionPlanner planner = buildExecutionPlanner(instrumentedClients);
         Map<String, ToolRegistry> perAgentRegistries = new ConcurrentHashMap<>();
         Function<AgentConfig, ToolRegistry> perAgentToolRegistry = resolvePerAgentToolRegistry(perAgentRegistries);
+        // ADR-048 D2: a run suspended for an approval is only a checkpoint until something waits
+        // for the answer. That something needs the registry (to find the agent when the answer
+        // comes) and the gate, so it can only exist when there is a gate to put the questions in.
+        ApprovalResumer approvalResumer = b.approvalGate == null ? null
+                : new ApprovalResumer(b.approvalGate, b.checkpointStore, registry::findById, b.resumedRunListener);
         AgentFactory agentFactory = buildAgentFactory(
-                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry, cfg);
+                instrumentedClients, planner, perAgentToolRegistry, messageBus, memFactory, registry, cfg,
+                approvalResumer == null ? checkpoint -> { } : approvalResumer::watch);
         AgentScheduler scheduler = new LocalAgentScheduler(registry, b.scheduleExecutionListener);
-        return new AraRuntime(cfg, agentFactory, registry, b.agentProvider, scheduler, ctxStore,
+        if (approvalResumer != null) {
+            approvalResumer.recover();   // after a restart, the questions the checkpoints still hold
+        }
+        return new AraRuntime(cfg, agentFactory, registry, lifecycle, b.agentProvider, scheduler, ctxStore,
                 b.approvalGate, b.temporaryScopeRegistry, b.abacPolicyEngine,
                 Map.copyOf(instrumentedClients), discoveryRegistry(perAgentRegistries),
                 Map.copyOf(b.namedRetrievers));
@@ -246,7 +263,8 @@ final class RuntimeAssembler {
             LocalMessageBus messageBus,
             Function<AgentConfig, MemoryManager> memFactory,
             AgentRegistry registry,
-            AraRuntimeConfig cfg) {
+            AraRuntimeConfig cfg,
+            Consumer<RunCheckpoint> suspensionListener) {
 
         AgentFactory.Builder factoryBuilder = AgentFactory.builder()
                 .defaultLlmClient(b.defaultClientId)
@@ -267,7 +285,7 @@ final class RuntimeAssembler {
 
         return factoryBuilder
                 .toolRegistryFactory(agentCfg ->
-                        buildToolChain(agentCfg, perAgentToolRegistry, messageBus))
+                        buildToolChain(agentCfg, perAgentToolRegistry, messageBus, registry))
                 .memoryManagerFactory(memFactory)
                 // ADR-0091 D3: when the builder set a scoped memory factory, it supersedes
                 // memFactory per session (which stays as the fallback AgentFactory requires).
@@ -275,6 +293,8 @@ final class RuntimeAssembler {
                 .executionPlanner(planner)
                 .telemetry(b.telemetry)
                 .sessionStore(b.sessionStore)
+                .checkpointStore(b.checkpointStore)
+                .suspensionListener(suspensionListener)
                 .mediaStore(b.mediaStore)
                 .artifactExtractor(b.artifactExtractor)
                 .interceptors(b.interceptors)
@@ -303,14 +323,25 @@ final class RuntimeAssembler {
      */
     private ToolRegistry buildToolChain(AgentConfig agentCfg,
                                         Function<AgentConfig, ToolRegistry> perAgentToolRegistry,
-                                        LocalMessageBus messageBus) {
+                                        LocalMessageBus messageBus, AgentRegistry registry) {
         ToolRegistry base = new DelegatingToolRegistry(
                 perAgentToolRegistry.apply(agentCfg), messageBus, agentCfg.agentId().value(),
                 b.delegationTimeout, agentCfg.delegateStateAccess(), b.sessionStore,
-                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null);
+                io.ara.core.auth.ScopeSet.of(agentCfg.grantedScopes()), null,
+                agentCfg.asyncDelegation(), recipientId -> asyncSupportOf(registry, recipientId));
         ToolRegistry withApproval = b.approvalGate != null
                 ? new ApprovalToolRegistry(base, b.approvalGate, agentCfg)
                 : base;
         return new TelemetryToolRegistry(withApproval, b.telemetry);
+    }
+
+    /**
+     * What the agent registered under {@code recipientId} declares about being delegated to in
+     * the background, or {@code null} when no such agent is registered (the delegation then
+     * fails on its own, with the bus's own "not found"). Looked up in the registry on every
+     * call, not captured, because an agent can be registered after the delegating agent exists.
+     */
+    private static AsyncSupport asyncSupportOf(AgentRegistry registry, String recipientId) {
+        return registry.findById(AgentId.of(recipientId)).map(agent -> agent.config().asyncSupport()).orElse(null);
     }
 }

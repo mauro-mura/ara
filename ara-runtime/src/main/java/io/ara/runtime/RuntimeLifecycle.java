@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -151,6 +152,51 @@ final class RuntimeLifecycle {
     void taskStarted() { quiescenceTracker.taskStarted(); }
 
     void taskFinished() { quiescenceTracker.taskFinished(); }
+
+    /**
+     * An executor for work that a running task starts on the side — today a delegated
+     * sub-task — and that the runtime must still see: the work runs on the shared
+     * {@link #getAgentExecutor() agent executor} and counts as in flight until it ends.
+     *
+     * <p>Both halves matter. {@link #stop()} waits for the executor's own tasks, not for
+     * the counter, so a delegate on a thread of its own was invisible to a graceful
+     * shutdown and could be cut off in the middle; on the executor it is drained, and
+     * interrupted by {@code shutdownNow()} if it overruns. The counter is what
+     * {@link #awaitQuiescence} and {@link #inFlightCount} read, so without it a caller
+     * polling for "nothing running" was told yes while a delegate was running.
+     *
+     * <p>The executor is resolved on every call, not captured, so the returned instance
+     * survives a stop/start cycle. Work submitted after {@link #stop()} has begun is
+     * refused with {@link RejectedExecutionException}: a graceful stop lets running tasks
+     * finish and takes no new ones, and a delegate is a new one. A coordinator still
+     * draining that tries to delegate then gets a failed tool call it can reason about,
+     * the same outcome {@link AraRuntime#submit} gives a caller who submits too late.
+     *
+     * <p>Thread-safe: holds no state of its own beyond the lifecycle's.
+     */
+    Executor trackedExecutor() {
+        return work -> {
+            Executor executor = agentExecutor;
+            if (!isStarted()) {
+                executor = getAgentExecutorOrAutoStart();
+            }
+            // Count BEFORE handing off, for the reason AraRuntime#submit does: a task that
+            // finished before it was counted would leave the counter below zero.
+            taskStarted();
+            try {
+                executor.execute(() -> {
+                    try {
+                        work.run();
+                    } finally {
+                        taskFinished();
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                taskFinished();   // never submitted, so no completion will ever release it
+                throw e;
+            }
+        };
+    }
 
     boolean awaitQuiescence(long timeout, TimeUnit unit) throws InterruptedException {
         return quiescenceTracker.awaitQuiescence(timeout, unit);

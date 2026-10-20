@@ -1,6 +1,8 @@
 package io.ara.core.agent;
 
 import io.ara.core.auth.ExecutionContext;
+import io.ara.core.hitl.ApprovalDecision;
+import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.llm.LlmExecutionHints;
 import io.ara.core.media.MediaRef;
 
@@ -278,6 +280,72 @@ public record AgentTask(
      */
     public AgentTask withAttachment(String key, Object value) {
         return withRunContext(runContext.withOpaque(key, value));
+    }
+
+    /**
+     * A task that continues the run saved in {@code checkpoint} instead of starting a new one:
+     * same session, same task id (so the run's later checkpoints replace this one), same input.
+     * The agent restores the checkpoint's working memory, trace and token counts and carries on
+     * from the next iteration; it fails, rather than silently starting over, when the agent's
+     * strategy cannot resume.
+     *
+     * @throws IllegalArgumentException if the checkpoint is waiting for approvals: use {@link
+     *         #resuming(RunCheckpoint, Map)} and say what was decided
+     */
+    public static AgentTask resuming(RunCheckpoint checkpoint) {
+        return resuming(checkpoint, Map.of());
+    }
+
+    /**
+     * As {@link #resuming(RunCheckpoint)}, for a run that stopped before a turn's tool calls:
+     * {@code decisions} maps each approval request id to what the human decided, and the resumed
+     * run first completes that turn — running, changing or refusing each call as decided — before
+     * going on to the next iteration.
+     *
+     * @throws IllegalArgumentException if a request the checkpoint waits for has no decision: a
+     *         call must never run, or be skipped, because an answer was forgotten
+     */
+    public static AgentTask resuming(RunCheckpoint checkpoint, Map<String, ApprovalDecision> decisions) {
+        Objects.requireNonNull(decisions, "decisions must not be null");
+        if (checkpoint.pendingApproval() != null) {
+            for (ApprovalRequest request : checkpoint.pendingApproval().requests()) {
+                if (!decisions.containsKey(request.requestId())) {
+                    throw new IllegalArgumentException(
+                            "no decision for approval request " + request.requestId() + " of task " + checkpoint.taskId());
+                }
+            }
+        }
+        // A task made only of attachments has blank text, which AgentTask rejects; its media
+        // already sits in the checkpoint's working memory, so any placeholder will do here.
+        String input = checkpoint.input().isBlank() ? "(resumed run)" : checkpoint.input();
+        return AgentTask.of(input)
+                .withTaskId(checkpoint.taskId())
+                .withSessionId(checkpoint.sessionId())
+                .withAttachment(RunContext.RESUME_KEY, checkpoint)
+                .withAttachment(RunContext.RESUME_DECISIONS_KEY, Map.copyOf(decisions));
+    }
+
+    /**
+     * The decisions this task resumes with, by approval request id; empty when it resumes
+     * nothing or the checkpoint was waiting for none. Like {@link #resumeCheckpoint()}, only the
+     * task the checkpoint was saved for sees them.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, ApprovalDecision> resumeDecisions() {
+        Map<String, ApprovalDecision> decisions = runContext.opaque(RunContext.RESUME_DECISIONS_KEY, Map.class);
+        return decisions != null && resumeCheckpoint().isPresent() ? decisions : Map.of();
+    }
+
+    /**
+     * The checkpoint this task resumes, if any. A checkpoint is honoured only by the task it
+     * was saved for: the opaque channel is copied into delegated tasks, and a delegate must
+     * start fresh, not replay its caller's run.
+     */
+    public Optional<RunCheckpoint> resumeCheckpoint() {
+        RunCheckpoint checkpoint = runContext.opaque(RunContext.RESUME_KEY, RunCheckpoint.class);
+        return checkpoint != null && checkpoint.taskId().equals(taskId)
+                ? Optional.of(checkpoint)
+                : Optional.empty();
     }
 
     /**

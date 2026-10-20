@@ -75,6 +75,11 @@ public final class MeteringStrategy implements ExecutionStrategy {
     }
 
     @Override
+    public boolean resumable() {
+        return delegate.resumable();
+    }
+
+    @Override
     public ExecutionResult execute(
             AgentTask task,
             LlmClient llm,

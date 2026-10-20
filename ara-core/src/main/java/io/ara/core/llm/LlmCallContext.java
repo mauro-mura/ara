@@ -336,6 +336,11 @@ public final class LlmCallContext {
         return toBuilder().outputJsonSchema(schema).outputSchemaName(name).strictSchema(strict).build();
     }
 
+    /** This context with another reasoning effort; {@code null} leaves the choice to the model. */
+    public LlmCallContext withReasoningEffort(ReasoningEffort effort) {
+        return toBuilder().reasoningEffort(effort).build();
+    }
+
     public LlmCallContext withTemperature(double t) {
         return toBuilder().temperatureOverride(t).build();
     }

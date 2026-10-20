@@ -367,6 +367,38 @@ class ApprovalToolRegistryTest {
         assertTrue(registry.specFor("unknown").isEmpty());
     }
 
+    // ── asking before dispatch (ADR-048) ──────────────────────────────────────
+
+    @Test
+    void approvalRequestFor_anAgentThatForcesApproval_buildsTheRequestWithoutTouchingTheGateOrTheDelegate() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        ScriptedGate gate = new ScriptedGate(new ApprovalDecision.Approved());
+
+        ApprovalRequest request = gated(delegate, gate).approvalRequestFor("delete_record", ARGS, null).orElseThrow();
+
+        assertEquals("delete_record", request.action());
+        assertEquals("hitl-agent", request.agentId());
+        assertEquals(ARGS, request.payload());
+        assertTrue(gate.seen.isEmpty(), "asking is a pure question: nothing is registered with the gate");
+        assertTrue(delegate.calls.isEmpty());
+    }
+
+    @Test
+    void approvalRequestFor_aToolClassifiedIrreversibleHighImpact_isGatedWithoutTheAgentFlag() {
+        RecordingRegistry delegate = new RecordingRegistry();
+        delegate.spec = ToolSpec.builtin("delete_record", SideEffects.EXTERNAL_WRITE,
+                new Reversibility.IrreversibleHighImpact());
+
+        assertTrue(new ApprovalToolRegistry(delegate, new ScriptedGate(new ApprovalDecision.Approved()),
+                configNoAgentGate()).approvalRequestFor("delete_record", ARGS, null).isPresent());
+    }
+
+    @Test
+    void approvalRequestFor_anUngatedCall_isEmpty() {
+        assertTrue(new ApprovalToolRegistry(new RecordingRegistry(), new ScriptedGate(new ApprovalDecision.Approved()),
+                configNoAgentGate()).approvalRequestFor("delete_record", ARGS, null).isEmpty());
+    }
+
     // ── construction ──────────────────────────────────────────────────────────
 
     @Test

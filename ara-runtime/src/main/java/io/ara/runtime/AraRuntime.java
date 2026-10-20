@@ -10,6 +10,7 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.AraAgents;
 import io.ara.core.agent.SessionId;
+import io.ara.core.agent.CheckpointStore;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.auth.ExecutionContext;
 import io.ara.core.auth.ScopeSet;
@@ -67,6 +68,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -139,6 +141,7 @@ public final class AraRuntime implements AutoCloseable {
             AraRuntimeConfig config,
             AgentFactory factory,
             AgentRegistry registry,
+            RuntimeLifecycle lifecycle,
             AgentProvider agentProvider,
             AgentScheduler scheduler,
             InstanceContextStore instanceContextStore,
@@ -157,7 +160,7 @@ public final class AraRuntime implements AutoCloseable {
         this.approvalGate  = approvalGate;
         this.temporaryScopeRegistry = temporaryScopeRegistry;
         this.authorizationService = new io.ara.runtime.auth.AuthorizationService(abacPolicyEngine);
-        this.lifecycle = new RuntimeLifecycle(config.name(), config.shutdownTimeoutSec());
+        this.lifecycle = lifecycle;
         this.llmClients    = llmClients;
         this.toolRegistry  = toolRegistry;
         this.retrievers    = retrievers;
@@ -983,6 +986,8 @@ public final class AraRuntime implements AutoCloseable {
         InstanceContextStore instanceContextStore;
         AraTelemetry telemetry = AraTelemetry.noop();
         SessionStore sessionStore = SessionStore.noop();
+        CheckpointStore checkpointStore = CheckpointStore.noop();
+        Consumer<AgentResponse> resumedRunListener = response -> { };
         io.ara.core.trace.TraceStore traceStore;
         io.ara.core.trace.BlobStore  traceBlobStore;
         java.util.function.Function<io.ara.core.agent.AgentConfig, String> traceSpecHash;
@@ -1246,6 +1251,30 @@ public final class AraRuntime implements AutoCloseable {
          */
         public Builder sessionStore(SessionStore sessionStore) {
             this.sessionStore = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+            return this;
+        }
+
+        /**
+         * Sets the {@link CheckpointStore} that receives a snapshot of each run at every
+         * iteration boundary (ADR-048 D2), for the ReAct-family strategies. Defaults to
+         * {@link CheckpointStore#noop()} — no snapshots, exactly today's behavior. A run's
+         * checkpoint is removed when the run ends; this step only writes it, resuming from it
+         * is not wired yet.
+         */
+        public Builder checkpointStore(CheckpointStore checkpointStore) {
+            this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore must not be null");
+            return this;
+        }
+
+        /**
+         * Receives the response of every run the runtime continues after an approval was
+         * answered (ADR-048 D2). Whoever called {@code execute} on the original run already got a
+         * response saying it was waiting; this is how the outcome reaches the application — to
+         * store it, notify someone, or answer a webhook. Defaults to doing nothing (the outcome
+         * is logged). Called on the thread that resumed the run, so it must not block for long.
+         */
+        public Builder resumedRuns(Consumer<AgentResponse> listener) {
+            this.resumedRunListener = Objects.requireNonNull(listener, "listener must not be null");
             return this;
         }
 

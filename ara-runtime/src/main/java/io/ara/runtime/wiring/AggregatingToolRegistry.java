@@ -3,6 +3,9 @@ package io.ara.runtime.wiring;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
+import io.ara.core.hitl.ApprovalRequest;
+import io.ara.core.agent.AgentTask;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +62,27 @@ public final class AggregatingToolRegistry implements ToolRegistry {
         for (ToolRegistry registry : perAgentRegistries.values()) {
             Optional<AraTool> found = registry.findById(toolId);
             if (found.isPresent()) return found;
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The classification from the same registry {@link #findById} would pick — first one that
+     * knows the tool — so a tool and its spec can never come from two different agents.
+     */
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        for (ToolRegistry registry : perAgentRegistries.values()) {
+            if (registry.findById(toolId).isPresent()) return registry.specFor(toolId);
+        }
+        return Optional.empty();
+    }
+
+    /** From the same registry {@link #specFor} and {@link #findById} pick. */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        for (ToolRegistry registry : perAgentRegistries.values()) {
+            if (registry.findById(toolId).isPresent()) return registry.approvalRequestFor(toolId, argumentJson, task);
         }
         return Optional.empty();
     }

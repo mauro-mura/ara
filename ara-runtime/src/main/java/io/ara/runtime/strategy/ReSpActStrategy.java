@@ -112,6 +112,11 @@ public final class ReSpActStrategy implements ExecutionStrategy {
     }
 
     @Override
+    public boolean resumable() {
+        return true;
+    }
+
+    @Override
     public ExecutionResult execute(
             AgentTask task,
             LlmClient llm,

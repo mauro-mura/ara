@@ -5,6 +5,8 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
+import io.ara.core.hitl.ApprovalRequest;
 import io.ara.runtime.bus.AgentDelegationTool;
 
 import java.util.List;
@@ -62,6 +64,23 @@ public final class InterceptingToolRegistry implements ToolRegistry {
     @Override
     public List<AraTool> all() {
         return delegate.all();
+    }
+
+    /**
+     * Forwarded, like {@link #findById}: the tool's classification lives on the registry this
+     * one wraps, and {@code ApprovalToolRegistry} reads it through the whole chain to decide
+     * whether a call is gated (ADR-0067 D6). Not forwarding it silently turns the per-tool
+     * gate off for every agent built on top of this decorator.
+     */
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        return delegate.specFor(toolId);
+    }
+
+    /** Forwarded for the same reason as {@link #specFor}; see {@link ToolRegistry#approvalRequestFor}. */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        return delegate.approvalRequestFor(toolId, argumentJson, task);
     }
 
     @Override

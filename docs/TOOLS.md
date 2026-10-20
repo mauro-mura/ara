@@ -77,6 +77,9 @@ decorators around it (approval gating, telemetry, delegation), not a catalogue o
 ready-made tools. The one tool the runtime registers on its own is `delegate_task`
 (`AgentDelegationTool`), which lets a supervisor agent hand work to another registered
 agent.
+By default it waits for the answer. An agent that opts in can also start the sub-task in the
+background and collect the result later — see
+[Background delegation](CONFIGURATION.md#background-delegation).
 
 ## Parallel tool dispatch (Java 21 virtual threads)
 

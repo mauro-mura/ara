@@ -36,9 +36,10 @@ public final class AgentStateMachine {
         Map<AgentState, Set<AgentState>> m = new EnumMap<>(AgentState.class);
         m.put(AgentState.IDLE,      Set.of(AgentState.PLANNING));
         m.put(AgentState.PLANNING,  Set.of(AgentState.EXECUTING, AgentState.FAILED));
-        m.put(AgentState.EXECUTING, Set.of(AgentState.DONE, AgentState.FAILED));
+        m.put(AgentState.EXECUTING, Set.of(AgentState.DONE, AgentState.FAILED, AgentState.AWAITING_APPROVAL));
         m.put(AgentState.DONE,      Set.of(AgentState.IDLE));
         m.put(AgentState.FAILED,    Set.of(AgentState.IDLE));
+        m.put(AgentState.AWAITING_APPROVAL, Set.of(AgentState.IDLE));
         ALLOWED_TRANSITIONS = Collections.unmodifiableMap(m);
     }
 

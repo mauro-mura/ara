@@ -1,6 +1,7 @@
 package io.ara.core.agent;
 
 import io.ara.core.common.Money;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.util.List;
 import java.util.Objects;
@@ -24,6 +25,10 @@ import java.util.Optional;
  * @param steps          ordered list of execution steps (thoughts, tool calls, observations)
  * @param cost           the cost the strategy measured itself, or {@code null} when it did not —
  *                       in which case the executing agent prices the token counts from its config
+ * @param awaitingApproval the approvals a pass that stopped, without finishing, before a turn's
+ *                       tool calls is waiting for, and saved the run to resume from (ADR-048 D2);
+ *                       empty for a pass that ran to its end. Such a pass is neither a success nor
+ *                       a failure, see {@link #isAwaitingApproval()}
  */
 public record ExecutionResult(
         boolean goalAchieved,
@@ -33,12 +38,20 @@ public record ExecutionResult(
         int outputTokens,
         String failureReason,
         List<ExecutionStep> steps,
-        Money cost
+        Money cost,
+        List<ApprovalRequest> awaitingApproval
 ) {
 
     public ExecutionResult {
         Objects.requireNonNull(output, "output must not be null");
         steps = steps != null ? List.copyOf(steps) : List.of();
+        awaitingApproval = awaitingApproval != null ? List.copyOf(awaitingApproval) : List.of();
+    }
+
+    /** The shape from before {@code awaitingApproval}: a pass that ran to its end, one way or the other. */
+    public ExecutionResult(boolean goalAchieved, String output, int iterationsDone, int promptTokens,
+                           int outputTokens, String failureReason, List<ExecutionStep> steps, Money cost) {
+        this(goalAchieved, output, iterationsDone, promptTokens, outputTokens, failureReason, steps, cost, List.of());
     }
 
     /** A result whose cost was not measured by the strategy — the caller prices the tokens. */
@@ -55,7 +68,7 @@ public record ExecutionResult(
      */
     public ExecutionResult withCost(Money cost) {
         return new ExecutionResult(goalAchieved, output, iterationsDone, promptTokens, outputTokens,
-                failureReason, steps, cost);
+                failureReason, steps, cost, awaitingApproval);
     }
 
     /**
@@ -73,7 +86,26 @@ public record ExecutionResult(
      * @return {@code true} when {@code failureReason} is null or blank
      */
     public boolean isSuccess() {
-        return failureReason == null || failureReason.isBlank();
+        return (failureReason == null || failureReason.isBlank()) && awaitingApproval.isEmpty();
+    }
+
+    /**
+     * {@code true} when the pass stopped to wait for a human decision and saved the run. It has
+     * no answer and no failure: the caller reports the suspension, and continues the run from
+     * its checkpoint once the approval is answered. Checked <em>before</em> {@link #isSuccess()}
+     * by the one caller that understands it; for everyone else it reads as not successful.
+     */
+    public boolean isAwaitingApproval() {
+        return !awaitingApproval.isEmpty();
+    }
+
+    /** A pass suspended before a turn's calls, until {@code requests} are answered; the run was saved. */
+    public static ExecutionResult awaitingApproval(List<ApprovalRequest> requests, int iterations,
+                                                   int promptTokens, int outputTokens, List<ExecutionStep> steps) {
+        if (requests == null || requests.isEmpty()) {
+            throw new IllegalArgumentException("a suspended pass waits for at least one approval");
+        }
+        return new ExecutionResult(false, "", iterations, promptTokens, outputTokens, null, steps, null, requests);
     }
 
     /**

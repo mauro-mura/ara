@@ -63,7 +63,20 @@
         "grantedScopes": { "$ref": "#/$defs/stringList" },
         "visibleToScopes": { "$ref": "#/$defs/stringList" },
         "requiredScopes": { "$ref": "#/$defs/stringList" },
-        "requiresApproval": { "type": "boolean" }
+        "requiresApproval": { "type": "boolean" },
+        "asyncSupport": {
+          "enum": ["FORBIDDEN", "OPTIONAL", "REQUIRED"],
+          "description": "Whether this agent accepts being delegated to in the background. Absent means OPTIONAL."
+        },
+        "asyncDelegation": {
+          "type": "object",
+          "description": "Lets this agent start sub-tasks in the background and carry on. Absent means off.",
+          "additionalProperties": false,
+          "properties": {
+            "maxConcurrent": { "type": "integer", "minimum": 1, "description": "Default 4." },
+            "maxResultChars": { "type": "integer", "minimum": 1, "description": "Default 8000." }
+          }
+        }
       }
     },
     "memory": {
@@ -127,7 +140,7 @@
           "description": "Reasoning options for models that reason. Each is optional and each provider accepts only some of them; one the provider cannot apply makes the call fail rather than being ignored (OpenAI: effort; Anthropic: thinkingBudgetTokens, with returnReasoning; Ollama and Mistral: returnReasoning only).",
           "additionalProperties": false,
           "properties": {
-            "effort": { "enum": ["LOW", "MEDIUM", "HIGH"], "description": "How hard the model reasons. OpenAI only." },
+            "effort": { "enum": ["NONE", "LOW", "MEDIUM", "HIGH"], "description": "How hard the model reasons. OpenAI only." },
             "thinkingBudgetTokens": { "type": "integer", "minimum": 1, "description": "Cap on tokens spent thinking. Anthropic only." },
             "returnReasoning": { "type": "boolean", "description": "Record the model's reasoning as steps, where the provider returns it. Off unless true." }
           }

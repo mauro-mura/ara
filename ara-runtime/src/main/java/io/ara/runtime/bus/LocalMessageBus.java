@@ -1,6 +1,7 @@
 package io.ara.runtime.bus;
 
 import io.ara.core.agent.AgentResponse;
+import io.ara.core.agent.AgentState;
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.RunContext;
@@ -8,9 +9,11 @@ import io.ara.core.agent.SessionId;
 import io.ara.core.auth.ExecutionContext;
 import io.ara.core.auth.ScopeSet;
 import io.ara.core.bus.AgentMessage;
+import io.ara.core.bus.Delegation;
 import io.ara.core.bus.MessageBus;
 import io.ara.core.common.AgentId;
 import io.ara.core.hitl.ApprovalGate;
+import io.ara.core.hitl.ApprovalRequest;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.runtime.agent.AgentRegistry;
 import io.ara.runtime.agent.SessionScoped;
@@ -23,8 +26,10 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 /**
  * In-process {@link MessageBus} implementation for single-node deployments.
@@ -64,6 +69,7 @@ public final class LocalMessageBus implements MessageBus {
     private final AraTelemetry  telemetry;
     private final ApprovalGate  approvalGate;
     private final io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry;
+    private final Executor delegateExecutor;
 
     public LocalMessageBus(AgentRegistry registry) {
         this(registry, AraTelemetry.noop());
@@ -94,6 +100,21 @@ public final class LocalMessageBus implements MessageBus {
      */
     public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry, ApprovalGate approvalGate,
                             io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry) {
+        this(registry, telemetry, approvalGate, temporaryScopeRegistry, work -> Thread.ofVirtual().start(work));
+    }
+
+    /**
+     * @param delegateExecutor where {@link #request} runs the recipient. {@code AraRuntime} passes
+     *                         its own tracked executor, so a delegate in flight is counted by
+     *                         {@code awaitQuiescence} and drained by {@code stop()}. Every shorter
+     *                         constructor passes a plain virtual thread per call — the behavior of a
+     *                         bus built without a runtime around it (tests, standalone use), where
+     *                         nothing is waiting to shut anything down.
+     */
+    public LocalMessageBus(AgentRegistry registry, AraTelemetry telemetry, ApprovalGate approvalGate,
+                            io.ara.runtime.auth.TemporaryScopeRegistry temporaryScopeRegistry,
+                            Executor delegateExecutor) {
+        this.delegateExecutor = Objects.requireNonNull(delegateExecutor, "delegateExecutor must not be null");
         this.registry     = Objects.requireNonNull(registry,  "registry must not be null");
         this.telemetry    = Objects.requireNonNull(telemetry, "telemetry must not be null");
         this.approvalGate = approvalGate;
@@ -132,18 +153,45 @@ public final class LocalMessageBus implements MessageBus {
         Objects.requireNonNull(message, "message must not be null");
         Objects.requireNonNull(timeout, "timeout must not be null");
 
+        Delegation delegation = delegate(message);
+        AgentResponse response = awaitAnswer(message, delegation, timeout);
+
+        log.debug("[Bus] Reply from={} correlation={} success={}",
+                message.recipientId(), message.correlationId(), response.isSuccess());
+
+        // A reply message cannot carry empty content, and a response that is not a success has
+        // none: failure() sets content to "" and keeps the reason in failureReason, and a run
+        // suspended for an approval has neither. Building the reply anyway used to fail with
+        // "content must not be blank", which told the delegating model that something broke and
+        // hid what — the one thing it needs to decide whether to retry, wait or give up.
+        if (!response.isSuccess()) {
+            throw new RuntimeException(describeNoAnswer(response));
+        }
+        return AgentMessage.reply(message, message.recipientId(), response.content());
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Runs the recipient on the delegate executor and returns without waiting. {@link
+     * #request} is this plus a bounded wait, so the two cannot drift apart.
+     */
+    @Override
+    public Delegation delegate(AgentMessage message) {
+        Objects.requireNonNull(message, "message must not be null");
+
         AraAgent recipient = resolve(message.recipientId());
         ExecutionContext ctx = resolveExecutionContext(message, recipient);
         ScopeSet effectiveScopes = resolveEffectiveScopes(message, ctx);
         ScopeVerifier.checkAuthorized(recipient, effectiveScopes);
         ScopeVerifier.checkApproved(recipient, approvalGate, message.senderId(), effectiveScopes);
 
-        log.debug("[Bus] Request from={} to={} correlation={}",
+        log.debug("[Bus] Delegation from={} to={} correlation={}",
                 message.senderId(), message.recipientId(), message.correlationId());
 
-        // A request() caller may give up on this call (timeout or its own interruption)
-        // before the recipient finishes — see the catch blocks below, which need a
-        // SessionId to actually stop it. message.sessionId() is only set when the
+        // Whoever holds the Delegation may give up on it (a timeout, its own interruption, a
+        // background task being cancelled) before the recipient finishes, and stopping a
+        // recipient needs a SessionId to terminate. message.sessionId() is only set when the
         // delegating caller itself runs inside a real session; fall back to a fresh
         // ephemeral one here so cancellation always has a target, not just delegations
         // that happen to carry a named session.
@@ -152,22 +200,31 @@ public final class LocalMessageBus implements MessageBus {
 
         CompletableFuture<AgentResponse> future = CompletableFuture.supplyAsync(
                 () -> recipient.execute(task),
-                r -> Thread.ofVirtual().start(telemetry.propagate(r))
+                work -> delegateExecutor.execute(telemetry.propagate(work))
         );
-
-        AgentResponse response;
-        try {
-            response = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            // future.cancel(true) alone does nothing here: CompletableFuture.cancel()'s
-            // mayInterruptIfRunning has no effect for a task submitted via supplyAsync —
-            // the JDK does not use interrupts to control it (this is documented behavior,
-            // not an oversight). Without an explicit terminate() call the recipient kept
-            // running to completion (or its own executionTimeout, up to several more
-            // minutes) with nobody left waiting on the result — spending tokens and
-            // holding its session for a caller that already gave up.
+        // future.cancel(true) alone does nothing here: CompletableFuture.cancel()'s
+        // mayInterruptIfRunning has no effect for a task submitted via supplyAsync — the JDK
+        // does not use interrupts to control it (this is documented behavior, not an
+        // oversight). Without an explicit terminate() call the recipient kept running to
+        // completion (or its own executionTimeout, up to several more minutes) with nobody
+        // left waiting on the result — spending tokens and holding its session for a caller
+        // that already gave up.
+        return new Delegation(task.taskId(), future, () -> {
             future.cancel(true);
             terminateIfScoped(recipient, sessionId);
+        });
+    }
+
+    /**
+     * Waits up to {@code timeout} for {@code delegation}'s response, stopping the recipient if
+     * the wait ends without one, and turns every way the wait can fail into the exception
+     * {@link #request} has always thrown.
+     */
+    private static AgentResponse awaitAnswer(AgentMessage message, Delegation delegation, Duration timeout) {
+        try {
+            return delegation.response().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            delegation.cancel().run();
             throw new RuntimeException(
                     "Request to agent [%s] timed out after %s (correlation=%s)"
                             .formatted(message.recipientId(), timeout, message.correlationId()), e);
@@ -176,8 +233,7 @@ public final class LocalMessageBus implements MessageBus {
             // Same reasoning as the timeout branch: whatever interrupted us — e.g. our own
             // caller's session being terminated — should cascade to the delegate instead
             // of leaving it running unobserved.
-            future.cancel(true);
-            terminateIfScoped(recipient, sessionId);
+            delegation.cancel().run();
             throw new RuntimeException("Request interrupted", e);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
@@ -185,11 +241,23 @@ public final class LocalMessageBus implements MessageBus {
                     "Request to agent [%s] failed: %s".formatted(message.recipientId(), cause.getMessage()),
                     cause);
         }
+    }
 
-        log.debug("[Bus] Reply from={} correlation={} success={}",
-                message.recipientId(), message.correlationId(), response.isSuccess());
-
-        return AgentMessage.reply(message, message.recipientId(), response.content());
+    /**
+     * Why {@code response} is not an answer, in words for a model. A suspended run is not a
+     * failure and says so: it is waiting for a person, and its answer will go to whoever
+     * resumes it, not back to this caller — the delegate stays suspended and the caller
+     * has nothing to wait for.
+     */
+    static String describeNoAnswer(AgentResponse response) {
+        if (response.finalState() == AgentState.AWAITING_APPROVAL) {
+            String requestIds = response.pendingApprovals().stream()
+                    .map(ApprovalRequest::requestId)
+                    .collect(Collectors.joining(", "));
+            return "the delegate is suspended waiting for human approval (request " + requestIds
+                    + "); its answer will not come back to this call";
+        }
+        return response.failureReasonOpt().orElse("the delegate failed without giving a reason");
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

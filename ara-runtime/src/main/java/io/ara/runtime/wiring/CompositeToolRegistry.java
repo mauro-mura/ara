@@ -4,6 +4,8 @@ import io.ara.core.agent.AgentTask;
 import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -46,6 +48,23 @@ final class CompositeToolRegistry implements ToolRegistry {
     public Optional<AraTool> findById(String toolId) {
         AraTool mcp = mcpTools.get(toolId);
         return mcp != null ? Optional.of(mcp) : base.findById(toolId);
+    }
+
+    /**
+     * Forwarded to {@code base} for the tools it owns, so the per-tool approval gate (ADR-0067
+     * D6) sees their classification. An MCP-leased tool has none — the server describes what a
+     * tool takes, not what it does to the world — and it takes precedence here as in {@link
+     * #findById}, so an id it shadows is not classified with the shadowed tool's spec.
+     */
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        return mcpTools.containsKey(toolId) ? Optional.empty() : base.specFor(toolId);
+    }
+
+    /** Forwarded like {@link #specFor}: an MCP tool shadows a base tool of the same id, so it gets the base's answer for neither. */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        return mcpTools.containsKey(toolId) ? Optional.empty() : base.approvalRequestFor(toolId, argumentJson, task);
     }
 
     /** {@code base}'s full catalog plus every MCP-leased tool; MCP-owned ids take precedence, matching {@link #findById}. */

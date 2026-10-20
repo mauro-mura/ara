@@ -2,6 +2,8 @@ package io.ara.runtime.bus;
 
 import io.ara.core.agent.AgentTask;
 import io.ara.core.agent.AgentView;
+import io.ara.core.agent.AsyncDelegation;
+import io.ara.core.agent.AsyncSupport;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.SessionStore;
 import io.ara.core.auth.ScopeSet;
@@ -10,12 +12,17 @@ import io.ara.core.tool.AraTool;
 import io.ara.core.tool.ToolCallNormalizer;
 import io.ara.core.tool.ToolRegistry;
 import io.ara.core.tool.ToolResult;
+import io.ara.core.tool.ToolSpec;
+import io.ara.core.hitl.ApprovalRequest;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * {@link ToolRegistry} decorator that injects the {@link AgentDelegationTool}
@@ -35,7 +42,13 @@ import java.util.Optional;
 public final class DelegatingToolRegistry implements ToolRegistry {
 
     private final ToolRegistry         inner;
-    private final AgentDelegationTool  delegationTool;
+    /**
+     * The tools this decorator adds on top of {@code inner}, by id: {@code delegate_task}
+     * always, and — only for an agent that may delegate in the background — {@code await_tasks}
+     * and {@code cancel_task}, which exist for nothing else. They travel together because the
+     * two are only meaningful beside the {@code wait} parameter of the first.
+     */
+    private final Map<String, AraTool> ownTools = new LinkedHashMap<>();
 
     /**
      * @param inner    the registry to delegate all non-bus tool calls to
@@ -116,61 +129,111 @@ public final class DelegatingToolRegistry implements ToolRegistry {
     public DelegatingToolRegistry(ToolRegistry inner, MessageBus bus, String selfId, Duration timeout,
                                    DelegateStateAccess stateAccess, SessionStore sessionStore,
                                    ScopeSet ownGrantedScopes, AgentView agentView) {
+        this(inner, bus, selfId, timeout, stateAccess, sessionStore, ownGrantedScopes, agentView, null, id -> null);
+    }
+
+    /**
+     * @param asyncDelegation  when not {@code null}, the agent may start background sub-tasks:
+     *                         {@code delegate_task} accepts {@code "wait": false} and
+     *                         {@code await_tasks} / {@code cancel_task} are added. See {@link
+     *                         AgentDelegationTool}'s own constructor Javadoc.
+     * @param recipientSupport what a recipient declares about background delegation, by id
+     */
+    public DelegatingToolRegistry(ToolRegistry inner, MessageBus bus, String selfId, Duration timeout,
+                                   DelegateStateAccess stateAccess, SessionStore sessionStore,
+                                   ScopeSet ownGrantedScopes, AgentView agentView,
+                                   AsyncDelegation asyncDelegation, Function<String, AsyncSupport> recipientSupport) {
         this.inner          = Objects.requireNonNull(inner,  "inner must not be null");
-        this.delegationTool = new AgentDelegationTool(
+        AgentDelegationTool delegationTool = new AgentDelegationTool(
                 Objects.requireNonNull(bus,    "bus must not be null"),
                 Objects.requireNonNull(selfId, "selfId must not be null"),
                 timeout,
                 Objects.requireNonNull(stateAccess, "stateAccess must not be null"),
                 Objects.requireNonNull(sessionStore, "sessionStore must not be null"),
                 ownGrantedScopes,
-                agentView);
+                agentView,
+                asyncDelegation,
+                recipientSupport);
+        ownTools.put(AgentDelegationTool.TOOL_ID, delegationTool);
+        if (asyncDelegation != null) {
+            ownTools.put(AwaitTasksTool.TOOL_ID, new AwaitTasksTool());
+            ownTools.put(CancelTaskTool.TOOL_ID, new CancelTaskTool());
+        }
     }
 
     @Override
     public List<AraTool> resolveEnabled(List<String> enabledToolIds) {
         List<AraTool> tools = new ArrayList<>(inner.resolveEnabled(enabledToolIds));
-        if (shouldAddDelegation(enabledToolIds, tools)) {
-            tools.add(delegationTool);
+        if (shouldAddOwnTools(enabledToolIds)) {
+            addMissingOwnTools(tools);
         }
         return List.copyOf(tools);
     }
 
     /**
-     * Determines whether the delegation tool should be added to the enabled set.
+     * Determines whether this decorator's tools should be added to the enabled set — decided by
+     * {@code delegate_task} alone, the tool the others only make sense beside.
      *
      * <ul>
-     *   <li>{@code null}  → "all tools" mode → add delegation.</li>
-     *   <li>empty list    → agent explicitly declared no tools → do NOT add delegation.</li>
-     *   <li>non-empty     → add only if {@code delegate_task} is explicitly listed.</li>
-     *   <li>already present in {@code resolved} → skip to avoid duplicates.</li>
+     *   <li>{@code null}  → "all tools" mode → add them.</li>
+     *   <li>empty list    → agent explicitly declared no tools → do NOT add them.</li>
+     *   <li>non-empty     → add them only if {@code delegate_task} is explicitly listed.</li>
      * </ul>
      */
-    private static boolean shouldAddDelegation(List<String> enabledToolIds, List<AraTool> resolved) {
-        boolean alreadyPresent = resolved.stream()
-                .anyMatch(t -> AgentDelegationTool.TOOL_ID.equals(t.toolId()));
-        if (alreadyPresent) return false;
-
+    private static boolean shouldAddOwnTools(List<String> enabledToolIds) {
         if (enabledToolIds == null) return true;                              // all-tools mode
         if (enabledToolIds.isEmpty()) return false;                           // no-tools mode
         return enabledToolIds.contains(AgentDelegationTool.TOOL_ID);          // explicit opt-in
     }
 
+    /** Adds each own tool {@code tools} does not already declare, so an inner registry's version wins. */
+    private void addMissingOwnTools(List<AraTool> tools) {
+        for (AraTool own : ownTools.values()) {
+            boolean alreadyPresent = tools.stream().anyMatch(t -> own.toolId().equals(t.toolId()));
+            if (!alreadyPresent) tools.add(own);
+        }
+    }
+
     @Override
     public Optional<AraTool> findById(String toolId) {
         String id = ToolCallNormalizer.stripNamespace(toolId);
-        if (AgentDelegationTool.TOOL_ID.equals(id)) {
-            return Optional.of(delegationTool);
+        AraTool own = ownTools.get(id);
+        if (own != null) {
+            return Optional.of(own);
         }
         return inner.findById(id);
+    }
+
+    /**
+     * Forwarded to {@code inner}, with the same namespace stripping as {@link #findById}: the
+     * classification of the user's tools lives there, and {@code ApprovalToolRegistry} — which
+     * wraps this registry — reads it to decide whether a call is gated (ADR-0067 D6). {@code
+     * delegate_task} has no classification of its own: what it may do is decided by the
+     * delegate's own tools, each gated in the delegate's chain.
+     */
+    @Override
+    public Optional<ToolSpec> specFor(String toolId) {
+        String id = ToolCallNormalizer.stripNamespace(toolId);
+        return ownTools.containsKey(id) ? Optional.empty() : inner.specFor(id);
+    }
+
+    /**
+     * Forwarded like {@link #specFor}, with the same namespace stripping and the same
+     * exception: {@code delegate_task} is not gated here, its delegate's tools are.
+     */
+    @Override
+    public Optional<ApprovalRequest> approvalRequestFor(String toolId, String argumentJson, AgentTask task) {
+        String id = ToolCallNormalizer.stripNamespace(toolId);
+        return ownTools.containsKey(id)
+                ? Optional.empty()
+                : inner.approvalRequestFor(id, argumentJson, task);
     }
 
     /** {@code inner}'s full catalog plus {@code delegate_task}, unless {@code inner} already declares it. */
     @Override
     public List<AraTool> all() {
         List<AraTool> tools = new ArrayList<>(inner.all());
-        boolean alreadyPresent = tools.stream().anyMatch(t -> AgentDelegationTool.TOOL_ID.equals(t.toolId()));
-        if (!alreadyPresent) tools.add(delegationTool);
+        addMissingOwnTools(tools);
         return List.copyOf(tools);
     }
 
@@ -178,8 +241,9 @@ public final class DelegatingToolRegistry implements ToolRegistry {
     public ToolResult execute(String toolId, String argumentJson) {
         String id   = ToolCallNormalizer.stripNamespace(toolId);
         String args = ToolCallNormalizer.normalizeArgs(argumentJson);
-        if (AgentDelegationTool.TOOL_ID.equals(id)) {
-            return delegationTool.execute(args);
+        AraTool own = ownTools.get(id);
+        if (own != null) {
+            return own.execute(args);
         }
         return inner.execute(id, args);
     }
@@ -188,8 +252,9 @@ public final class DelegatingToolRegistry implements ToolRegistry {
     public ToolResult execute(String toolId, String argumentJson, AgentTask task) {
         String id   = ToolCallNormalizer.stripNamespace(toolId);
         String args = ToolCallNormalizer.normalizeArgs(argumentJson);
-        if (AgentDelegationTool.TOOL_ID.equals(id)) {
-            return delegationTool.execute(args, task);
+        AraTool own = ownTools.get(id);
+        if (own != null) {
+            return own.execute(args, task);
         }
         return inner.execute(id, args, task);
     }

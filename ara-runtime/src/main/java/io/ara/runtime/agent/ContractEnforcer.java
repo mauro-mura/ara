@@ -133,7 +133,8 @@ final class ContractEnforcer {
                 previous.outputTokens() + next.outputTokens(),
                 addCost(previous.estimatedCost(), next.estimatedCost()),
                 Duration.between(start, Instant.now()),
-                next.failureReason(), next.completedAt(), steps, next.llmProvider(), next.violation());
+                next.failureReason(), next.completedAt(), steps, next.llmProvider(), next.violation(),
+                next.artifacts(), next.pendingApprovals());
     }
 
     /**

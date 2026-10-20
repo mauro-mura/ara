@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.ara.core.agent.AgentConfig;
+import io.ara.core.agent.AsyncDelegation;
+import io.ara.core.agent.AsyncSupport;
 import io.ara.core.agent.DelegateStateAccess;
 import io.ara.core.agent.ExecutionConfig;
 import io.ara.core.agent.SessionBusyPolicy;
@@ -55,7 +57,27 @@ final class ExecutionDocument {
         set(builder::visibleToScopes, execution.stringList("visibleToScopes"));
         set(builder::requiredScopes, execution.stringList("requiredScopes"));
         set(builder::requiresApproval, execution.bool("requiresApproval"));
+        set(builder::asyncSupport, execution.enumValue("asyncSupport", AsyncSupport.class));
+        decodeAsyncDelegation(execution, builder);
         execution.finish();
+    }
+
+    /**
+     * {@code "asyncDelegation": {"maxConcurrent": 4, "maxResultChars": 8000}}; either number
+     * may be left out for its default, and an empty object turns the feature on with both.
+     * Absent means off — the same as an agent that never heard of it.
+     */
+    private static void decodeAsyncDelegation(DocumentFields execution, AgentConfig.Builder builder) {
+        DocumentFields async = execution.optionalObject("asyncDelegation");
+        if (async == null) {
+            return;
+        }
+        Integer maxConcurrent = async.integer("maxConcurrent");
+        Integer maxResultChars = async.integer("maxResultChars");
+        async.finish();
+        builder.asyncDelegation(new AsyncDelegation(
+                maxConcurrent != null ? maxConcurrent : AsyncDelegation.DEFAULT_MAX_CONCURRENT,
+                maxResultChars != null ? maxResultChars : AsyncDelegation.DEFAULT_MAX_RESULT_CHARS));
     }
 
     private static void decodeStrategy(DocumentFields execution, AgentConfig.Builder builder) {
@@ -95,6 +117,16 @@ final class ExecutionDocument {
         out.set("visibleToScopes", stringArray(execution.visibleToScopes()));
         out.set("requiredScopes", stringArray(execution.requiredScopes()));
         out.put("requiresApproval", execution.requiresApproval());
+        // Written only when set, so an agent that never used background delegation encodes
+        // exactly as it did before the feature existed.
+        if (execution.asyncSupport() != null) {
+            out.put("asyncSupport", execution.asyncSupport().name());
+        }
+        if (execution.asyncDelegation() != null) {
+            ObjectNode async = out.putObject("asyncDelegation");
+            async.put("maxConcurrent", execution.asyncDelegation().maxConcurrent());
+            async.put("maxResultChars", execution.asyncDelegation().maxResultChars());
+        }
         return out;
     }
 }

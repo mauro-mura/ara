@@ -355,6 +355,7 @@ Everything below lives in `ara-examples` and runs with `main()`.
 | `spec/AgentFromFileExample` | stub | An agent defined in a JSON file: load it, check the names it refers to, run it, write it back |
 | `spec/ImportAgentFromJsonExample` | stub | A fully described agent (fallback model, prices, spend cap, strategy, tools, memory) imported from a JSON file on the classpath, then run |
 | `events/RunEventsExample` | stub | A listener on the task receives every step as it happens, including a delegated agent's, printed as a tree |
+| `background/BackgroundDelegationExample` | stub / **live** | `delegate_task` with `"wait": false`: two slow labs run in the background while the coordinator reads notes; each result is put in front of the model by itself, and a run that answers with a task still open waits for it — with the clock on every line, and the example checks its own claims |
 | `scheduler/AgentSchedulerExample` | none | Interval and cron schedules, with pause / resume / trigger |
 | `planner/PlannerExample` | stub / **live** | `plan_execute` on a small coding task: a JSON plan with dependencies, a person who approves (or changes, or rejects) the plan through the HITL gate, notes that carry a choice from one step to the next, and a failed step that replans — in an in-memory workspace |
 | `web/StreamingChatWebExample` | stub / **live** | A chat page on a JDK `HttpServer`, streaming over SSE |

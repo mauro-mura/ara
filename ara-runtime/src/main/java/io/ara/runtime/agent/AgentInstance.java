@@ -6,6 +6,8 @@ import io.ara.core.agent.AgentInterceptor;
 import io.ara.core.agent.AgentResponse;
 import io.ara.core.agent.AgentState;
 import io.ara.core.agent.AgentTask;
+import io.ara.core.agent.CheckpointStore;
+import io.ara.core.agent.RunCheckpoint;
 import io.ara.core.agent.AraAgent;
 import io.ara.core.agent.ConversationTurn;
 import io.ara.core.agent.ExecutionResult;
@@ -22,8 +24,11 @@ import io.ara.core.common.Money;
 import io.ara.core.media.MediaRef;
 import io.ara.core.llm.LlmCallContext;
 import io.ara.core.llm.LlmClient;
+import io.ara.core.hitl.ApprovalRequest;
+import io.ara.core.llm.LlmMessage;
 import io.ara.core.llm.LlmRouter;
 import io.ara.core.memory.MemoryManager;
+import io.ara.core.memory.ToolCallMetadata;
 import io.ara.core.telemetry.AraTelemetry;
 import io.ara.core.telemetry.Span;
 import io.ara.core.telemetry.SpanStatus;
@@ -33,6 +38,8 @@ import io.ara.runtime.interceptor.InterceptingLlmClient;
 import io.ara.runtime.interceptor.InterceptingToolRegistry;
 import io.ara.runtime.strategy.ExecutionPlanner;
 import io.ara.runtime.strategy.MeteringStrategy;
+import io.ara.runtime.hitl.ApprovalVerdicts;
+import io.ara.runtime.strategy.RunCheckpointer;
 import io.ara.runtime.strategy.RunEvents;
 import io.ara.runtime.wiring.AgentWiring;
 import io.ara.runtime.wiring.Versioned;
@@ -45,8 +52,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -91,6 +100,8 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
     private final AraTelemetry telemetry;
     /** Backs cross-session {@code userMemory} (ADR-043 rev. 3) — resolved fresh per {@code execute()}, not cached on any {@link AgentSession}, since it must outlive any single one. */
     private final SessionStore sessionStore;
+    private final CheckpointStore checkpointStore;
+    private final Consumer<RunCheckpoint> suspensionListener;
 
     /**
      * Creates a new {@code AgentInstance} with static (non-hot-swappable) wiring.
@@ -167,6 +178,47 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             AraTelemetry telemetry,
             SessionStore sessionStore
     ) {
+        this(config, wiringFactory, memoryFactory, executionPlanner, interceptorChain, telemetry,
+                sessionStore, CheckpointStore.noop());
+    }
+
+    /**
+     * As the canonical constructor above, plus the {@link CheckpointStore} that receives a
+     * snapshot of every run at each iteration boundary (ADR-048 D2). The 7-argument form keeps
+     * {@link CheckpointStore#noop()}, so existing callers behave exactly as before.
+     */
+    public AgentInstance(
+            AgentConfig config,
+            WiringFactory wiringFactory,
+            Function<SessionId, MemoryManager> memoryFactory,
+            ExecutionPlanner executionPlanner,
+            AgentInterceptorChain interceptorChain,
+            AraTelemetry telemetry,
+            SessionStore sessionStore,
+            CheckpointStore checkpointStore
+    ) {
+        this(config, wiringFactory, memoryFactory, executionPlanner, interceptorChain, telemetry,
+                sessionStore, checkpointStore, checkpoint -> { });
+    }
+
+    /**
+     * As the 8-argument form, plus {@code suspensionListener}, told of every run that stops to
+     * wait for an approval, with the checkpoint it can be resumed from (ADR-048 D2). It is what
+     * connects a suspended run to the approval gate; without one a suspended run is only a
+     * checkpoint nobody is watching.
+     */
+    public AgentInstance(
+            AgentConfig config,
+            WiringFactory wiringFactory,
+            Function<SessionId, MemoryManager> memoryFactory,
+            ExecutionPlanner executionPlanner,
+            AgentInterceptorChain interceptorChain,
+            AraTelemetry telemetry,
+            SessionStore sessionStore,
+            CheckpointStore checkpointStore,
+            Consumer<RunCheckpoint> suspensionListener
+    ) {
+        this.suspensionListener = Objects.requireNonNull(suspensionListener, "suspensionListener must not be null");
         this.versionedConfig   = new Versioned<>(Objects.requireNonNull(config, "config must not be null"));
         this.executionPlanner  = Objects.requireNonNull(executionPlanner, "executionPlanner must not be null");
         this.interceptorChain  = Objects.requireNonNull(interceptorChain, "interceptorChain must not be null");
@@ -174,6 +226,7 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
         Objects.requireNonNull(wiringFactory, "wiringFactory must not be null");
         Objects.requireNonNull(memoryFactory, "memoryFactory must not be null");
         this.sessionStore   = Objects.requireNonNull(sessionStore, "sessionStore must not be null");
+        this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore must not be null");
         // Idle TTL comes from the config the agent is born with. Not re-read on
         // reconfigure(): the sweeper is agent-level infrastructure, outside the
         // per-session wiring that ADR-039 hot-swaps.
@@ -532,12 +585,25 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
 
         Dispatched dispatched = dispatchCollaborators(task.taskId(), session, hasInterceptors);
         MemoryManager memoryManager = session.memoryManager();
-        seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
+        Optional<RunCheckpoint> resumed = task.resumeCheckpoint();
+        if (resumed.isPresent() && !strategy.resumable()) {
+            return handleFailure(task.taskId(), session, ExecutionResult.failure(
+                    "Strategy '" + strategy.strategyName() + "' cannot resume a checkpointed run", 0, 0, 0),
+                    Duration.between(startedAt, Instant.now()), dispatched.llm());
+        }
+        if (resumed.isPresent()) {
+            restoreWorkingMemory(memoryManager, resumed.get());
+            task = withVerdicts(task, resumed.get());
+        } else {
+            seedWorkingMemory(memoryManager, config, session, effectiveSystemPrompt, task);
+        }
 
-        ExecutionResult result = strategy.execute(task, dispatched.llm(), memoryManager,
-                dispatched.tools(), config);
+        ExecutionResult result = executeCheckpointed(task, session, config, strategy, dispatched, memoryManager);
 
         Duration elapsed = Duration.between(startedAt, Instant.now());
+        if (result.isAwaitingApproval()) {
+            return handleSuspended(task, session, result, elapsed, dispatched.llm());
+        }
         if (!result.isSuccess()) {
             return handleFailure(task.taskId(), session, result, elapsed, dispatched.llm());
         }
@@ -546,6 +612,39 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
             session.conversationHistory().addTurn(task.input(), result.output(), task.media());
         }
         return handleSuccess(task, session, result, elapsed, dispatched.llm());
+    }
+
+    /**
+     * Runs the strategy with a {@link RunCheckpointer} attached to the task, and removes the
+     * run's checkpoint once the strategy has returned or thrown: a run that ended, whatever
+     * the outcome, has nothing left to resume.
+     *
+     * <p>With the default no-op store nothing is attached: a checkpointer would copy the
+     * working memory at every iteration only to hand it to a store that discards it. The
+     * identity check on {@link CheckpointStore#noop()} is the cheapest way to skip that cost
+     * without adding a method to the SPI just to ask "do you persist?".
+     */
+    private ExecutionResult executeCheckpointed(AgentTask task, AgentSession session, AgentConfig config,
+                                                ExecutionStrategy strategy, Dispatched dispatched,
+                                                MemoryManager memoryManager) {
+        if (checkpointStore == CheckpointStore.noop()) {
+            return strategy.execute(task, dispatched.llm(), memoryManager, dispatched.tools(), config);
+        }
+        RunCheckpointer checkpointer = new RunCheckpointer(checkpointStore, session.sessionId(),
+                task.taskId(), task.input(), strategy.resumable(),
+                (promptTokens, outputTokens) -> estimateCost(promptTokens, outputTokens, config));
+        ExecutionResult result = null;
+        try {
+            result = strategy.execute(checkpointer.attachTo(task), dispatched.llm(), memoryManager,
+                    dispatched.tools(), config);
+            return result;
+        } finally {
+            // A run that stopped to wait for an approval is the one run whose checkpoint must
+            // outlive this call: it is what the decision resumes from.
+            if (result == null || !result.isAwaitingApproval()) {
+                checkpointer.clear();
+            }
+        }
     }
 
     /**
@@ -572,6 +671,44 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
 
     /** The collaborators a single strategy execution runs against. */
     private record Dispatched(LlmClient llm, ToolRegistry tools) {}
+
+    /**
+     * For a run resumed after an approval, carries the decisions on the task so the gate
+     * applies them instead of asking again. A checkpoint taken at an ordinary iteration
+     * boundary waits for nothing and the task is returned as it is.
+     */
+    private static AgentTask withVerdicts(AgentTask task, RunCheckpoint checkpoint) {
+        return checkpoint.pendingApproval() == null
+                ? task
+                : ApprovalVerdicts.of(task.taskId(), checkpoint.pendingApproval(), task.resumeDecisions())
+                        .attachTo(task);
+    }
+
+    /**
+     * Rebuilds the working memory a checkpoint was taken from, in place of {@link
+     * #seedWorkingMemory}: the system prompt, the replayed turns and the task input are already
+     * in it, together with everything the run added since. Anything the session's memory holds
+     * now is dropped first — a resumed run continues the saved conversation, not one grafted
+     * onto whatever the session did meanwhile.
+     *
+     * <p>A tool-call entry gets its {@link ToolCallMetadata} back, because adapters rebuild
+     * native function-calling turns from it; without it a resumed run would send the model a
+     * tool result that no call precedes.
+     */
+    private void restoreWorkingMemory(MemoryManager memoryManager, RunCheckpoint checkpoint) {
+        memoryManager.clearWorkingMemory();
+        for (LlmMessage message : checkpoint.workingMemory()) {
+            boolean isToolCallEntry = "tool".equals(message.role()) || "assistant_tool_call".equals(message.role());
+            if (isToolCallEntry && message.toolCallId() != null && message.toolName() != null) {
+                memoryManager.appendToWorkingMemory(message.role(), message.content(),
+                        new ToolCallMetadata(message.toolCallId(), message.toolName()));
+            } else if (message.hasMedia()) {
+                memoryManager.appendToWorkingMemory(message.role(), message.content(), message.media());
+            } else {
+                memoryManager.appendToWorkingMemory(message.role(), message.content());
+            }
+        }
+    }
 
     /**
      * Seeds working memory for a fresh execution: system prompt, then up to
@@ -761,6 +898,52 @@ public final class AgentInstance implements AraAgent, SessionHistoryAware, RunSt
                 agentId().value(), taskId, result.iterationsDone(), result.tokensUsed());
 
         return response;
+    }
+
+    /**
+     * The run stopped before a tool call a human must approve, and its checkpoint holds
+     * everything needed to continue it. The session is released like after any finished turn —
+     * working memory cleared, state back to {@link AgentState#IDLE} — so nothing stays locked
+     * while nobody has answered; the conversation history is not extended, since the turn has
+     * no answer yet. No {@code after} interceptor hook fires for the same reason: the turn is
+     * not over, it will be reported when it is.
+     */
+    private AgentResponse handleSuspended(AgentTask task, AgentSession session, ExecutionResult result,
+                                          Duration elapsed, LlmClient usedLlm) {
+        AgentConfig config = session.wiring().config();
+        session.stateMachine().transitionTo(AgentState.AWAITING_APPROVAL);
+        session.memoryManager().clearWorkingMemory();
+        session.stateMachine().transitionTo(AgentState.IDLE);
+
+        log.info("Agent [{}] suspended task [{}] after {} iteration(s), awaiting approval requestIds={}",
+                agentId().value(), task.taskId(), result.iterationsDone(), result.awaitingApproval().stream().map(ApprovalRequest::requestId).toList());
+
+        announceSuspension(session, task.taskId());
+
+        return AgentResponse.awaitingApproval(task.taskId(), agentId(), result.awaitingApproval(),
+                        result.iterationsDone(), result.promptTokens(), result.outputTokens(),
+                        costOf(result, config), elapsed, result.steps())
+                .withLlmProvider(resolvedLlmProviderId(usedLlm, config));
+    }
+
+    /**
+     * Tells the listener a run was suspended, handing it the checkpoint as the store holds it —
+     * the durable truth, the same one a restart would read. Called after the session is already
+     * free, because the listener may let an operator answer at once and the resumed run needs
+     * that session. A listener that fails must not fail the suspension: the checkpoint is saved
+     * and a restart will find it.
+     */
+    private void announceSuspension(AgentSession session, String taskId) {
+        try {
+            Optional<RunCheckpoint> checkpoint = checkpointStore.loadLatest(session.sessionId(), taskId);
+            if (checkpoint.isEmpty()) {
+                log.error("Task [{}] was suspended but its checkpoint is not in the store", taskId);
+                return;
+            }
+            suspensionListener.accept(checkpoint.get());
+        } catch (RuntimeException e) {
+            log.error("Announcing the suspension of task [{}] failed: {}", taskId, e.getMessage(), e);
+        }
     }
 
     private AgentResponse handleFailure(String taskId, AgentSession session,

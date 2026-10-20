@@ -56,6 +56,7 @@ class ReasoningOptionsTest {
 
     @Test
     void theEffort_hasTheWordsProvidersExpect() {
+        assertEquals("none", ReasoningEffort.NONE.wireValue());
         assertEquals("low", ReasoningEffort.LOW.wireValue());
         assertEquals("medium", ReasoningEffort.MEDIUM.wireValue());
         assertEquals("high", ReasoningEffort.HIGH.wireValue());
@@ -154,6 +155,19 @@ class ReasoningOptionsTest {
         // Every with*() goes through a copy; the options must survive it.
         assertEquals(ReasoningEffort.HIGH, withOptions.withTemperature(0.5).reasoningEffort());
         assertEquals(ReasoningEffort.HIGH, withOptions.withCompletionSink(c -> { }).reasoningEffort());
+    }
+
+    @Test
+    void withReasoningEffort_changesTheEffortAndNothingElse() {
+        LlmCallContext plain = LlmCallContext.from(agent().primaryLlm(LlmProfile.of("main")).build()).withTemperature(0.0);
+
+        LlmCallContext none = plain.withReasoningEffort(ReasoningEffort.NONE);
+
+        assertEquals(ReasoningEffort.NONE, none.reasoningEffort());
+        assertTrue(none.hasReasoningOptions(), "NONE is an option: the call is built with it");
+        assertEquals(plain.temperature(), none.temperature());
+        assertNull(none.withReasoningEffort(null).reasoningEffort(), "null leaves the choice to the model");
+        assertNull(plain.reasoningEffort(), "the original is not touched");
     }
 
     @Test
