@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -68,6 +69,7 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final ConcurrentHashMap<String, Entry<R>> entries = new ConcurrentHashMap<>();
+    private final List<Consumer<PublishEvent>> publishListeners = new CopyOnWriteArrayList<>();
 
     /** Creates a registry with its own single-thread virtual-thread scheduler for {@link DrainPolicy.Forced} deadlines. */
     public DefaultResourceRegistry(Function<S, R> factory, Consumer<R> closer) {
@@ -183,7 +185,23 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
             entry.lock.unlock();
         }
         if (outcome.toClose() != null) closeQuietly(outcome.toClose());
+        notifyListeners(new PublishEvent(id, outcome.version(), outcome.retiredVersion(), policy));
         return outcome.version();
+    }
+
+    @Override
+    public void addPublishListener(Consumer<PublishEvent> listener) {
+        publishListeners.add(Objects.requireNonNull(listener, "listener must not be null"));
+    }
+
+    private void notifyListeners(PublishEvent event) {
+        for (Consumer<PublishEvent> listener : publishListeners) {
+            try {
+                listener.accept(event);
+            } catch (RuntimeException e) {
+                log.warn("Publish listener failed for '{}' v{}", event.id(), event.version(), e);
+            }
+        }
     }
 
     /**
@@ -225,7 +243,7 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
         entry.currentVersion = newVersion;
 
         R toClose = oldVersion != 0 ? retire(entry, oldVersion, policy) : null;
-        return new PublishOutcome<>(newVersion, toClose);
+        return new PublishOutcome<>(newVersion, oldVersion, toClose);
     }
 
     /**
@@ -252,7 +270,7 @@ public final class DefaultResourceRegistry<S, R> implements ResourceRegistry<S, 
     }
 
     /** Paired with {@link #publishLocked} — see its own javadoc. */
-    private record PublishOutcome<R>(long version, R toClose) {}
+    private record PublishOutcome<R>(long version, long retiredVersion, R toClose) {}
 
     /**
      * P5/U17, 2026-09-23: the timer callback itself only spawns a dedicated virtual thread

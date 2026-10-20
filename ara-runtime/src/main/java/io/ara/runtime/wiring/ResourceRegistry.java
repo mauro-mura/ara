@@ -1,5 +1,6 @@
 package io.ara.runtime.wiring;
 
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -62,4 +63,17 @@ public interface ResourceRegistry<S, R> {
      * @return the new version number
      */
     long publish(String id, S spec, DrainPolicy policy);
+
+    /**
+     * Registers {@code listener} to be told about every subsequent {@link #publish}, after it
+     * has completed and outside the id's lock — so a listener may call back into the registry.
+     * A listener that throws is logged and does not affect the publish or other listeners.
+     * Lets an observer (e.g. an archive of evaluations measured against a model) react to an
+     * urgent {@link DrainPolicy.Forced} retirement without polling.
+     *
+     * @throws UnsupportedOperationException if this registry does not support observation
+     */
+    default void addPublishListener(Consumer<PublishEvent> listener) {
+        throw new UnsupportedOperationException(getClass().getName() + " does not support publish listeners");
+    }
 }

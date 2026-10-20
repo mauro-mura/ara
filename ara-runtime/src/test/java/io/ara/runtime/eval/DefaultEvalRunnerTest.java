@@ -303,6 +303,18 @@ class DefaultEvalRunnerTest {
     }
 
     @Test
+    void aBlockingVerifierThatFailedOneRunOnTheHoldoutIsOverfit_notAPlainReject() {
+        addCase("h1", true, EvalCase.Status.READY, List.of(), "x", "exact_match", Map.of("expected", "ok"));
+        AtomicInteger call = new AtomicInteger();
+        // ok / no / ok → mean 2/3 clears the threshold, but one run failed
+
+        EvalResult r = runner(agent(in -> call.getAndIncrement() % 2 == 0 ? "ok" : "no"))
+                .runHoldoutOnly("spec-A", SUITE, 3);
+
+        assertInstanceOf(Verdict.RejectOverfit.class, r.verdict());
+    }
+
+    @Test
     void aNonBlockingCaseThatFailedOneRunOfThreeDoesNotVeto() {
         addCase("c1", false, EvalCase.Status.READY, List.of(), "x", "exact_match",
                 Map.of("expected", "ok", "blocking", "false"));

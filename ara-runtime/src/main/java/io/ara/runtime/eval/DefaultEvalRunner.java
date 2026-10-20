@@ -336,11 +336,15 @@ public final class DefaultEvalRunner implements EvalRunner {
         // is the worst run, not the mean: a verifier that failed on one run of three has failed, and
         // a mean of 2/3 would let it through while the case is still a flaky one. The mean stays in
         // the message so the reader can tell a case that never passed from one that passed mostly.
+        // On the hold-out partition (run only after the visible suite let the variant through) the
+        // same failure is overfitting, as in D3 below: it fits what it was shown and not what it
+        // was not.
         for (CaseRun run : runs) {
             if (run.blocking() && run.worstRun() < CASE_PASS_THRESHOLD) {
-                return new Verdict.Reject("blocking verifier failed on case " + run.caseId()
-                        + " (worst run " + fmt(run.worstRun()) + ", mean score "
-                        + fmt(run.stats().meanScore()) + ")");
+                return holdout ? new Verdict.RejectOverfit()
+                        : new Verdict.Reject("blocking verifier failed on case " + run.caseId()
+                                + " (worst run " + fmt(run.worstRun()) + ", mean score "
+                                + fmt(run.stats().meanScore()) + ")");
             }
         }
 
