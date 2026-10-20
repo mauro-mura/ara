@@ -83,10 +83,6 @@ public record LlmProfile(
     }
 
     /**
-     * @deprecated kept only as the pre-ADR-039 name for {@link #transportId()}; both
-     *             accessors return the same value.
-     */
-    /**
      * The shape before the reasoning options, kept so every existing direct {@code new LlmProfile(...)}
      * keeps compiling, with the three options unset ({@code null}: "do not mention reasoning to the
      * provider").
@@ -129,6 +125,10 @@ public record LlmProfile(
         return b;
     }
 
+    /**
+     * @deprecated kept only as the pre-ADR-039 name for {@link #transportId()}; both
+     *             accessors return the same value.
+     */
     @Deprecated(forRemoval = false)
     public String modelId() { return transportId; }
 
