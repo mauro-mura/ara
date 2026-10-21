@@ -376,6 +376,27 @@ every caller that builds configs in Java.
 back, and nothing else (it can be binary). Register it with
 `AgentSpecFormats.defaults().with(new MyFormat())`; the agent mapping is not repeated per format.
 
+**Schedules use the same formats.** `AgentScheduleDocument` does for `AgentSchedule`s what
+`AgentSpecDocument` does for agents, to back up a scheduler and restore it elsewhere:
+
+```java
+DocumentFormat json = DocumentFormats.defaults().byId("json");
+AgentScheduleDocument.write(json, scheduler.list(), out);                 // export
+List<AgentScheduleDocument.Entry> entries = AgentScheduleDocument.read(json, in);
+for (var entry : entries) {
+    switch (entry) {
+        case AgentScheduleDocument.Entry.Valid ok -> scheduler.register(ok.schedule());
+        case AgentScheduleDocument.Entry.Invalid bad -> log.warn(bad.error());   // the rest still load
+    }
+}
+```
+
+A format that should serve both agents and schedules implements `AgentSpecFormat`; one for
+schedules only can implement `DocumentFormat`. Version 2 of the document is strict (unknown
+fields, wrong types and a cron expression that does not parse are errors with the field path);
+exports written by the first version (`"version": 1`) are still read with the rules they were
+written under.
+
 **Agents that live in another system** (a database with its own schema, say) are imported by
 mapping their columns onto a document tree and calling `AgentSpecDocument.decode(JsonNode)`:
 you get the type checking, unknown-field detection and error paths without touching

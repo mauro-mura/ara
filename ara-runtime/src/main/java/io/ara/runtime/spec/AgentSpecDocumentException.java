@@ -1,8 +1,9 @@
 package io.ara.runtime.spec;
 
 /**
- * An agent document that cannot be turned into an {@code AgentSpec} (or an {@code AgentSpec}
- * that cannot be written as a document), with the path of the offending field.
+ * A document that cannot be turned into its domain type (an agent document into an
+ * {@code AgentSpec}, a schedule document into {@code AgentSchedule}s), or the reverse, with the
+ * path of the offending field.
  *
  * <p>An {@link IllegalArgumentException} subclass on purpose: every domain constructor the
  * decoder ends up calling ({@code LlmProfile}, {@code ExecutionConfig}, ...) already rejects

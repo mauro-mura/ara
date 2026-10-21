@@ -17,7 +17,9 @@ import java.io.OutputStream;
 import java.util.Set;
 
 /**
- * The JSON {@link AgentSpecFormat}: UTF-8, pretty-printed, one trailing newline.
+ * The JSON {@link AgentSpecFormat}: UTF-8, pretty-printed, one trailing newline. It is a
+ * {@link io.ara.core.spec.DocumentFormat} too, so the same instance serves every document
+ * type (agents, schedules), not only agents.
  *
  * <p>Two parser settings are about not trusting a hand-edited file. A repeated key is an
  * error (JSON parsers usually keep the last one, so a duplicated {@code "tools"} would
