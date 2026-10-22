@@ -143,8 +143,18 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
             AgentConfig config) {
 
         // ── Resolve the retriever for this agent, then retrieve once per task ──
+        // A router that cannot resolve a retriever is a wiring error and still fails the task;
+        // a retriever that fails at query time (index unavailable, I/O error, ...) only costs
+        // the context: the delegate runs without it, as it would on an empty result.
         Retriever retriever = router.select(config.retrieverId());
-        List<RetrievedChunk> chunks = retriever.retrieve(task.input(), maxChunks);
+        List<RetrievedChunk> chunks;
+        try {
+            chunks = retriever.retrieve(task.input(), maxChunks);
+        } catch (RuntimeException e) {
+            log.warn("[{}] Retrieval failed for task [{}], continuing without context",
+                    strategyName(), task.taskId(), e);
+            chunks = List.of();
+        }
         log.debug("[{}] Retrieved {} chunk(s) for task [{}]",
                 strategyName(), chunks.size(), task.taskId());
 
@@ -168,10 +178,15 @@ public final class RetrievalAugmentedStrategy implements ExecutionStrategy {
         for (int i = 0; i < chunks.size(); i++) {
             RetrievedChunk c = chunks.get(i);
             sb.append("[").append(i + 1).append("] ")
-              .append("Source: ").append(c.title())
-              // Locale.ROOT: the default-locale overload renders 0.95 as "0,95" on a
-              // comma-decimal JVM (it_IT, de_DE, ...), and this string goes into a prompt.
-              .append(" (score=").append(String.format(Locale.ROOT, "%.2f", c.score())).append(")\n")
+              .append("Source: ").append(c.title());
+            // An unscored chunk shows no score: the rank [i] already carries the order, and a
+            // placeholder number would read to the model as a real relevance value.
+            if (c.hasScore()) {
+                // Locale.ROOT: the default-locale overload renders 0.95 as "0,95" on a
+                // comma-decimal JVM (it_IT, de_DE, ...), and this string goes into a prompt.
+                sb.append(" (score=").append(String.format(Locale.ROOT, "%.2f", c.score())).append(")");
+            }
+            sb.append("\n")
               .append(c.content())
               .append("\n\n");
         }
